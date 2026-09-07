@@ -1,6 +1,6 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
-import { NormalIntakeInbox, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { NormalIntakeInbox, installationTombstoneKey, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
@@ -85,6 +85,7 @@ import {
   RUNNER_BOX_VCPU,
   VCPU_KEY_TTL_S,
   VCPU_WARN_THRESHOLDS,
+  canonicalInstallationId,
   installationIdForRepo,
   tenantPatSecretForRepo,
   installationAllowlistArmed,
@@ -626,7 +627,8 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     jobId: string, handle: string, runnerName: string, runnerId: number | undefined,
     jitAttempt: number, repo: string, installationId: string, preparationId?: string,
   ): Promise<boolean> {
-    if (!jobId || !handle || !runnerName || !Number.isSafeInteger(jitAttempt) || jitAttempt < 1) return false;
+    if (!jobId || !handle || !runnerName || !Number.isSafeInteger(jitAttempt) || jitAttempt < 1
+      || (installationId !== "" && canonicalInstallationId(installationId) !== installationId)) return false;
     return this.spawnClaimTx(async storage => {
       const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
       if (!claim || claim.phase !== "active" || claim.providerIdentity !== runnerName) return false;
@@ -1504,6 +1506,24 @@ export class ContainmentDO extends DurableObject<Env> {
     return true;
   }
 
+  /**
+   * A deletion tombstone is a terminal outcome for a head that never received
+   * an effect permit.  The same EFFECT_COMMITTED → acknowledge recovery path
+   * makes a crash between these two writes deterministic without issuing work.
+   */
+  async terminalizeTombstonedEvent(eventId: string, owner: string, epoch: number): Promise<boolean> {
+    return this.tx(async (s) => {
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
+      const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
+      if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, Date.now())
+        || event.state !== "CLAIMED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch
+        || event.effect_permit !== null || canonicalInstallationId(event.installation_id) !== event.installation_id) return false;
+      if ((await s.get(installationTombstoneKey(event.installation_id))) === undefined) return false;
+      await s.put(containmentEventKey(eventId), { ...event, state: "EFFECT_COMMITTED" });
+      return true;
+    });
+  }
+
   async releaseLease(owner: string, epoch: number): Promise<void> {
     await this.tx(async (s) => {
       const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
@@ -1862,8 +1882,20 @@ function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
 }
 
 async function installationIsTombstoned(env: Env, installationId: string): Promise<boolean> {
-  if (!installationId || !env.CONTAINMENT) return false;
+  if (canonicalInstallationId(installationId) !== installationId || !env.CONTAINMENT) return false;
   return containmentAuthority(env).installationTombstoned(installationId);
+}
+
+function resolveWebhookInstallationId(
+  value: unknown,
+  repo: string,
+  repositoryMap: string | undefined,
+): { installationId: string; invalid: boolean } {
+  if (value !== undefined && value !== null) {
+    const installationId = canonicalInstallationId(value);
+    return installationId ? { installationId, invalid: false } : { installationId: "", invalid: true };
+  }
+  return { installationId: installationIdForRepo(repositoryMap, repo), invalid: false };
 }
 
 // T4-W2 consumes T4-W1's immutable ContainmentDO attribution authority. The
@@ -2596,9 +2628,11 @@ async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boole
   // success) and uses the installation captured at mint time.
   await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId);
   const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
-  try { await container.teardown(); } catch { /* confirm below; an early destroy may race provisioning */ }
+  // A failed teardown is not evidence that the exact handle is down. Retain the
+  // intent for cron even if a follow-up liveness probe happens to say false.
+  try { await container.teardown(); } catch { return false; }
   let alive: boolean;
-  try { alive = await container.isAlive(); } catch { alive = false; }
+  try { alive = await container.isAlive(); } catch { return false; }
   if (alive) return false;
   // Retain the intent until EVERY local release has acknowledged.  A release
   // outage remains in the cron retry set instead of becoming an unowned leak.
@@ -4929,6 +4963,16 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
+      const tombstoned = await authority.installationTombstoned(event.installation_id);
+      // A permit may have crossed into an external effect before deletion. Keep
+      // that head on the proof-bound recovery path below; a permit-free head is
+      // terminalized entirely inside the authority and can never reach a side
+      // effect. A crash after terminalization is recovered by the committed leg.
+      if (tombstoned && !event.effect_permit) {
+        if (!(await authority.terminalizeTombstonedEvent(event.event_id, owner, lease.epoch))) break;
+        if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
+        continue;
+      }
       if (event.effect_permit) {
         const proof = await evidenceDigest(env, event);
         if (!proof || !(await authority.recoverEffectCommitted(event.effect_id, owner, lease.epoch, proof))) break;
@@ -4936,7 +4980,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
-      if (await authority.installationTombstoned(event.installation_id)) break;
+      if (tombstoned) break;
       if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
         && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
       if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
@@ -5321,10 +5365,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         let installation: { action?: unknown; installation?: { id?: unknown } };
         try { installation = JSON.parse(raw) as typeof installation; }
         catch { return json({ error: "invalid installation payload" }, 400); }
-        if (installation.action !== "deleted" || !/^\d{1,20}$/.test(String(installation.installation?.id ?? ""))) {
+        const installationId = canonicalInstallationId(installation.installation?.id);
+        if (installation.action !== "deleted" || !installationId) {
           return json({ error: "invalid installation deletion" }, 400);
         }
-        const installationId = String(installation.installation!.id);
         try {
           const bodySha = await sha256Hex(raw);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
@@ -5390,8 +5434,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         const identity = normalizeRedriveIdentity(rawRepo, jobId);
         if (!identity) return json({ error: "no repository in payload" }, 400);
         const repo = identity.repo;
-        let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
-        if (!installationId) installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+        const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+        if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+        const installationId = resolvedInstallation.installationId;
         if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
           && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
           logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
@@ -5403,6 +5448,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
           if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
           const authority = containmentAuthority(env);
+          if (installationId && await authority.installationTombstoned(installationId)) {
+            return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
+          }
           const bodySha = await sha256Hex(rawBytes);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "");
           const eventId = delivery || await sha256Hex(`containment:v1\n${jobId}\n${evt.action}\n${bodySha}`);
@@ -5605,10 +5653,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // limiter entirely — caught by the I1 regression test when this block was
       // first reordered.
       // Resolve the server authorization identity before durable admission.
-      let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
-      if (!installationId) {
-        installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
-      }
+      const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+      if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+      const installationId = resolvedInstallation.installationId;
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         logEvent("info", "installation_id_missing", { jobId, repo });
       }
@@ -6056,7 +6103,11 @@ export async function redriveOrphanedJobs(
     try {
       const candidates = await discoverAuthorizationCandidates(env);
       if (candidates === null) return;
-      registryRepos = await confirmInstallationRepositories(env, candidates, now);
+      const liveCandidates: ReconcilerRepository[] = [];
+      for (const candidate of candidates) {
+        if (!(await installationIsTombstoned(env, candidate.installationId))) liveCandidates.push(candidate);
+      }
+      registryRepos = await confirmInstallationRepositories(env, liveCandidates, now);
     } catch (e) {
       logEvent("error", "reconciler_registry_membership_failed", { error: (e as Error).message });
       return;
@@ -6070,6 +6121,11 @@ export async function redriveOrphanedJobs(
   if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
   for (const candidate of candidates) {
     const repo = candidate.repo;
+    const redriveInstallationId = candidate.installationId
+      ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+    // Do not even mint an installation token or list GitHub after deletion.
+    // A tombstone wins before every redrive reservation, handoff and KV write.
+    if (redriveInstallationId && await installationIsTombstoned(env, redriveInstallationId)) continue;
     let scanEnv: Env = env;
     if (candidate.installationId) {
       // Registry entries carry the only installation identity accepted for this
@@ -6131,8 +6187,7 @@ export async function redriveOrphanedJobs(
         if (admitted.status !== "reserved" || !admitted.reservation) continue;
         reservation = admitted.reservation;
       }
-      const reInstallationId = candidate.installationId
-        ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, redriveRepo);
+      const reInstallationId = redriveInstallationId;
       // ── Age-gate the force-release (2026-08-24) ──────────────────────────────
       // "queued ≥ 90 s with no runner" is ALSO what a healthy-but-slow spawn looks
       // like: the placement machinery itself waits PLACEMENT_CONFIRM_GRACE_MS
@@ -6327,7 +6382,7 @@ export async function retryOrphanedSpawns(
       const expectedInstallationId = identity
         ? installationIdForRepo(env.REPO_INSTALLATION_MAP, identity.repo)
         : "";
-      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || !/^[1-9][0-9]*$/.test(orphan.installationId) || (expectedInstallationId !== "" && expectedInstallationId !== orphan.installationId)) continue;
+      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || canonicalInstallationId(orphan.installationId) !== orphan.installationId || (expectedInstallationId !== "" && expectedInstallationId !== orphan.installationId)) continue;
       // From this point onward, every effectful seam uses the one normalized
       // identity. Keep the orphan's installation id byte-for-byte; no map or
       // first-party fallback is ever substituted into this retry.
@@ -6342,6 +6397,9 @@ export async function retryOrphanedSpawns(
     // KV is only a projection. Read the durable count before placement checks
     // or the cap decision, so stale KV cannot reset the bound.
     if (!rec) continue;
+    // This must precede placement verification, retry epoch writes, reservation
+    // acquisition and every provider/GitHub retry seam.
+    if (await installationIsTombstoned(env, rec.installationId)) continue;
     const durableAttempts = await readRetryAttempts(env, jobId);
     if (durableAttempts === null) continue;
     rec = { ...rec, attempts: Math.max(rec.attempts, durableAttempts) };
