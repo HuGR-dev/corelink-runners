@@ -77,7 +77,7 @@ vi.mock("@cloudflare/containers", () => {
   };
 });
 
-import worker, { sweepGhostContainers, type Env } from "../src/index";
+import worker, { retryActiveSpawnTeardowns, sweepGhostContainers, type Env } from "../src/index";
 import { parseRunnerBinding } from "../src/lib";
 import { getContainer } from "@cloudflare/containers";
 
@@ -392,6 +392,33 @@ describe("ghost containers · cell 1 — a superseded start attempt is cancelled
     const first = startedRunnerBoxes()[0];
     expect((await env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global")).readActiveAttempt("3005"))?.handle).toBe(first.handle);
     expect(kv.store.has(`ghost:${first.handle}`)).toBe(true);
+  });
+
+  it("a failed runner DELETE retains A; a later confirmed DELETE reaps it once", async () => {
+    const kv = fakeKv();
+    const metrics = fakeMetrics();
+    const env = baseEnv(kv, metrics);
+    const ctx = makeCtx();
+    deleteStatus = 500;
+    startBehavior = async () => { throw new Error("start lost its response"); };
+
+    await queuedWebhook(env, ctx, { jobId: "3006", repo: "acme/api", installationId: 555 });
+    await drain(ctx);
+
+    const first = startedRunnerBoxes()[0];
+    const slots = env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
+    expect(startedRunnerBoxes()).toHaveLength(1);
+    expect(jitCalls()).toHaveLength(1);
+    expect((await slots.readActiveAttempt("3006"))?.handle).toBe(first.handle);
+    expect((await slots.readSpawnClaim("3006"))?.providerIdentity).toBe((await slots.readActiveAttempt("3006"))?.runnerName);
+
+    deleteStatus = 204;
+    const deletesBeforeRecovery = runnerDeletes().length;
+    expect(await retryActiveSpawnTeardowns(env)).toBe(1);
+    expect(await slots.readActiveAttempt("3006")).toBeNull();
+    expect(await retryActiveSpawnTeardowns(env)).toBe(0);
+    expect(jitCalls()).toHaveLength(1);
+    expect(runnerDeletes()).toHaveLength(deletesBeforeRecovery + 1);
   });
 });
 
