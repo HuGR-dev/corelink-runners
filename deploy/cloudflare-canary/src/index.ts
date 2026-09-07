@@ -14,6 +14,7 @@
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
+import { sendPageAck } from "./page_ack";
 import { parseProbeFlag } from "./config";
 export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
@@ -44,6 +45,17 @@ export interface Env {
   RESEND_API_KEY?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
+
+  // Optional public T6-W15 page-ACK endpoint. The canary only transports the
+  // frozen HTTP contract; signing/authentication remains owned by the monitor
+  // and the configured on-call credential is never logged.
+  PAGE_ACK_URL?: string;
+  PAGE_ACK_AUTHORIZATION?: string;
+  PAGE_ACK_INCIDENT_ID?: string;
+  PAGE_ACK_PAGE_ID?: string;
+  PAGE_ACK_DELIVERY_ID?: string;
+  PAGE_ACK_DESTINATION?: string;
+  PAGE_ACK_PAYLOAD?: string;
 
   // ── Tunables (vars) ─────────────────────────────────────────────────────────
   ALERT_COOLDOWN_MINUTES?: string; // default 30 — one incident won't email each tick
@@ -258,6 +270,12 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   if (toSend.length > 0) {
     const res = await sendAlert(env, toSend);
     sendSummary = `${toSend.length} alert(s), sent=${res.sent}${res.reason ? ` (${res.reason})` : ""}`;
+    if (res.sent) {
+      const ack = await sendPageAck(env, toSend, now);
+      if (ack.attempted) {
+        sendSummary += `, page_ack=${ack.sent ? "sent" : "failed"}`;
+      }
+    }
   }
 
   const healthSummary = fabricHealth.skipped
