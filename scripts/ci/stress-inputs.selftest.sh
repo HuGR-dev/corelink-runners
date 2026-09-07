@@ -27,8 +27,12 @@ expect_bad() {
 
 expect_ok 1 1
 expect_ok 100 300
-malicious_count=$(printf '1; touch %s\n`touch %s` "$(%s)"' "$sentinel" "$sentinel" "$sentinel")
-malicious_hold=$(printf '25; touch %s\n`touch %s` "$(%s)"' "$sentinel" "$sentinel" "$sentinel")
+literal_dollar='$'
+literal_tick='`'
+malicious_count=$(printf '1; touch %s\n%s touch %s%s "%s(%s)"' \
+  "$sentinel" "$literal_tick" "$sentinel" "$literal_tick" "$literal_dollar" "$sentinel")
+malicious_hold=$(printf '25; touch %s\n%s touch %s%s "%s(%s)"' \
+  "$sentinel" "$literal_tick" "$sentinel" "$literal_tick" "$literal_dollar" "$sentinel")
 expect_bad "$malicious_count" 25 malicious-count
 expect_bad 40 "$malicious_hold" malicious-hold
 expect_bad '' 25 blank-count

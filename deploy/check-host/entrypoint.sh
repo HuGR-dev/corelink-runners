@@ -146,20 +146,8 @@ clw hydrate --manifest-digest "$TOOLCHAIN_DIGEST" "$TOOLCHAIN_DIR"
 # wrapper so the ephemeral auth file can be removed on every exit path.
 # The exec-server listens on port 8080 (C4 defaultPort).
 # ---------------------------------------------------------------------------
-forward_shutdown() {
-    if [ -n "${EXEC_SERVER_PID:-}" ]; then
-        kill -TERM "$EXEC_SERVER_PID" 2>/dev/null || true
-        wait "$EXEC_SERVER_PID" 2>/dev/null || true
-    fi
-    cleanup_auth_file
-    case "${1:-TERM}" in
-        INT) exit 130 ;;
-        *) exit 143 ;;
-    esac
-}
-
-trap 'forward_shutdown INT' INT
-trap 'forward_shutdown TERM' TERM
+trap 'if [ -n "${EXEC_SERVER_PID:-}" ]; then kill -TERM "$EXEC_SERVER_PID" 2>/dev/null || true; wait "$EXEC_SERVER_PID" 2>/dev/null || true; fi; cleanup_auth_file; exit 130' INT
+trap 'if [ -n "${EXEC_SERVER_PID:-}" ]; then kill -TERM "$EXEC_SERVER_PID" 2>/dev/null || true; wait "$EXEC_SERVER_PID" 2>/dev/null || true; fi; cleanup_auth_file; exit 143' TERM
 /usr/local/bin/corelink-check-exec-server &
 EXEC_SERVER_PID=$!
 set +e
