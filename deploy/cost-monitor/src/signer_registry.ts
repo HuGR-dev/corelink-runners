@@ -702,9 +702,18 @@ export class DynamoSigningCustody implements SigningCustody {
     if (record.role !== "manifest" && record.role !== "recovery" && record.role !== "page-ack")
       throw new RegistryIntegrityError("custody role invalid");
     const id = await this.o.identities.resolve(record.keyId, record.epoch, record.role);
+    if (
+      id.role !== record.role ||
+      id.keyId !== record.keyId ||
+      id.epoch !== record.epoch ||
+      id.keyArn !== record.keyArn
+    )
+      throw new RegistryIntegrityError("custody identity mismatch");
     return new (await import("./acks.js")).AwsKmsSigner({
       client: this.o.kms,
-      identity: { ...id, keyArn: record.keyArn },
+      // KMS validation must use the registered identity unchanged.  A custody
+      // row can authorize that identity, never replace its configured ARN.
+      identity: id,
     });
   }
 }
