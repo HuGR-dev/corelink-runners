@@ -12,18 +12,22 @@
       "work_packages": 14,
       "scope": ["T2-W2b", "T2-W4", "T2-W6", "T4-W1", "T4-W2", "T3-W3", "T3-W1", "T3-W2", "T8-W1", "T8-W3", "T3-W14", "T3-W9", "T8-W5", "T8-W2"],
       "dispatchability": "blocked: canonical DAG remains NOT FROZEN / quiet count 0; scope freeze grants no dispatch authority",
+      "gate_evidence": [
+        "At 265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7, root-reported focused source proof: T4-W1 19/19 plus typecheck PASS; T4-W2 11/11; T3-W3 18/18 plus typecheck PASS; T3-W1 Rust 40/40 plus Worker 41/41; T8-W1 15/15; T3-W14 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21; T8-W5 18/18; T8-W2 31/31.",
+        "Read-only hygiene package is staged at /tmp/corelink-b2-hygiene.T8Ay9K; it is contextual evidence only and grants no delivery or quiet-round credit."
+      ],
       "wp_status": {
         "T4-W1": "source_done; external/live deployment, installation/PAT mapping and guard evidence remain",
         "T4-W2": "source_done; paired billing composition is accepted; sprint and production gates remain",
         "T3-W3": "source_done; live owner gate remains",
-        "T3-W1": "source_done and predecessor-ready; global dispatch gate still blocks action",
-        "T3-W2": "code_integrated; local lifecycle work remains RED on F007, including authoritative cancellation/generation and its later T3-W16 linkage",
-        "T8-W1": "partial; blocked by T3-W2/F007",
+        "T3-W1": "source_done and predecessor-ready (81 focused checks); global dispatch gate still blocks action",
+        "T3-W2": "code_integrated; F007 requires focused acceptance/evidence for authoritative fenced ContainmentDO redrive and three lifecycle permutations; T3-W16 is Sprint 3 preventive hardening, not a B2 predecessor",
+        "T8-W1": "source_done after T3-W2/F007 predecessor composition; focused proof is 15/15",
         "T8-W3": "partial; real remaining work is atomic claim plus required-mint proof",
-        "T3-W14": "source_present; RetryEpochAuthority and focused tests are in baseline, but canonical ledger/evidence validation remains",
+        "T3-W14": "source_done; RetryEpochAuthority and focused tests are in baseline (21/21), pending predecessor composition",
         "T3-W9": "backlog; real remaining work is spawn durability and O-APP",
-        "T8-W5": "source_done; blocked by T3-W9, F006/F008 and live qualification",
-        "T8-W2": "source_done; blocked by T8-W5 and the T8-W6 live refusal proof",
+        "T8-W5": "source_done (18/18); blocked by T3-W9, F006/F008 and live qualification",
+        "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
         "T2-W2b": "external/live blocked: O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
         "T2-W4": "external/live blocked: T2-W2b and latest-image ship evidence absent",
         "T2-W6": "external/live blocked: O1/T2-W2b; runbook and evidence absent"
@@ -32,8 +36,8 @@
   },
   "item_count_summary": {
     "historical_recorded_delivered": 16,
-    "nonhistorical_implementation_complete": 16,
-    "partial": 6,
+    "nonhistorical_implementation_complete": 18,
+    "partial": 4,
     "unknown_backlog": 32,
     "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
   },
@@ -1001,8 +1005,8 @@
         "T3-W1",
         "T7-W4b"
       ],
-      "next_action": "Code is integrated, but this WP remains RED: close F007 authoritative cancellation/generation lifecycle behavior and preserve the later T3-W16 linkage; no ambiguous KV value may delete/release.",
-      "blockers": ["F-20260905-007", "T3-W16 later provider-cancellation linkage"],
+      "next_action": "Code is integrated. Close F007 with focused acceptance/evidence for fenced ContainmentDO redrive: KV reaper is diagnostic-only and teardownCompletedRunner confirms isAlive=false before slot release. Cover the three lifecycle permutations; no ambiguous KV value may delete/release. T3-W16 is later preventive hardening.",
+      "blockers": ["F-20260905-007"],
       "commits": [
         "1ef55b33260fbb722c4094b89a859be9c1b0c406",
         "6496cb3578be0b5c127d248b5341aaa4146699f5"
@@ -1019,12 +1023,12 @@
       "id": "T8-W1",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "wp_t8_w1",
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "Local A3.14/A3.15/A3.16 evidence is verified. Keep the whole work package partial pending T3-W2 and F007-dependent lifecycle authority; this is not whole-WP approval.",
+      "next_action": "Focused source proof is 15/15. The package becomes source-ready after T3-W2/F007 predecessor composition; delivery remains blocked by the sprint gate.",
       "blockers": ["T3-W2", "F-20260905-007"],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
@@ -1033,10 +1037,10 @@
         "ec10581e36c139c058587d10262cf0963313c72c"
       ],
       "review": {
-        "status": "partial",
+        "status": "approved",
         "commit": "ec10581e36c139c058587d10262cf0963313c72c",
         "evidence": [
-          "A3.14/A3.15/A3.16 local evidence accepted; A3.15 is the paired engine/Worker control wire. This is not whole-T8-W1 approval."
+          "A3.14/A3.15/A3.16 local evidence accepted; A3.15 is the paired engine/Worker control wire. Focused source proof at 265557bf is 15/15; predecessor composition remains required."
         ]
       },
       "evidence": [
@@ -1077,12 +1081,12 @@
       "id": "T3-W14",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T8-W3"
       ],
-      "next_action": "RetryEpochAuthority, client wiring and focused retry-epoch tests are present at the B2 baseline (source 28683b347c119b90fed8da4c40e770853786c43d). Validate canonical ledger/evidence and focused acceptance only after predecessors; no delivery credit.",
+      "next_action": "RetryEpochAuthority, client wiring and focused retry-epoch tests are present at the B2 baseline (source 28683b347c119b90fed8da4c40e770853786c43d); focused source proof is 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21. Pending predecessor composition; no delivery credit.",
       "blockers": [],
       "commits": ["28683b347c119b90fed8da4c40e770853786c43d"],
       "review": {
@@ -1123,7 +1127,7 @@
       "dependencies": [
         "T3-W9"
       ],
-      "next_action": "F008/T8-W5 source criteria are accepted; preserve prepared state and no delivery credit. Remaining production gates are three live 75-second CAS runs, private inventory qualification (137 active unknown and one invalid metadata row), and production migration/key qualification.",
+      "next_action": "F008/T8-W5 source criteria are accepted (focused proof 18/18); preserve prepared state and no delivery credit. Remaining production gates are three live 75-second CAS runs, private inventory qualification (137 active unknown and one invalid metadata row), and production migration/key qualification.",
       "blockers": ["T3-W9", "F-20260905-006", "F-20260905-008", "live qualification"],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
@@ -1164,7 +1168,7 @@
       "dependencies": [
         "T8-W5"
       ],
-      "next_action": "A3.13 source criteria accepted; retain prepared state and no delivery credit. T8-W5 and the three live 75-second refusal proofs owned by T8-W6 remain blocking.",
+      "next_action": "A3.13 source criteria accepted (focused proof 31/31); retain prepared state and no delivery credit. T8-W5 and the three live 75-second refusal proofs owned by T8-W6 remain blocking.",
       "blockers": ["T8-W5", "T8-W6 live refusal proof"],
       "commits": [
         "68221dff4a65ef4b05c39ef094b735c7ec68e23b",
@@ -2309,15 +2313,15 @@
       "severity": "high",
       "owner": "root",
       "blocks_delivery": true,
-      "summary": "Stale claim cleanup lacks authoritative provider cancellation and generation-fenced release.",
+      "summary": "F007 needs focused acceptance/evidence that the authoritative ContainmentDO redrive remains generation-fenced through release.",
       "reproduction": "Candidate1ef55b3 reapStaleSpawnClaims treats null/malformed timestamp plus missing KV handle as safe absence, deletes mutable job claim and releases slot. A late provider start or concurrent replacement claim violates capacity/ownership.",
-      "acceptance": "Unknown/null/corrupt/stale KV never authorizes deletion or slot release. A3.12 stale-claim success must bind exact durable generation and confirmed provider cancellation; concurrent replacement retains its claim and slot. Restart and late-materialization tests prove no duplicate and no capacity release from ambiguous absence. Link T3-W16/F005 provider cancellation integration without moving this Sprint2 A3.12 acceptance to green.",
+      "acceptance": "Unknown/null/corrupt/stale KV never authorizes deletion or slot release. A3.12 stale-claim success uses the authoritative, fenced ContainmentDO redrive; the KV reaper is diagnostic-only and teardownCompletedRunner confirms isAlive=false before slot release. The three focused lifecycle permutations must prove concurrent replacement retains its claim and slot, restart/late materialization does not duplicate, and ambiguous absence never releases capacity. T3-W16/F005 provider-cancellation linkage is Sprint 3 preventive hardening, not a prerequisite to B2 acceptance.",
       "commits": [
         "6496cb3578be0b5c127d248b5341aaa4146699f5"
       ],
       "evidence": [
         "Independent read-only review of1ef55b33260fbb722c4094b89a859be9c1b0c406; root inspected production function.",
-        "Root reviewed diagnostic-only mitigation; author3 focused lifecycle tests passed. Full authoritative reaping remains unresolved."
+        "Root decision: ContainmentDO redrive is authoritative/fenced, KV reaper is diagnostic-only, and teardownCompletedRunner confirms isAlive=false before release. Required remaining evidence is the three focused lifecycle permutations; T3-W16 is future hardening."
       ],
       "state": "open",
       "historical_sprint": 2
