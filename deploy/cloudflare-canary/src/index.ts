@@ -14,6 +14,7 @@
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
+import { sendPageDelivery } from "./page_ack";
 import { parseProbeFlag } from "./config";
 export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
@@ -44,6 +45,14 @@ export interface Env {
   RESEND_API_KEY?: string;
   ALERT_EMAIL_TO?: string;
   ALERT_EMAIL_FROM?: string;
+
+  // Optional human page link/correlation. The canary never calls this route.
+  PAGE_URL?: string;
+  PAGE_INCIDENT_ID?: string;
+  PAGE_ID?: string;
+  PAGE_DELIVERY_ID?: string;
+  PAGE_DESTINATION?: string;
+  PAGE_PAYLOAD?: string;
 
   // ── Tunables (vars) ─────────────────────────────────────────────────────────
   ALERT_COOLDOWN_MINUTES?: string; // default 30 — one incident won't email each tick
@@ -258,6 +267,12 @@ export async function runCycle(env: Env, now: number): Promise<string> {
   if (toSend.length > 0) {
     const res = await sendAlert(env, toSend);
     sendSummary = `${toSend.length} alert(s), sent=${res.sent}${res.reason ? ` (${res.reason})` : ""}`;
+    if (res.sent) {
+      const page = await sendPageDelivery(env, toSend, now);
+      if (page.attempted) {
+        sendSummary += `, page_delivery=${page.sent ? "recorded" : "failed"}`;
+      }
+    }
   }
 
   const healthSummary = fabricHealth.skipped
