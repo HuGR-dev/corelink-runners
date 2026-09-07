@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createSignerManifest, signerManifestDigest, verifySignerManifest, type SignerRotationManifest } from "./signer_manifest.js";
 import type { AsyncSigner, PublicSigningIdentity } from "./acks.js";
 import type { AuditReceipt, DurableAuditLog } from "./evidence_log.js";
+import type { JournalRecord } from "./journal.js";
 import type { CurrentCheckpointWitness } from "./witness.js";
 import type { TrustedClock } from "./trusted_time.js";
 import type { MonitorStateStore } from "./state.js";
@@ -20,7 +21,7 @@ export interface ManifestProposal {
 }
 export interface RegistrySnapshot { manifest:SignerRotationManifest; manifestDigest:string; storeVersion:number; activationReceipt:AuditReceipt; highWater:{generation:number;auditSequence:number;witnessRoot:string} }
 export interface SignerAuthorization { manifest:SignerRotationManifest; manifestDigest:string; identity:PublicSigningIdentity }
-export interface RegistryOptions { store:MonitorStateStore; audit:DurableAuditLog; witness:CurrentCheckpointWitness; clock:TrustedClock; nonce:FreshNonceSource; custody:SigningCustody; revocations:RevocationAuthority; identityDirectory:IdentityDirectory; namespace:string; monitorRearmTupleDigest:string }
+export interface RegistryOptions { store:MonitorStateStore; audit:DurableAuditLog & { read(receipt: AuditReceipt["journalReceipt"]): Promise<JournalRecord> }; witness:CurrentCheckpointWitness; clock:TrustedClock; nonce:FreshNonceSource; custody:SigningCustody; revocations:RevocationAuthority; identityDirectory:IdentityDirectory; namespace:string; monitorRearmTupleDigest:string }
 export class RegistryIntegrityError extends Error { override readonly name="RegistryIntegrityError" }
 const ZERO="0".repeat(64); const HEX=/^[0-9a-f]{64}$/; const HEAD_SUFFIX=":signer-registry:head";
 const validText=(v:unknown):v is string=>typeof v==="string"&&v.length>0&&v.length<=256&&v.trim()===v;
@@ -36,7 +37,7 @@ export class CryptoNonceSource implements FreshNonceSource { next():string{retur
 export class SignerRegistryAuthority {
  private readonly o:RegistryOptions; private readonly headKey:string;
  constructor(options:RegistryOptions){ if(!options.store||!options.audit||!options.witness||!options.clock||!options.nonce||!options.custody||!options.revocations||!options.identityDirectory||!validText(options.namespace)||!digest(options.monitorRearmTupleDigest)) throw new TypeError("invalid registry configuration"); this.o=options; this.headKey=`${options.namespace}${HEAD_SUFFIX}`; }
- private async receiptPayload(receipt:AuditReceipt, expected:unknown):Promise<void>{ await this.o.audit.verify(receipt); const journal=(this.o.audit as unknown as {journal?:{read(r:unknown):Promise<{payload:unknown}>}}).journal; if(journal){const record=await journal.read(receipt.journalReceipt);if(!same(record.payload,expected))throw new RegistryIntegrityError("audit payload mismatch");} }
+ private async receiptPayload(receipt:AuditReceipt, expected:unknown):Promise<void>{ await this.o.audit.verify(receipt); const record=await this.o.audit.read(receipt.journalReceipt); if(!same(record.payload,expected))throw new RegistryIntegrityError("audit payload mismatch"); }
  private async revocation(d:string):Promise<RevocationRecord>{if(!digest(d))throw new RegistryIntegrityError("invalid revocation digest");const r=await this.o.revocations.read(d);if(!r||r.version!=="1"||r.digest!==d||!r.receipt)throw new RegistryIntegrityError("invalid revocation record");await this.receiptPayload(r.receipt,{type:"REVOCATION_RECORD",digest:d,entries:r.entries});return r;}
  private async validateHead(stored:Awaited<ReturnType<MonitorStateStore["get"]>>):Promise<RegistrySnapshot>{if(!stored)throw new RegistryIntegrityError("registry has no manifest");const v=stored.value as any;if(!v||v.version!=="1"||!positive(v.generation)||!digest(v.manifestDigest)||!v.manifest||!v.activationReceipt||!positive(v.auditSequence)||!digest(v.auditRoot)||!digest(v.witnessRoot))throw new RegistryIntegrityError("malformed registry head");if(v.manifest.manifest_generation!==v.generation||signerManifestDigest(v.manifest)!==v.manifestDigest||v.manifest.witness_root_digest!==v.witnessRoot||v.manifest.witness_root_digest===ZERO)throw new RegistryIntegrityError("registry manifest mismatch");const issuer=await this.o.identityDirectory.resolve(v.manifest.manifest_issuer_key_id,v.manifest.manifest_issuer_epoch,"manifest");if(!validIdentity(issuer,"manifest")||!verifySignerManifest(v.manifest,issuer))throw new RegistryIntegrityError("manifest signature refused");await this.o.audit.verify(v.activationReceipt);await this.revocation(v.manifest.revoked_signer_set_digest);if(v.manifest.monitor_rearm_tuple_digest!==this.o.monitorRearmTupleDigest)throw new RegistryIntegrityError("tuple digest mismatch");return {manifest:v.manifest,manifestDigest:v.manifestDigest,storeVersion:stored.version,activationReceipt:v.activationReceipt,highWater:{generation:v.generation,auditSequence:v.auditSequence,witnessRoot:v.witnessRoot}};}
  async current():Promise<RegistrySnapshot>{return this.validateHead(await this.o.store.get(this.headKey));}

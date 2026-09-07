@@ -315,6 +315,10 @@ export class DurableAuditLog {
     return audit;
   }
 
+  async read(receipt: JournalReceipt): Promise<JournalRecord> {
+    return this.journal.read(receipt);
+  }
+
   async verify(receipt: unknown): Promise<void> {
     if (!object(receipt)) throw new AuditIntegrityError("malformed audit receipt");
     exactKeys(receipt, ["operationId", "checkpoint", "checkpointRoot", "journalReceipt", "witnessReceipt", "witnessRoot"]);
