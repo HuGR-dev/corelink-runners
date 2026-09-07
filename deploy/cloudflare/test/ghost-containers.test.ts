@@ -173,7 +173,7 @@ function installFetchRouter() {
         return new Response(JSON.stringify({ tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
       }
       if (url.endsWith("/internal/v1/runner/mint")) {
-        return new Response(JSON.stringify({ token_plaintext: "ghost-pat", pat_id: "ghost-pat-id", tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
+        return new Response(JSON.stringify({ token_plaintext: "ghost-pat", pat_id: "ghost-pat-id", tenant: "ghost-tenant", lifecycle_generation: "1", max_concurrency: 20 }), { status: 200 });
       }
       if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
       if (url.includes("generate-jitconfig")) {

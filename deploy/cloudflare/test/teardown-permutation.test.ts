@@ -118,6 +118,7 @@ function installFetchRouter() {
             token_plaintext: "cas-pat",
             pat_id: "pat-perm",
             tenant: "acme",
+            lifecycle_generation: "1",
             max_concurrency: 10,
           }),
           { status: 200 },
