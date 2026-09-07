@@ -11,9 +11,9 @@ terminal public keys, expiry and ceiling; it never returns a private key. The is
 created outside Git with mode `0600` and must be transferred only to the approved non-production
 issuer.
 
-The terminal wire response has the exact eight fields required by runner commit `9985c251`. Its
-signature covers the persisted `t9-w1-terminal-v2` envelope, which adds tenant, grant digest,
-generation, key id, signing algorithm and receipt expiry without breaking that strict client.
+The terminal wire response is the signed `t9-w1-terminal-v2` canonical envelope consumed by the
+in-progress Ed25519 Runner verifier. It binds tenant, grant digest, generation, key id, signing
+algorithm and receipt expiry. The public binding supplies the verifying terminal public key.
 
 Rollback and cleanup are scoped to this target:
 

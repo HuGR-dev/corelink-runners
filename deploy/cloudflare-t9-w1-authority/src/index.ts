@@ -6,7 +6,6 @@ export interface Env {
 }
 type Grant = { v: 1; key_id: string; tenant_id: string; workload_kind: "devenv"; workload_id: string; reservation_id: string; period_key: number; ceiling_vcpu_ms: string; vcpu_count: number; maximum_wall_ms: number; issued_at_ms: number; expires_at_ms: number };
 type Row = { grant_digest: string; state: "prepared" | "cancelled"; receipt_json: string | null; receipt_envelope_json: string | null; generation: string };
-type StrictReceipt = { reservation_id: string; state: "cancelled"; materialized: false; actual_vcpu_ms: "0"; evidence_digest: string; future_materialization_fence: string; terminal_authority: string; authority_signature: string };
 type Envelope = { receipt_version: "t9-w1-terminal-v2"; reservation_id: string; tenant_id: string; grant_digest: string; generation: string; state: "cancelled"; materialized: false; actual_vcpu_ms: "0"; evidence_digest: string; future_materialization_fence: string; authority: string; key_id: string; alg: "Ed25519"; signed_at_ms: number; expires_at_ms: number; signature: string };
 const UUID=/^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, WORKLOAD=/^[A-Za-z0-9:_./-]{1,256}$/, DECIMAL=/^(0|[1-9][0-9]{0,18})$/, MAX_TOKEN_BYTES=8192;
 
@@ -29,13 +28,13 @@ export default { async fetch(request: Request, env: Env): Promise<Response> {
   if (match[1]==="reserve") return reserve(env,verified.grant,verified.digest);
   if (match[1]==="activate") return activate(env,verified.grant,verified.digest);
   if (match[1]==="settle") return json({error:"executor_protocol_unpromoted"},503);
-  return cancel(env,verified.grant,verified.digest,expiry);
+  return env.T9_TENANT_ADMISSION.get(env.T9_TENANT_ADMISSION.idFromName(verified.grant.tenant_id)).fetch("https://tenant/cancel",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({grant:verified.grant,digest:verified.digest,expiry})});
 }} satisfies ExportedHandler<Env>;
 
 async function reserve(env:Env,g:Grant,digest:string):Promise<Response> {
-  const required=BigInt(g.vcpu_count)*BigInt(g.maximum_wall_ms), ceiling=BigInt(g.ceiling_vcpu_ms), maximum=BigInt(number(env.T9_MAX_VCPU_MS));
-  if(required>ceiling || required>maximum) return json({error:"monthly_compute_refused"},429);
-  return env.T9_TENANT_ADMISSION.get(env.T9_TENANT_ADMISSION.idFromName(g.tenant_id)).fetch("https://tenant/reserve",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({grant:g,digest,required:required.toString()})});
+  const required=BigInt(g.vcpu_count)*BigInt(g.maximum_wall_ms), ceiling=BigInt(g.ceiling_vcpu_ms), maximum=BigInt(number(env.T9_MAX_VCPU_MS)), effective=ceiling>maximum?maximum:ceiling;
+  if(required>effective) return json({error:"monthly_compute_refused"},429);
+  return env.T9_TENANT_ADMISSION.get(env.T9_TENANT_ADMISSION.idFromName(g.tenant_id)).fetch("https://tenant/reserve",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({grant:g,digest,required:required.toString(),effective_ceiling:effective.toString()})});
 }
 
 export class TenantAdmission implements DurableObject {
@@ -46,26 +45,32 @@ export class TenantAdmission implements DurableObject {
     await previous; try { return await this.reserve(request); } finally { release(); }
   }
   private async reserve(request: Request): Promise<Response> {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/reserve") return json({error:"not_found"},404);
-    let input: { grant: Grant; digest: string; required: string }; try { input=await request.json(); } catch { return json({error:"invalid_request"},400); }
-    const {grant:g,digest,required}=input; if (!g || typeof digest!=="string" || !DECIMAL.test(required) || required==="0" || g.tenant_id !== this.state.id.name) return json({error:"invalid_request"},400);
+    if (request.method !== "POST") return json({error:"not_found"},404);
+    const path=new URL(request.url).pathname;
+    let input: { grant: Grant; digest: string; required?: string; effective_ceiling?: string; expiry?: number }; try { input=await request.json(); } catch { return json({error:"invalid_request"},400); }
+    const {grant:g,digest}=input; if (!g || typeof digest!=="string" || g.tenant_id !== this.state.id.name) return json({error:"invalid_request"},400);
+    if (path === "/cancel") return cancelStorage(this.env,g,digest,input.expiry);
+    if (path !== "/reserve" || !input.required || !input.effective_ceiling || !DECIMAL.test(input.required) || input.required==="0" || !DECIMAL.test(input.effective_ceiling)) return json({error:"invalid_request"},400);
+    const required=input.required, effective=input.effective_ceiling;
     const prior=await row(this.env,g.reservation_id);
     if(prior) return prior.grant_digest===digest && prior.state==="prepared" ? json({reservation_id:g.reservation_id,state:"prepared"}) : json({error:"reservation_conflict"},409);
     const used=await this.env.T9_AUTHORITY_DB.prepare("SELECT COALESCE(SUM(CAST(required_vcpu_ms AS INTEGER)),0) AS used FROM reservations WHERE tenant_id=?1 AND state='prepared'").bind(g.tenant_id).first<{used:number}>();
-    if(BigInt(used?.used??0)+BigInt(required)>BigInt(g.ceiling_vcpu_ms)) return json({error:"monthly_compute_refused"},429);
-    try { await this.env.T9_AUTHORITY_DB.prepare("INSERT INTO reservations(reservation_id,grant_digest,tenant_id,workload_id,required_vcpu_ms,ceiling_vcpu_ms,state,created_at_ms,generation) VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8)").bind(g.reservation_id,digest,g.tenant_id,g.workload_id,required,g.ceiling_vcpu_ms,Date.now(),generation(digest)).run(); }
+    if(BigInt(used?.used??0)+BigInt(required)>BigInt(effective)) return json({error:"monthly_compute_refused"},429);
+    try { await this.env.T9_AUTHORITY_DB.prepare("INSERT INTO reservations(reservation_id,grant_digest,tenant_id,workload_id,required_vcpu_ms,ceiling_vcpu_ms,state,created_at_ms,generation) VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8)").bind(g.reservation_id,digest,g.tenant_id,g.workload_id,required,effective,Date.now(),generation(digest)).run(); }
     catch { const replay=await row(this.env,g.reservation_id); return replay?.grant_digest===digest && replay.state==="prepared" ? json({reservation_id:g.reservation_id,state:"prepared"}) : json({error:"reservation_conflict"},409); }
     return json({reservation_id:g.reservation_id,state:"prepared"});
   }
 }
 async function activate(env:Env,g:Grant,digest:string):Promise<Response> { const prior=await row(env,g.reservation_id); if(!prior||prior.grant_digest!==digest) return json({error:"reservation_conflict"},409); if(prior.state==="cancelled") return json({error:"reservation_cancelled"},409); return json({error:"executor_protocol_unpromoted"},503); }
-async function cancel(env:Env,g:Grant,digest:string,expiry:number):Promise<Response> {
+async function cancelStorage(env:Env,g:Grant,digest:string,expiry:number|undefined):Promise<Response> {
+  if (!Number.isSafeInteger(expiry)) return json({error:"invalid_request"},400);
+  const terminalExpiry = expiry as number;
   const prior=await row(env,g.reservation_id); if(prior?.grant_digest && prior.grant_digest!==digest) return json({error:"reservation_conflict"},409);
   if(prior?.state==="cancelled" && prior.receipt_json) return new Response(prior.receipt_json,{headers:{"content-type":"application/json","cache-control":"no-store"}});
-  const gen=prior?.generation || generation(digest); const envelope=await envelopeFor(env,g,digest,gen,expiry); const strict:StrictReceipt={reservation_id:g.reservation_id,state:"cancelled",materialized:false,actual_vcpu_ms:"0",evidence_digest:envelope.evidence_digest,future_materialization_fence:envelope.future_materialization_fence,terminal_authority:envelope.authority,authority_signature:envelope.signature};
-  if(prior) await env.T9_AUTHORITY_DB.prepare("UPDATE reservations SET state='cancelled',receipt_json=?2,receipt_envelope_json=?3 WHERE reservation_id=?1").bind(g.reservation_id,JSON.stringify(strict),JSON.stringify(envelope)).run();
-  else await env.T9_AUTHORITY_DB.prepare("INSERT INTO reservations(reservation_id,grant_digest,tenant_id,workload_id,required_vcpu_ms,ceiling_vcpu_ms,state,created_at_ms,generation,receipt_json,receipt_envelope_json) VALUES(?1,?2,?3,?4,'0',?5,'cancelled',?6,?7,?8,?9)").bind(g.reservation_id,digest,g.tenant_id,g.workload_id,g.ceiling_vcpu_ms,Date.now(),gen,JSON.stringify(strict),JSON.stringify(envelope)).run();
-  return json(strict);
+  const gen=prior?.generation || generation(digest); const envelope=await envelopeFor(env,g,digest,gen,terminalExpiry);
+  if(prior) await env.T9_AUTHORITY_DB.prepare("UPDATE reservations SET state='cancelled',receipt_json=?2,receipt_envelope_json=?3 WHERE reservation_id=?1").bind(g.reservation_id,JSON.stringify(envelope),JSON.stringify(envelope)).run();
+  else await env.T9_AUTHORITY_DB.prepare("INSERT INTO reservations(reservation_id,grant_digest,tenant_id,workload_id,required_vcpu_ms,ceiling_vcpu_ms,state,created_at_ms,generation,receipt_json,receipt_envelope_json) VALUES(?1,?2,?3,?4,'0',?5,'cancelled',?6,?7,?8,?9)").bind(g.reservation_id,digest,g.tenant_id,g.workload_id,g.ceiling_vcpu_ms,Date.now(),gen,JSON.stringify(envelope),JSON.stringify(envelope)).run();
+  return json(envelope);
 }
 async function envelopeFor(env:Env,g:Grant,digest:string,gen:string,expiry:number):Promise<Envelope> {
   const evidence_digest=await sha(`t9-w1-cancel:${g.reservation_id}:${digest}`), future_materialization_fence=await sha(`t9-w1-fence:${g.reservation_id}:${digest}`), signed_at_ms=Date.now();
