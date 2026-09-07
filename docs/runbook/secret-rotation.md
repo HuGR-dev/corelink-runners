@@ -18,7 +18,8 @@ artifact.
 | `SECRET_NAME` | Exact fabricd secret being rotated. The owner must choose a secret with a real authenticated proof route. |
 | `OLD_SECRET_FILE` | OOB file containing the currently accepted value, readable only by the operator. |
 | `NEW_SECRET_FILE` | OOB file containing the new value, readable only by the operator. |
-| `APP_ID` | Cloudflare Containers application id, obtained by a read-only provider query. |
+| `APP_ID` | UUID for the Cloudflare Containers application named `corelink-fabricd`, obtained by a read-only provider query. It is not a logical container class, Worker name, or GitHub App id. |
+| `HEALTH_URL` | Owner-supplied fabricd health URL for the post-recovery liveness check. |
 | `PROOF_ROUTE` | Exact route, method, request fixture, and expected old-reject/new-accept statuses supplied by the service owner. `/v1/health` is not sufficient. |
 | `ROLLBACK_FILE` | OOB custody location for the old value, retained until the change is accepted. |
 | `CHANGE_ID` | Owner-approved change window and accountable owner identity. |
@@ -32,8 +33,11 @@ copy a credential into this document.
 Run these commands from the repository root. Save their non-secret
 outputs in the private change record. `secret list` reports names only.
 
-Set `APP_ID` in the private operator shell from the owner/provider record,
-then run. The app id is never guessed or copied from a log line.
+Resolve `APP_ID` by name before the change. The UUID must be the row named
+`corelink-fabricd` in the provider output; do not substitute the logical
+container class, the Worker name, or a GitHub App id. Set `APP_ID` and
+`HEALTH_URL` in the private operator shell from that owner/provider record,
+then run. The UUID is never guessed or copied from an application log.
 
 ```sh
 cd deploy/cloudflare-fabricd
@@ -99,44 +103,51 @@ npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$NEW_SECRET_FI
 ```
 
 The delete/redeploy pair is a controlled mutation and requires the approved
-change window, monitoring, and the rollback value. `wrangler deploy` must run
-with the unchanged image digest; a new image build is outside AU1.8. A failed
-delete or deploy is fail-closed: surface the failure, do not claim proof, and
-run the recovery block immediately.
+change window, monitoring, and the rollback value. `wrangler deploy
+--containers-rollout=none` preserves the existing container image rollout
+while applying the secret configuration; a new image build is outside AU1.8.
+A failed delete or deploy is fail-closed: surface the failure, do not claim
+proof, and run the recovery block immediately.
 
 ```sh
+delete_and_confirm_absence() {
+  set +e
+  for attempt in 1 2; do
+    npx wrangler containers delete "$APP_ID"
+    delete_status=$?
+    state_dir=$(mktemp -d)
+    npx wrangler containers info "$APP_ID" >"$state_dir/info" 2>&1
+    info_status=$?
+    npx wrangler containers list >"$state_dir/list" 2>&1
+    list_status=$?
+    if test "$info_status" -ne 0 && test "$list_status" -eq 0 && \
+       ! grep -Fq "$APP_ID" "$state_dir/list"; then
+      return 0
+    fi
+    echo "container absence not confirmed after delete attempt $attempt" >&2
+  done
+  return 1
+}
+
 rollback_fabricd() {
   set +x
   npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || return 1
-  npx wrangler deploy || return 1
+  delete_and_confirm_absence || return 1
+  npx wrangler deploy --containers-rollout=none || return 1
+  curl --fail --silent "$HEALTH_URL" >/dev/null || return 1
+  # Run the owner-supplied PROOF_ROUTE fixture with the old value here. Record
+  # only its contract status; a missing or failed proof keeps rollback RED.
 }
 
 set +e
-npx wrangler containers delete "$APP_ID"
+delete_and_confirm_absence
 delete_status=$?
 if test "$delete_status" -ne 0; then
-  echo "fabricd delete status is uncertain; rotation is RED and recovery is required" >&2
-  echo "retrying delete before deciding whether the old-secret rollback is safe" >&2
-  npx wrangler containers delete "$APP_ID"
-  retry_status=$?
-  state_dir=$(mktemp -d)
-  npx wrangler containers info "$APP_ID" >"$state_dir/info" 2>&1
-  info_status=$?
-  npx wrangler containers list >"$state_dir/list" 2>&1
-  list_status=$?
-  if test "$info_status" -eq 0 || test "$list_status" -ne 0 || \
-     grep -Fq "$APP_ID" "$state_dir/list"; then
-    echo "container absence cannot be confirmed; running secret is unknown; escalate" >&2
-    set -e
-    exit 1
-  fi
-  rollback_fabricd
-  recovery_status=$?
+  echo "container absence cannot be confirmed; running secret is unknown; escalate" >&2
   set -e
-  test "$recovery_status" -eq 0 || echo "fabricd recovery failed; escalate immediately" >&2
   exit 1
 fi
-npx wrangler deploy
+npx wrangler deploy --containers-rollout=none
 deploy_status=$?
 if test "$deploy_status" -ne 0; then
   echo "fabricd deploy failed; rotation is RED and recovery is required" >&2
@@ -190,7 +201,11 @@ boot reload through the recovery function above. The explicit commands are:
 ```sh
 set +x
 npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || exit 1
-npx wrangler deploy || exit 1
+delete_and_confirm_absence || exit 1
+npx wrangler deploy --containers-rollout=none || exit 1
+curl --fail --silent "$HEALTH_URL" >/dev/null || exit 1
+# Run the owner-supplied PROOF_ROUTE fixture with the old value and record its
+# contract status before claiming that rollback recovered the service.
 ```
 
 Record rollback status and provider version ids. Never delete the old value
