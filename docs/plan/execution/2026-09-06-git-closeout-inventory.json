@@ -11011,9 +11011,9 @@
       "wp": "T6-W15",
       "bundle": "B1",
       "owner": "r2_pair_acceptance",
-      "classification": "approved_to_integrate",
-      "destination": "B1 composition after registry PROMOTE C1..C5",
-      "action": "retain exact SHA and register bounded review result; do not lose packet",
+      "classification": "approved_incorporated",
+      "destination": "1db850b542f11c9a966ec5017f868585f422142a through d718b412acac1f3d23f1a6482c8d474b0e383827",
+      "action": "integrated as cherry-pick replays with -x; retain source and focused-check evidence",
       "type": "known_agent_commit",
       "known_owner": "r2_pair_acceptance",
       "dirty": false,
@@ -11023,7 +11023,15 @@
         "in_origin_main": false,
         "contains_integration": false
       },
-      "historical_source": true
+      "historical_source": true,
+      "integration_commits": [
+        "1db850b542f11c9a966ec5017f868585f422142a",
+        "a5f6f4058b1c8a76d9a4b53420bb3ba3ed431142",
+        "b7710ec6590082ec481b43a5893566eba7714549",
+        "0fd5d51c5d663fa60ef1360d3bd34ad1af7e801e",
+        "81a5f44136a3c21cb6c3a5d8ec3b09b791647e9d",
+        "d718b412acac1f3d23f1a6482c8d474b0e383827"
+      ]
     },
     {
       "id": "verifier-journal-prefix",
@@ -11031,9 +11039,9 @@
       "wp": "T6-W15",
       "bundle": "B1",
       "owner": "r2_pair_acceptance",
-      "classification": "approved_to_integrate",
-      "destination": "B1 composition after registry PROMOTE C1..C5",
-      "action": "retain exact SHA and register bounded review result; do not lose packet",
+      "classification": "approved_incorporated",
+      "destination": "1db850b542f11c9a966ec5017f868585f422142a through d718b412acac1f3d23f1a6482c8d474b0e383827",
+      "action": "integrated as cherry-pick replays with -x; retain source and focused-check evidence",
       "type": "known_agent_commit",
       "known_owner": "r2_pair_acceptance",
       "dirty": false,
@@ -11043,7 +11051,15 @@
         "in_origin_main": false,
         "contains_integration": false
       },
-      "historical_source": true
+      "historical_source": true,
+      "integration_commits": [
+        "1db850b542f11c9a966ec5017f868585f422142a",
+        "a5f6f4058b1c8a76d9a4b53420bb3ba3ed431142",
+        "b7710ec6590082ec481b43a5893566eba7714549",
+        "0fd5d51c5d663fa60ef1360d3bd34ad1af7e801e",
+        "81a5f44136a3c21cb6c3a5d8ec3b09b791647e9d",
+        "d718b412acac1f3d23f1a6482c8d474b0e383827"
+      ]
     }
   ],
   "pending_git_operations": [

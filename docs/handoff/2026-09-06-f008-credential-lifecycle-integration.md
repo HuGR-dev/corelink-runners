@@ -355,7 +355,7 @@ deliveries or change the T6-W15 DoD.
 `docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
 canonical closeout plan, byte-identical to
 `$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
-`66bddb4ef7165b0eec723b40c8c76ae3ae7941606e25c9425718141db67b54f2`.
+`b703442b854fa10e173d6712fa4d02b187c80db2cde7410c2315092c2423b7b0`.
 It fixes exactly three serialized operational Runner sprints and merges: S1/B1
 has 12 WPs, S2/B2 has 14, and S3/B3 has 28. Historical Sprint 3/4 membership
 is retained in the ledger only to trace the criteria inherited by S3/B3; it
@@ -385,6 +385,19 @@ crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17
 seven-day observation remains historically associated with T6-W12 and T6-W10
 as a separately tracked post-delivery operational obligation. It does not block
 any WP, sprint, promote, merge, or go-live.
+
+## T6-W15 runtime and verifier template integration
+
+PROMOTE sources `cc9fa84c09cc4f654549db97403606620f719cc3` and
+`eacd95a5337dd065181e30dffd87129a60d23f55` were replayed with `-x` as
+`1db850b542f11c9a966ec5017f868585f422142a` through
+`d718b412acac1f3d23f1a6482c8d474b0e383827`. They add the concrete
+witness Lambda runtime, real signed-RSA dispatch coverage, verifier account
+binding, and the verifier runtime template/prefix boundary. Focused
+`witness-runtime.test.ts` passed 4/4, verifier runtime policy assertions
+passed, and `npm run typecheck` passed. This is component integration only;
+T6-W15 remains partial pending its durable registry, recovery, page ACK, main
+runtime, and remaining qualification criteria.
 
 ## Git closeout inventory
 

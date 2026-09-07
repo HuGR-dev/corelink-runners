@@ -450,7 +450,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the reviewed witness runtime, durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime for r2_pair_acceptance (Luna). Ingest aaa68154 and the three approved codecs are integrated. No new component work packages or author dispatches; keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime for r2_pair_acceptance (Luna). Ingest, three codecs, the witness runtime, and verifier prefix template are integrated. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
       ],
@@ -493,7 +493,13 @@
         "b025351",
         "ffaea8c",
         "de13d45",
-        "c600bd4"
+        "c600bd4",
+        "1db850b542f11c9a966ec5017f868585f422142a",
+        "a5f6f4058b1c8a76d9a4b53420bb3ba3ed431142",
+        "b7710ec6590082ec481b43a5893566eba7714549",
+        "0fd5d51c5d663fa60ef1360d3bd34ad1af7e801e",
+        "81a5f44136a3c21cb6c3a5d8ec3b09b791647e9d",
+        "d718b412acac1f3d23f1a6482c8d474b0e383827"
       ],
       "review": {
         "status": "partial",
@@ -511,7 +517,8 @@
           "AWS source-secret and Lambda-witness adapters cold review: 5 focused tests and tsc --noEmit; source ebaf217 through b2404a9 and integration e68d343 through 7ddfdcb, where aws-adapters.test.ts passed 5/5 and typecheck passed. Adapter tests do not prove IAM isolation, three-account independence, deployment, or live capability.",
           "Atomic ingest Terra final review: source f0bd9f2 through aaa68154 and frozen acceptance paths. Integration 92837d5 through b025351 passed six suites/25 distinct tests (integrity6, transition4, periodic4, quarantine2, idempotency7, credential-isolation2) and tsc --noEmit. The duplicate 4a73 test was already present in source as e27276f and was not counted twice.",
           "Signer-manifest, recovery-token, and page-ack codecs were independently approved by r2; integration ffaea8c through c600bd4 passed their three focused suites/9 tests and tsc --noEmit. Codecs do not satisfy their durable services or delivery acceptance.",
-          "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
+          "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention.",
+          "PROMOTE runtime/infra composition: source cc9fa84c09cc4f654549db97403606620f719cc3 and eacd95a5337dd065181e30dffd87129a60d23f55 replayed as 1db850b through d718b412. Focused witness-runtime 4/4, verifier runtime policy assertions, and package typecheck passed."
         ]
       },
       "evidence": [
