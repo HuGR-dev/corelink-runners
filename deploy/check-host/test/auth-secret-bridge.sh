@@ -6,7 +6,7 @@ if [ -d /private/var/folders ]; then
 fi
 export TMPDIR
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/corelink-auth-bridge.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 bin="$tmp/bin"

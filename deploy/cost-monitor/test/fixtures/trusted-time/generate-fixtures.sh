@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+fixture_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 pki_dir="$fixture_dir/pki"
 rm -rf "$pki_dir"
 mkdir -p "$pki_dir/root/newcerts" "$pki_dir/intermediate/newcerts"

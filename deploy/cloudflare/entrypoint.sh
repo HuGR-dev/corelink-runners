@@ -37,7 +37,7 @@ bridge_exec_auth_token() {
     fi
     [[ -e "$auth_dir" ]] || mkdir -p "$auth_dir"
     local resolved_auth_dir
-    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    resolved_auth_dir=$(CDPATH='' cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
     if [[ -z "$resolved_auth_dir" ]]; then
         error "auth directory resolves through a symlink"
         return 1
@@ -74,7 +74,7 @@ validate_auth_file() {
     local auth_dir="${auth_file%/*}"
     local resolved_auth_dir mode
     assert_no_symlink_components "$auth_dir" || return 1
-    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    resolved_auth_dir=$(CDPATH='' cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
     mode=$(stat -c '%a' "$auth_file" 2>/dev/null) || mode=$(stat -f '%Lp' "$auth_file" 2>/dev/null) || mode=
     if [[ "${auth_file#/}" == "$auth_file" || -z "$resolved_auth_dir" \
         || -L "$auth_file" || ! -f "$auth_file" || "$mode" != 400 || ! -O "$auth_file" ]]; then
