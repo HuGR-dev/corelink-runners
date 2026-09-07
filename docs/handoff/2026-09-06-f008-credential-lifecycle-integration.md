@@ -355,7 +355,7 @@ deliveries or change the T6-W15 DoD.
 `docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
 canonical closeout plan, byte-identical to
 `$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
-`06307751902236105e09bd17f84915fc0cd7ebb97860fe61124b1cd9914d2477`.
+`66bddb4ef7165b0eec723b40c8c76ae3ae7941606e25c9425718141db67b54f2`.
 It fixes exactly three serialized operational Runner sprints and merges: S1/B1
 has 12 WPs, S2/B2 has 14, and S3/B3 has 28. Historical Sprint 3/4 membership
 is retained in the ledger only to trace the criteria inherited by S3/B3; it
@@ -382,8 +382,9 @@ unrelated refactors, and hypothetical architecture.
 
 For T6-W15 base acceptance, trusted time/TSA, WORM, three-account independence,
 crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17
-seven-day observation is a later final qualification performed by T6-W12 and
-collected by T6-W10; it is not a base-only T6-W15 blocker or a waiver.
+seven-day observation remains historically associated with T6-W12 and T6-W10
+as a separately tracked post-delivery operational obligation. It does not block
+any WP, sprint, promote, merge, or go-live.
 
 ## Git closeout inventory
 

@@ -454,8 +454,8 @@
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
       ],
-      "post_base_gates": [
-        "The seven-day A6.17 observation is a final qualification gate implemented by T6-W12 and collected by T6-W10; it is not a T6-W15 base blocker."
+      "historical_post_delivery_obligations": [
+        "Historical trace: the continuous seven-day A6.17 observation was associated with T6-W12 and T6-W10. It remains a separately tracked post-delivery operational obligation and does not block any work package, sprint, promote, merge, or go-live."
       ],
       "commits": [
         "a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe",
