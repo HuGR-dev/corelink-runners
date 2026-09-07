@@ -2,6 +2,8 @@
 // `@cloudflare/containers` imports here — so this module is unit-testable in
 // plain vitest (node): only `crypto` + `fetch` (Node 20+ globals) are used.
 
+import { canonicalInstallationId } from "./repo_config_lookup";
+
 // ── Structured worker log — single-line JSON, queryable in CF Logs ───────────
 //
 // Swaps the historical bare `console.log`/`console.error` free-text calls for a
@@ -695,7 +697,7 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
-export { installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_lookup";
+export { canonicalInstallationId, installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_lookup";
 
 // ── External-GA installation allowlist (WP-D) ────────────────────────────────
 //
@@ -721,7 +723,8 @@ export function parseInstallationAllowlist(raw: string | undefined): string[] {
   return raw
     .split(/[,\s]+/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .map((s) => canonicalInstallationId(s))
+    .filter((s): s is string => s !== null);
 }
 
 /** True iff the allowlist is ARMED — i.e. it parses to ≥1 id. An unset/blank/
