@@ -43,10 +43,10 @@ impl Http {
 impl HttpTransport for Http {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
         self.requests.lock().unwrap().push(req.clone());
-        if req.url.ends_with("/v1/spawn") {
-            if let Some(ledger) = &self.claim {
-                ledger.claim_pending_cleanup("lease-1", 2)?.unwrap();
-            }
+        if req.url.ends_with("/v1/spawn")
+            && let Some(ledger) = &self.claim
+        {
+            ledger.claim_pending_cleanup("lease-1", 2)?.unwrap();
         }
         Ok(self
             .replies
