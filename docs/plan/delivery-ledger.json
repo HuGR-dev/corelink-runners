@@ -1217,7 +1217,7 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "The unqualified settlement endpoint now refuses active capacity release until qualified provider terminal-artifact authority exists. T9-W1 remains partial: finish that authority, provider hard-stop/usage producers, explicit baseline/key provisioning, paired migration, and live acceptance.",
+      "next_action": "Use the authority and D2 contract at docs/plan/execution/2026-09-06-t9-w1-d2-authority-decision.md to finish provider terminal/usage producers, explicit baseline/key provisioning, paired migration, and live acceptance. T9-W1 remains partial.",
       "blockers": [
         "Qualified provider terminal/cancellation and actual usage remain F005/F007; configured8h reservation does not by itself prove provider hard-stop.",
         "Production signing/public keys and reconciled external baseline are not provisioned; paired server migration and live acceptance remain."
@@ -1243,9 +1243,16 @@
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/plan/execution/2026-09-06-shared-compute-verification.json",
-        "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate."
+        "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate.",
+        "Decision contract integrated from 97d6dd33f1a8e34b78cd242f068aa5b9384d839b as 6489f31; documentary authority only, no completion credit."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "decision_contract": {
+        "path": "docs/plan/execution/2026-09-06-t9-w1-d2-authority-decision.md",
+        "source_commit": "97d6dd33f1a8e34b78cd242f068aa5b9384d839b",
+        "integration_commit": "6489f31f1a9a9be80a05f9cc16b075e011057de9",
+        "disposition": "Defines the qualified provider terminal-artifact authority and D2 disposition; it does not complete T9-W1 or waive F005/F007, provisioning, migration, or live acceptance."
+      }
     },
     {
       "id": "T1-W5",
