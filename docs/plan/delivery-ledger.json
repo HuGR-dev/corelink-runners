@@ -87,7 +87,7 @@
         "evidence": []
       },
       "acceptance": {
-        "status": "pending_shared_b1_gate",
+        "status": "pending",
         "evidence": ["Sprint 1 implementation closure: 12/12 work packages are implementation-complete and code-accepted at the composed candidate."],
         "shared_bundle_gate": {
           "status": "pending",
