@@ -192,6 +192,7 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-runner-devenv"
           TAG="${GITHUB_SHA}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           DOCKERFILE="${GITHUB_WORKSPACE}/deploy/cloudflare/Dockerfile.runner-devenv"
           CONTEXT="$(mktemp -d)"
           cleanup() {
@@ -240,6 +241,9 @@ jobs:
 
           docker build \
             --file "${DOCKERFILE}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            --build-arg "OCI_SOURCE=https://github.com/${GITHUB_REPOSITORY}" \
             --tag "${IMAGE}:${TAG}" \
             "${CONTEXT}"
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
