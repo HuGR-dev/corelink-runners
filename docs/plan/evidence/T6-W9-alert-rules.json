@@ -1,0 +1,56 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t6-w9-alert-rules",
+  "kind": "test+probe",
+  "status": "RED",
+  "observed_at": "2026-09-06T22:00:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "04743acf9a7a7f2385ccce1ebd13882530b7d4f1",
+    "path": "docs/plan/evidence/T6-W9-alert-rules.json"
+  },
+  "claims": ["T6-W9"],
+  "version": {
+    "id": "04743acf9a7a7f2385ccce1ebd13882530b7d4f1"
+  },
+  "evidence": {
+    "acceptance_state": "READY-PENDING-LIVE",
+    "local_validation": {
+      "status": "PASS",
+      "command": "npx vitest run test/critical-rule-matrix.test.ts test/containment.test.ts test/rules.test.ts",
+      "test_files": 3,
+      "tests_passed": 63,
+      "tests_failed": 0,
+      "coverage": {
+        "c1_c5_positive_routes": "all 19 frozen conditions",
+        "malformed_200": "empty, invalid JSON, null, array, object without counters, empty counters",
+        "auth_and_route_posture": "401, unarmed 404, configured 404",
+        "response_drain": "provider error body is consumed and never logged"
+      }
+    },
+    "external_binding": {
+      "channel": "external-primary-page",
+      "route_reference": "REQUIRED_FROM_O-MONITORHOST",
+      "detector": "REQUIRED_EXTERNAL_C1-C5_DETECTOR",
+      "version_binding": "The live result must name the deployed detector version and the exact canary source version above; mixed or absent versions are invalid.",
+      "delivery_ack": "REQUIRED_EXTERNAL_PAGE_AND_ACK"
+    },
+    "live_probe": {
+      "status": "PREPARED",
+      "trials": 3,
+      "cases": [
+        "inject one classified positive condition in each C1-C5 pillar and verify the same external-primary-page route",
+        "inject malformed/auth failures and verify typed incident delivery without credential disclosure",
+        "return a non-2xx provider body and verify the response is drained before delivery state is recorded"
+      ],
+      "required_observations": [
+        "external detector receives the classified event independently of the canary",
+        "deployed detector version and route binding are recorded in the receipt",
+        "page and acknowledgement identifiers are recorded for every trial",
+        "no local canary self-evaluation is accepted as delivery evidence"
+      ],
+      "blocked_on": ["T6-W4 live binding", "O-CANARY", "T7-W4b", "external detector deployment", "real channel receipt/ack"]
+    }
+  },
+  "notes": "Local C1-C5 routing and failure/drain behavior is ready. This artifact intentionally remains RED until T6-W4/T3 live bindings, the external detector version, and real-channel delivery plus acknowledgement are independently observed. No live credential, endpoint, deployment, page, or ACK is fabricated."
+}
