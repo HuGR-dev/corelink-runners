@@ -1,17 +1,26 @@
 # Reconciled dispatch DAG — rev6 Round-12 repair draft
 
-**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**
+**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: PROMOTED · FROZEN · NOT DISPATCHABLE · post-promotion quiet count 0**
 
 This is the sole canonical dispatch registry. Every plan, delta, triage table, handoff and
-dispatcher must reference this file and must not restate its DAG. The current Round-12 repair tree
-has not received a cold review and is **NOT QUIET**, so the table is a schedule calculation and no
-row is authorized yet. This staged
-input must first receive two consecutive quiet reviews over byte-identical bytes. Promotion is a
-normative new snapshot, resets quiet count to zero, and must itself receive two consecutive quiet
-reviews over byte-identical promoted bytes before the one clean post-incident baseline can be
-captured and the dispatch freeze discussed. After that sequence lifts the freeze, a row may run when
-its own hard predecessors are satisfied: an unrelated decision/obstacle/relay token does not stop
-the whole graph.
+dispatcher must reference this file and must not restate its DAG. The staged input
+`fdf3a27fab6aa2231323ed6a95af369ae46f136a` received two valid, independent
+`QUIET_PROMOTE` conclusions over byte-identical bytes and is promoted as the normative snapshot.
+Promotion resets the counter. This promoted, frozen snapshot must itself receive two consecutive
+quiet reviews over byte-identical promoted bytes before the one clean post-incident baseline can be
+captured and dispatch can be considered. Until then the table is a schedule calculation and no row
+is authorized. After that sequence lifts the dispatch lock, a row may run when its own hard
+predecessors are satisfied: an unrelated decision/obstacle/relay token does not stop the whole
+graph.
+
+## Promotion record — 2026-09-07
+
+The valid PRE reviews targeted `fdf3a27fab6aa2231323ed6a95af369ae46f136a`:
+`b2_quiet_pre_2` and `b2_quiet_pre_replacement`, each concluded `QUIET_PROMOTE`.
+`b2_quiet_pre_1` targeted an unrelated root SHA (`19eb…`) without the target worktree and is
+recorded without quiet credit. The promoted snapshot begins with post-promotion quiet count zero;
+its freeze fixes the canonical bytes and scope but grants no dispatch, product, CI, live or delivery
+credit.
 
 `FABRIC_PG_DISABLED=1` is a production durability and green-credit interlock, not an implementation
 lock. It blocks T1-W6 durable-PG success, every dependent production proof, and the final live flip;

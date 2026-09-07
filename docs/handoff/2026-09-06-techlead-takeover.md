@@ -453,11 +453,13 @@ exact SHA in `/private/tmp/corelink-b2-integration-20260907`, branch
 14 items; no product code, PR, push, deployment, CI or heavy test ran for this
 scaffold.
 
-The canonical DAG cold-review gate remains `NOT FROZEN · NOT DISPATCHABLE · quiet
-count 0`. The scope freeze does not waive it. At a later valid dispatch gate,
-read the ledger's exact D/O/R predecessors again; the first source-continuation
-candidate is T3-W2, while T2-W2b remains blocked by O1, O-DEVENV-PIN and
-O-FLEETBUSY.
+The canonical DAG has been promoted and frozen after two valid PRE quiet reviews
+of `fdf3a27fab6aa2231323ed6a95af369ae46f136a`; it remains `NOT DISPATCHABLE`
+with post-promotion quiet count 0. The invalid PRE review of root `19eb…` earns
+no credit. Two independent POST reviews and the clean post-incident baseline are
+still required. At a later valid dispatch gate, read the ledger's exact D/O/R
+predecessors again; the first source-continuation candidate is T3-W2, while
+T2-W2b remains blocked by O1, O-DEVENV-PIN and O-FLEETBUSY.
 
 ### B2 card reconciliation — source versus local versus external
 
