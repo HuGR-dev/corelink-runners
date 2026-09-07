@@ -70,8 +70,8 @@
         "T4-W2": "source_done; paired billing composition is accepted; sprint and production gates remain",
         "T3-W3": "source_done; live owner gate remains",
         "T3-W1": "source_done and predecessor-ready (81 focused checks); global dispatch gate still blocks action",
-        "T3-W2": "code_integrated; F007 requires focused acceptance/evidence for authoritative fenced ContainmentDO redrive and three lifecycle permutations; T3-W16 is Sprint 3 preventive hardening, not a B2 predecessor",
-        "T8-W1": "source_done after T3-W2/F007 predecessor composition; focused proof is 15/15",
+        "T3-W2": "source_done; F007 is resolved by the authoritative fenced ContainmentDO redrive and three lifecycle permutations. T3-W16 remains Sprint 3 preventive hardening, not a B2 predecessor; live qualification is not claimed",
+        "T8-W1": "source_done and predecessor-composed (15/15); global sprint/live qualification remains",
         "T8-W3": "partial; real remaining work is atomic claim plus required-mint proof",
         "T3-W14": "source_done; RetryEpochAuthority and focused tests are in baseline (21/21), pending predecessor composition",
         "T3-W9": "backlog; real remaining work is spawn durability and O-APP",
@@ -85,8 +85,8 @@
   },
   "item_count_summary": {
     "historical_recorded_delivered": 16,
-    "nonhistorical_implementation_complete": 20,
-    "partial": 3,
+    "nonhistorical_implementation_complete": 21,
+    "partial": 2,
     "unknown_backlog": 31,
     "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
   },
@@ -1011,24 +1011,31 @@
       "id": "T3-W2",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "wp_t3_w2",
       "dependencies": [
         "T3-W1",
         "T7-W4b"
       ],
-      "next_action": "Code is integrated. Close F007 with focused acceptance/evidence for fenced ContainmentDO redrive: KV reaper is diagnostic-only and teardownCompletedRunner confirms isAlive=false before slot release. Cover the three lifecycle permutations; no ambiguous KV value may delete/release. T3-W16 is later preventive hardening.",
-      "blockers": ["F-20260905-007"],
+      "next_action": "Source acceptance is complete: the authoritative fenced ContainmentDO redrive retains the teardown obligation until isAlive=false before slot release, and the three lifecycle permutations are covered. Preserve prepared state pending global sprint/live qualification; T3-W16 remains later preventive hardening.",
+      "blockers": [],
       "commits": [
         "1ef55b33260fbb722c4094b89a859be9c1b0c406",
-        "6496cb3578be0b5c127d248b5341aaa4146699f5"
+        "6496cb3578be0b5c127d248b5341aaa4146699f5",
+        "22a3d1e21892f78bfdceb9243fbb924c0a824a3f"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "22a3d1e21892f78bfdceb9243fbb924c0a824a3f",
+        "evidence": [
+          "Author acceptance at 22a3d1e: 43/43 focused lifecycle checks plus typecheck PASS.",
+          "Independent reviewer APPROVE at 22a3d1e: 155/155 focused checks plus tsc PASS. This is source acceptance only and does not claim live qualification."
+        ]
       },
-      "evidence": [],
+      "evidence": [
+        "deploy/cloudflare/test/teardown-permutation.test.ts at 22a3d1e covers retention after teardown failure or indeterminate liveness and cleanup only after isAlive=false.",
+        "Author: 43/43 focused lifecycle checks plus typecheck PASS; reviewer APPROVE: 155/155 focused checks plus tsc PASS."
+      ],
       "historical_sprint": 2
     },
     {
@@ -1040,8 +1047,8 @@
       "dependencies": [
         "T3-W2"
       ],
-      "next_action": "Focused source proof is 15/15. The package becomes source-ready after T3-W2/F007 predecessor composition; delivery remains blocked by the sprint gate.",
-      "blockers": ["T3-W2", "F-20260905-007"],
+      "next_action": "Source and implementation are complete with 15/15 focused proof and resolved T3-W2/F007 predecessor composition. Preserve prepared state pending global sprint/live qualification.",
+      "blockers": [],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
         "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae",
@@ -1052,7 +1059,7 @@
         "status": "approved",
         "commit": "ec10581e36c139c058587d10262cf0963313c72c",
         "evidence": [
-          "A3.14/A3.15/A3.16 local evidence accepted; A3.15 is the paired engine/Worker control wire. Focused source proof at 265557bf is 15/15; predecessor composition remains required."
+          "A3.14/A3.15/A3.16 local evidence accepted; A3.15 is the paired engine/Worker control wire. Focused source proof at 265557bf is 15/15; T3-W2/F007 predecessor composition is resolved. This does not claim live qualification."
         ]
       },
       "evidence": [
@@ -2339,18 +2346,20 @@
       "sprint": 2,
       "severity": "high",
       "owner": "root",
-      "blocks_delivery": true,
-      "summary": "F007 needs focused acceptance/evidence that the authoritative ContainmentDO redrive remains generation-fenced through release.",
+      "blocks_delivery": false,
+      "summary": "F007 resolved: focused acceptance confirms the authoritative ContainmentDO redrive remains generation-fenced through release.",
       "reproduction": "Candidate1ef55b3 reapStaleSpawnClaims treats null/malformed timestamp plus missing KV handle as safe absence, deletes mutable job claim and releases slot. A late provider start or concurrent replacement claim violates capacity/ownership.",
       "acceptance": "Unknown/null/corrupt/stale KV never authorizes deletion or slot release. A3.12 stale-claim success uses the authoritative, fenced ContainmentDO redrive; the KV reaper is diagnostic-only and teardownCompletedRunner confirms isAlive=false before slot release. The three focused lifecycle permutations must prove concurrent replacement retains its claim and slot, restart/late materialization does not duplicate, and ambiguous absence never releases capacity. T3-W16/F005 provider-cancellation linkage is Sprint 3 preventive hardening, not a prerequisite to B2 acceptance.",
       "commits": [
-        "6496cb3578be0b5c127d248b5341aaa4146699f5"
+        "6496cb3578be0b5c127d248b5341aaa4146699f5",
+        "22a3d1e21892f78bfdceb9243fbb924c0a824a3f"
       ],
       "evidence": [
         "Independent read-only review of1ef55b33260fbb722c4094b89a859be9c1b0c406; root inspected production function.",
-        "Root decision: ContainmentDO redrive is authoritative/fenced, KV reaper is diagnostic-only, and teardownCompletedRunner confirms isAlive=false before release. Required remaining evidence is the three focused lifecycle permutations; T3-W16 is future hardening."
+        "Root decision: ContainmentDO redrive is authoritative/fenced, KV reaper is diagnostic-only, and teardownCompletedRunner confirms isAlive=false before release. Required remaining evidence is the three focused lifecycle permutations; T3-W16 is future hardening.",
+        "At 22a3d1e, author acceptance recorded 43/43 focused lifecycle checks plus typecheck PASS; independent reviewer APPROVE recorded 155/155 focused checks plus tsc PASS. teardown-permutation covers provider-alive and indeterminate-liveness retention plus isAlive=false cleanup. Source acceptance resolves F007; no live qualification is claimed."
       ],
-      "state": "open",
+      "state": "fixed",
       "historical_sprint": 2
     },
     {
@@ -2965,6 +2974,25 @@
       "baseline": "220090f8d9a0408c955d2f7a915308f6496028f8",
       "conclusion": "PROMOTED_FROZEN_DISPATCHABLE",
       "post_promotion_quiet_count": 2
+    },
+    {
+      "at": "2026-09-07T20:00:04+00:00",
+      "task": "T3-W2 F007 source acceptance and T8-W1 predecessor composition",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "deploy/cloudflare/test/teardown-permutation.test.ts",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T3-W2",
+      "role": "integrator",
+      "source_commit": "22a3d1e21892f78bfdceb9243fbb924c0a824a3f",
+      "conclusion": "T3-W2 implementation complete and review approved; F007 fixed. T8-W1 source/implementation complete and review approved after its only local predecessor resolved. Neither entry claims live qualification.",
+      "evidence": [
+        "Author: 43/43 focused lifecycle checks plus typecheck PASS.",
+        "Independent reviewer APPROVE: 155/155 focused checks plus tsc PASS.",
+        "T8-W1 focused source proof: 15/15 PASS at 265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7."
+      ]
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
