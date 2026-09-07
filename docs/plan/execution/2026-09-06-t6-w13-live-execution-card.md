@@ -1,4 +1,4 @@
-# T6-W13 live execution card
+# T6-W13 production execution card
 
 Status: **READY AFTER T6-W15 DEPLOY**. This card contains targets and commands
 only; it does not claim deployment, current-key discovery, page delivery, or
@@ -10,10 +10,10 @@ human acknowledgement. No secret value is stored here.
 | --- | --- | --- |
 | Canary | Cloudflare account `6a1fc1c626fc2628823e60b9db01f5cd`, Worker `corelink-canary` | `*/5 * * * *`; `FABRIC_PROBES_ENABLED=0` |
 | Fabric status/health | `corelink-fabricd` | `FABRICD_SVC`; both probes remain disabled for this acceptance |
-| Spawn metrics | `corelink-spawn-worker`, `GET /internal/v1/metrics` | `SPAWN_SVC`; current key is `METRICS_OBSERVABILITY_KEY` |
+| Spawn metrics | `corelink-spawn-worker`, `GET /internal/v1/metrics` | `SPAWN_SVC`; current key will be `METRICS_OBSERVABILITY_KEY` |
 | Canary state | `CANARY_KV` | Replace the placeholder KV id in `wrangler.jsonc` with the provisioned namespace id before deploy |
 | Human page | AWS API Gateway HTTP API, `POST /v1/incidents/{incidentId}/pages/{pageId}/ack` | exact route `AWS_IAM`; no canary POST and no bearer |
-| Monitor | AWS account `975306274105`, region `us-east-1`, stage `$default` | API id is the deployed `HttpApi` stack output; do not guess it |
+| Monitor | AWS account `975306274105`, region `us-east-1`, stage `$default` | API id will be the planned for deployment `HttpApi` stack output; do not guess it |
 
 The monitor tuple is read from the deployed `MONITOR_CONFIG_JSON`: `stateTable`,
 `stateNamespace`, `destination`, `monitorRearmTupleDigest`, and
@@ -52,7 +52,7 @@ while `FABRIC_PROBES_ENABLED` remains the exact string `0`.
 
 For the stale-key arm, capture the current secret version in the deployment
 audit, temporarily bind the deliberately prior key through the same secret
-name, run the 12-cycle probe, and restore the current key immediately. The
+name, then execute the 12-cycle probe and restore the current key immediately. The
 stale arm must return HTTP 401 in 12/12 and emit the configured page link once
 per cooldown window. Never place either key in a shell command, log, card or
 evidence JSON.
@@ -71,9 +71,9 @@ PAGE_URL=https://<MONITOR_API_ID>.execute-api.us-east-1.amazonaws.com/v1/inciden
 ```
 
 The canary records the link/correlation marker after email delivery. Opening
-the link does not acknowledge anything. The following is the exact human
-probe shape; it requires an IAM user/role already authorized with
-`execute-api:Invoke`, and uses environment references only:
+the link does not acknowledge anything. The exact human probe shape follows;
+shape; it requires an IAM user/role already authorized with `execute-api:Invoke`,
+environment references only:
 
 ```sh
 export AWS_REGION=us-east-1
@@ -100,7 +100,7 @@ context, schedule/destination, payload and idempotency before its own CAS.
 
 ## Evidence to capture after deployment
 
-Record only non-secret values: deployed Worker version, monitor API id, KV
+Record only non-secret values: planned for deployment Worker version, monitor API id, KV
 namespace id, source/config SHA pins, tuple digest, schedule digest, 12
 current-key statuses, 12 stale-key statuses, page URL/correlation IDs, email
 provider delivery id, and the human probe HTTP status/audit receipt id. Redact

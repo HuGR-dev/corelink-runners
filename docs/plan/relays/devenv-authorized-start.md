@@ -6,11 +6,11 @@ The existing server authenticates PAT or Clerk, derives the tenant, and forwards
 
 ## Authorization and issuance
 
-- PAT identity uses the actual `parsePat` field `tokenId`, after signature and persisted-row verification. Clerk identity uses the verified `clerkUserId`. These stable identities determine mint throttling; a fresh session UUID cannot bypass it.
-- Only explicit `admin` or `read-write` PAT scopes permit writes. Runner-narrowed PATs cannot derive broader DevEnv credentials. Clerk owner/admin/member roles permit writes; viewer permits status/list only; unknown roles/scopes fail closed. WebSocket upgrades and GET execution paths require write access.
+- PAT identity came from the actual `parsePat` field `tokenId`, after signature and persisted-row verification. Clerk identity came from the verified `clerkUserId`. These stable identities determined mint throttling; a fresh session UUID could not bypass it.
+- Only explicit `admin` or `read-write` PAT scopes permitted writes. Runner-narrowed PATs could not derive broader DevEnv credentials. Clerk owner/admin/member roles permitted writes; viewer permitted status/list only; unknown roles/scopes failed closed. WebSocket upgrades and GET execution paths required write access.
 - The route matcher checks a complete prefix boundary. Starts include both API aliases and trailing slashes, matching the existing DO normalization. All other request fields beyond `workspace_name`, `profile_name`, and `tier` are rejected before mint, including credential aliases and nested grants. Null, arrays, malformed JSON, invalid names, and unsupported tiers fail closed.
 - The existing entitlement check gates starts. Authenticated cleanup does not depend on quota availability. Failed quota reads produce a generic failure.
-- `MintGrant.fromDevenvSession` uses the existing mint authority to issue `cas:rw` for the verified tenant. Nonempty PAT data, non-nil UUID identities, matching tenant, integer future expiry, and an eight-hour upper bound are checked before RPC. The grant deadline is also clamped to eight hours from relay entry.
+- `MintGrant.fromDevenvSession` relied on the existing mint authority to issue `cas:rw` for the verified tenant. Nonempty PAT data, non-nil UUID identities, matching tenant, integer future expiry, and an eight-hour upper bound were checked before RPC. The grant deadline was also clamped to eight hours from relay entry.
 
 ## Paired runners contract
 
@@ -27,11 +27,11 @@ The server verifies the acknowledgement's session and returns only those two fie
 
 ## Durable credential handoff (F-20260905-004)
 
-The container mint endpoint is not idempotent, but only computes the plaintext and persistable hash. `mintScopedPat` activates the credential by inserting its D1 `pat` row. The patch adds migration `0107_devenv_credential_obligation.sql` and makes DevEnv activation insert that PAT row and record its exact operation/PAT/token IDs in **one D1 batch transaction**. Other mint consumers retain their existing persistence path.
+The container mint endpoint was not idempotent, but only computed the plaintext and persistable hash. `mintScopedPat` activated the credential by inserting its D1 `pat` row. The patch added migration `0107_devenv_credential_obligation.sql` and made DevEnv activation insert that PAT row and record its exact operation/PAT/token IDs in **one D1 batch transaction**. Other mint consumers retained their existing persistence path.
 
 Before invoking mint, the relay generates the session UUID and calls the existing `_system` CoreLinkServer DO through its internal binding. Its new cleanup preparation route requires the existing `runner_mint` consumer authority and verifies the addressed DO is `_system`. It checks the migration, durably records a tenant-bound operation marker and alarm in a storage transaction, then creates a deadline-fenced D1 intent. Missing schema, unavailable storage/alarm, unavailable internal authority, or the 64-marker capacity limit refuses issuance before mint. This route arms cleanup only; it cannot start a DevEnv and is not an alternative public grant endpoint.
 
-The existing CoreLinkServer alarm drains at most four due markers per invocation, using persisted backoff capped at five minutes. It keeps pending credential work armed even when the container is dead or idle, without booting it. Newly prepared work arms its own wakeup; the drain never deletes an alarm after observing an empty list. Pending obligations survive adapter/isolate restart and D1/KV failure.
+The existing CoreLinkServer alarm drained at most four due markers per invocation, using persisted backoff capped at five minutes. It kept pending credential state armed even when the container was dead or idle, without booting it. Newly prepared state armed its own wakeup; the drain never deleted an alarm after observing an empty list. Pending obligations survived adapter/isolate restart and D1/KV failure.
 
 The D1 operation state is monotonic for this protocol: prepared → issued → adopted, or prepared/issued → revoking → revoked. A validated matching RPC acknowledgement is required to mark adoption. Revocation atomically fences the operation and revokes its PAT; cache invalidation must complete before the operation becomes revoked. Failed immediate cleanup leaves the existing durable marker for the alarm. Raw PAT plaintext is absent from both the obligation table and DO marker.
 

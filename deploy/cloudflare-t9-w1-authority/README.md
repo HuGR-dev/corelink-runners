@@ -1,17 +1,17 @@
 # T9-W1 non-production compute authority
 
-This is an isolated Cloudflare Worker, D1 ledger and per-tenant Durable Object serialization gate for the T9-W1 acceptance lane. It has no
+This will be an isolated Cloudflare Worker, D1 ledger and per-tenant Durable Object serialization gate for the T9-W1 acceptance lane. It has no
 route, no cron, no container binding and no Cloudflare provider-start capability. Its strict
-ceiling is one vCPU for one second (`1000` vCPU-ms). `activate` and `settle` return `503
+ceiling will be one vCPU for one second (`1000` vCPU-ms). `activate` and `settle` return `503
 executor_protocol_unpromoted`, so this deployment cannot materialize compute before the paired
-executor protocol is promoted.
+executor protocol will be promoted.
 
 The public binding is `GET /internal/v1/compute/acceptance-binding`. It exposes the grant and
 terminal public keys, expiry and ceiling; it never returns a private key. The issuer private key is
 created outside Git with mode `0600` and must be transferred only to the approved non-production
 issuer.
 
-The terminal wire response is the signed `t9-w1-terminal-v2` canonical envelope consumed by the
+The terminal wire response will be the signed `t9-w1-terminal-v2` canonical envelope consumed by the
 in-progress Ed25519 Runner verifier. It binds tenant, grant digest, generation, key id, signing
 algorithm and receipt expiry. The public binding supplies the verifying terminal public key.
 

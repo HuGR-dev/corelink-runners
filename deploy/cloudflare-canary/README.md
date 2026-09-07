@@ -26,7 +26,7 @@ route with SigV4. The canary never POSTs the ACK route, carries a bearer, or
 writes `humanAcknowledgedAt`; it only records a token-free delivery marker in
 KV and suppresses duplicate link delivery.
 
-`FABRIC_PROBES_ENABLED=0` is the explicit containment mode for a fabricd that
+`FABRIC_PROBES_ENABLED=0` denotes the explicit containment mode for a fabricd that
 must scale to zero. It skips both fabricd requests and records health as
 `SKIPPED` (never as a synthetic 200), while spawn-worker metrics and email
 delivery continue. A five-minute fabricd probe must not be re-enabled while the

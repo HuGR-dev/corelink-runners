@@ -15,7 +15,7 @@ The auth-file path is source-reachable across Rust, boot, Worker and DevEnv:
   child startup, validate the marker/file, and remove the file on exit.
 - Worker `buildContainerEnv` supplies the lease-bound
   `CLW_CRED_TICKET`, `CLW_LEASE_ID`, and `CLW_FABRIC_ENDPOINT`; the raw CAS
-  credential stays brokered and the exec bearer is converted at container boot.
+  credential stays brokered and the exec bearer undergoes conversion at container boot.
 
 Focused proof on this target:
 
@@ -28,10 +28,10 @@ Focused proof on this target:
   unprivileged flow 5).
 - Image pin/conformance files: 8 tests passed.
 
-Version/digest binding remains available: Wrangler pins the runner and
+Version/digest binding remained available: Wrangler pins the runner and
 check-host container images by immutable `@sha256` references; the check-host
 Dockerfile pins its Ubuntu base and verifies `clw` with SHA-256; and the Worker
-enforces `@sha256:` plus optional exact `PINNED_IMAGE_DIGEST` matching.
+checks `@sha256:` plus optional exact `PINNED_IMAGE_DIGEST` matching.
 
-T3-W18 live evidence remains in RCA, so this result is pending that dependency
+T3-W18 production evidence remains in RCA, so this result is pending that dependency
 and does not claim live deployment acceptance.

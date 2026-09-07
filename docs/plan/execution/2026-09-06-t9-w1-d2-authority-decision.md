@@ -85,7 +85,7 @@ autoridade real:
 
 Os checks já registrados em `docs/plan/execution/2026-09-05-devenv-billing.json` e
 `2026-09-05-devenv-credentials.json` (focused tests e `tsc`) são evidência estrutural desses
-limites, não prova de F-005/F-007 nem de billing live.
+limites, não prova de F-005/F-007 nem de billing em produção.
 
 ## Binding externo e aceitação final
 
@@ -107,4 +107,3 @@ O resultado é `PASS` somente quando os quatro artefatos acima estão ligados à
 implantada. Até lá, T9-W1 permanece `partial`/RED no ledger, mesmo com todos os testes locais
 verdes. Não há pergunta aberta: há gates objetivos de evidência, e a ausência de binding é uma
 recusa determinística.
-

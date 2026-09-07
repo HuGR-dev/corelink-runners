@@ -14,11 +14,11 @@ aws cloudformation validate-template --region us-east-1 \
   --template-body file://verifier-runtime.yaml
 ```
 
-Deployment review must pass foundation outputs as explicit parameters:
+Deployment review must receive foundation outputs as explicit parameters:
 `VerificationHeadTableArn`, `JournalBucketArn`, `WitnessKeyArn`, and
 `VerifierRoleArn`; pass the monitor account's qualified role ARN as
 `MonitorInvokerRoleArn`. `JournalPrefix` must be a canonical nonempty path
 ending in `/`; this trailing boundary keeps `journal/` separate from
 `journal-other/` in object and `ListBucketVersions` permissions. The permission targets only the published numeric
-Lambda version. This packet is source/configuration evidence, not deployment or
-live IAM/isolation evidence.
+Lambda version. This packet will be source/configuration evidence, not deployment or
+planned IAM/isolation evidence.
