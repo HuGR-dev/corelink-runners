@@ -275,7 +275,9 @@ pub fn cloud_executor_from_env(registry: BoxRegistry) -> Option<Arc<dyn LeasedEx
 ///
 /// The default implementation is [`NoBoxProvisioner`] (no-op, DEFAULT-OFF):
 /// `provision` returns `Ok(())` without binding anything, so an exec on such
-/// a lease still fails closed via the empty registry; `teardown` is a no-op.
+/// a lease still fails closed via the empty registry. Teardown is confirmed
+/// only for a lease successfully provisioned by this process; a fresh
+/// process cannot infer persisted no-box state.
 pub trait BoxProvisioner: Send + Sync {
     /// Spawn a container for `lease_id` / `spec` and bind it into the
     /// registry.  Returns `Err` on any spawn failure (fail-closed; nothing is
@@ -294,9 +296,14 @@ pub trait BoxProvisioner: Send + Sync {
         bail!("provider binding restore unavailable")
     }
 
-    /// Delete the container for `lease_id` from the provider and unbind it
-    /// from the registry.  Idempotent: an already-unbound lease returns
-    /// `Ok(())` without calling the provider.
+    /// Delete the provider resource for `lease_id`.
+    ///
+    /// A successful provider call does not release the process-local binding.
+    /// The caller must first conditionally finish the durable ledger cleanup,
+    /// then call [`forget_pending_cleanup`](Self::forget_pending_cleanup) so a
+    /// finish failure can retry the same authoritative handle. An absent
+    /// binding is unconfirmed and must return an error; silently treating it as
+    /// an already-destroyed resource would release capacity without proof.
     fn teardown(&self, lease_id: &str) -> Result<()>;
 
     /// Cleanup-specific teardown.  Unlike the historical `teardown` method,
@@ -454,7 +461,8 @@ impl BoxProvisioner for NoBoxProvisioner {
 ///
 /// `provision` calls `engine.spawn(spec)` and binds the returned
 /// [`RunningContainer`] into `registry`; `teardown` calls
-/// `engine.delete_job(c)` and unbinds the entry.
+/// `engine.delete_job(c)`. The binding is retained until the durable ledger
+/// cleanup finishes and the caller invokes `forget_pending_cleanup`.
 ///
 /// Both operations are fail-closed:
 /// - a spawn failure propagates `Err` without binding (registry stays empty).
@@ -617,10 +625,12 @@ pub fn cloud_backend_from_env(
 ///   [`RunningContainer`] into `registry`; a spawn failure propagates `Err`
 ///   WITHOUT binding (the registry stays empty for that lease, so a later exec
 ///   fails closed via the empty registry — no box from a failed spawn).
-/// - `teardown` resolves the binding, calls `engine.teardown(c)` (delete-first),
-///   then `unbind`s. A delete failure propagates `Err` and KEEPS the registry
-///   entry so the reaper retries — a failed teardown is never silently dropped.
-///   Idempotent: an already-unbound lease returns `Ok(())` without the provider.
+/// - `teardown` resolves the binding and calls `engine.teardown(c)` (delete-first).
+///   A delete failure propagates `Err` and KEEPS the registry entry so the
+///   reaper retries — a failed teardown is never silently dropped. A successful
+///   delete also retains the entry until the ledger finish calls
+///   `forget_pending_cleanup`. An absent binding is unconfirmed and returns an
+///   error without contacting the provider.
 /// - `probe` resolves the binding (no binding → [`ProbeStatus::Unbound`]) and
 ///   maps `engine.is_alive`: `Ok(true)`→`Alive`, `Ok(false)`→`Dead`, `Err`
 ///   propagates (transient/unreachable is NOT death — fail-safe-alive).

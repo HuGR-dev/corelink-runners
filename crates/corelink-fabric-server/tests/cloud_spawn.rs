@@ -257,10 +257,11 @@ fn provision_fail_closed_leaves_registry_empty() {
     );
 }
 
-/// `teardown` calls delete-job (DELETE 200) and unbinds the entry; after
-/// teardown `resolve` returns None; a DELETE request was recorded.
+/// `teardown` calls delete-job (DELETE 200), while retaining the binding until
+/// the durable cleanup finish is committed. `forget_pending_cleanup` then
+/// releases the local identity; a DELETE request was recorded.
 #[test]
-fn teardown_deletes_and_unbinds() {
+fn teardown_deletes_then_forget_unbinds() {
     let (engine, fake) = make_engine(vec![resp(200, "{}")]); // DELETE 200
     let reg = BoxRegistry::new();
     // Bind a container directly (simulating what provision does).
@@ -275,8 +276,8 @@ fn teardown_deletes_and_unbinds() {
     prov.teardown("lease-1").expect("teardown must succeed");
 
     assert!(
-        reg.resolve("lease-1").is_none(),
-        "teardown must unbind the container"
+        reg.resolve("lease-1").is_some(),
+        "provider success must retain the handle until ledger cleanup finishes"
     );
     let reqs = fake.all_requests();
     assert_eq!(
@@ -289,18 +290,27 @@ fn teardown_deletes_and_unbinds() {
         Method::Delete,
         "teardown must issue a DELETE"
     );
+
+    // This is the post-finish side effect. Keeping it separate from teardown
+    // lets a failed ledger finish retry the same authoritative provider handle.
+    prov.forget_pending_cleanup("lease-1");
+    assert!(
+        reg.resolve("lease-1").is_none(),
+        "cleanup finish must release the retained binding"
+    );
 }
 
-/// `teardown` when the lease is already unbound → `Ok`, zero HTTP requests
-/// (idempotent).
+/// `teardown` without a binding is unconfirmed → `Err`, zero HTTP requests.
 #[test]
-fn teardown_idempotent_when_unbound() {
+fn teardown_unbound_is_unconfirmed() {
     let (engine, fake) = make_engine(vec![]); // empty script — zero requests
     let reg = BoxRegistry::new(); // nothing bound
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
 
-    prov.teardown("lease-unbound")
-        .expect("teardown on unbound lease must be Ok");
+    assert!(
+        prov.teardown("lease-unbound").is_err(),
+        "teardown without a binding must fail closed"
+    );
     assert_eq!(
         fake.request_count(),
         0,
