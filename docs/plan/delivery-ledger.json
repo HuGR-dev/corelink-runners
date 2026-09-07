@@ -492,17 +492,17 @@
     {
       "id": "T6-W15",
       "sprint": 1,
-      "state": "prepared",
-      "implementation": "partial",
+      "state": "ready",
+      "implementation": "complete",
       "owner": "r2_pair_acceptance",
       "dependencies": [
         "T6-W4",
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Implement remaining T6-W15 authorities and runtime against the frozen service, authority/factory, and human ACK binding supplements. T6-W15 remains partial; retain UNKNOWN fail-closed and all qualification criteria.",
+      "next_action": "T6-W15 code acceptance is complete: its promoted durable authorities, runtime, focused checks, and version-bound execution card are incorporated. The shared Sprint 1 bundle gate retains deployment/live qualification and A6.10 before B1 merge.",
       "blockers": [
-        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
+        "Shared Sprint 1 bundle gate: deployed runtime/live bindings, trusted time/TSA, WORM and three-account independence qualification, crash/rotation/isolation evidence, and base A6.10 probe 3/3."
       ],
       "historical_post_delivery_obligations": [
         "Historical trace: the continuous seven-day A6.17 observation was associated with T6-W12 and T6-W10. It remains a separately tracked post-delivery operational obligation and does not block any work package, sprint, promote, merge, or go-live."
@@ -568,7 +568,8 @@
           "Atomic ingest Terra final review: source f0bd9f2 through aaa68154 and frozen acceptance paths. Integration 92837d5 through b025351 passed six suites/25 distinct tests (integrity6, transition4, periodic4, quarantine2, idempotency7, credential-isolation2) and tsc --noEmit. The duplicate 4a73 test was already present in source as e27276f and was not counted twice.",
           "Signer-manifest, recovery-token, and page-ack codecs were independently approved by r2; integration ffaea8c through c600bd4 passed their three focused suites/9 tests and tsc --noEmit. Codecs do not satisfy their durable services or delivery acceptance.",
           "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention.",
-          "PROMOTE runtime/infra composition: source cc9fa84c09cc4f654549db97403606620f719cc3 and eacd95a5337dd065181e30dffd87129a60d23f55 replayed as 1db850b through d718b412. Focused witness-runtime 4/4, verifier runtime policy assertions, and package typecheck passed."
+        "PROMOTE runtime/infra composition: source cc9fa84c09cc4f654549db97403606620f719cc3 and eacd95a5337dd065181e30dffd87129a60d23f55 replayed as 1db850b through d718b412. Focused witness-runtime 4/4, verifier runtime policy assertions, and package typecheck passed.",
+        "Final owner stack fe6656c8 through 43b3f4d was composed without conflicts. Constrained T6 suite passed 10 files/38 tests (registry, recovery, page/on-call, codecs, witness, adapters and evidence log); cost-monitor typecheck and infra structural policy validation passed."
         ]
       },
       "evidence": [
@@ -599,12 +600,24 @@
         "remaining": "Implementation and qualification of the durable signer registry, ACK recovery, page acknowledgement, main runtime, and base acceptance criteria remain required.",
         "human_ack_contract": "The second-submission contract gap also included an incomplete human ACK/on-call binding. The supplement resolves the interface and factory boundary; implementation and qualification remain open."
       },
-      "human_ack_binding_supplement": {
+  "human_ack_binding_supplement": {
         "path": "docs/plan/execution/2026-09-06-t6-w15-human-ack-binding-supplement.md",
         "source_commit": "90e21917ca0fb60768452c6bba407c33f2baea62",
         "integration_commit": "65b7fc04ab7babd47fd3a7270f2550fce28d0aec",
-        "disposition": "Freezes AWS_IAM human ACK route, IAM/on-call identity binding, exact request context, idempotency, and crash-safe page ACK requirements without completing T6-W15."
-      }
+    "disposition": "Freezes AWS_IAM human ACK route, IAM/on-call identity binding, exact request context, idempotency, and crash-safe page ACK requirements without completing T6-W15."
+  },
+  "acceptance": {
+    "status": "accepted",
+    "complete": true,
+    "source_tip": "43b3f4db3586ca2af5dcee4c45d51890e103c0bd",
+    "source_commits": ["fe6656c8", "c2533b0", "26c54a3", "718404c", "4ce1dd0", "6cadc90", "43b3f4d"],
+    "integration_tip": "ec9194922ee71df10e66754c456dd23d8e2d4d52",
+    "execution_card": "docs/plan/execution/2026-09-06-t6-w15-version-bound-live-card.md",
+    "execution_card_source_commit": "cb20f0b2e2c707b0bff2847f36292ce2dcdae243",
+    "execution_card_integration_commit": "ec9194922ee71df10e66754c456dd23d8e2d4d52",
+    "evidence": ["T6 constrained suite: 10 files / 38 tests passed.", "cost-monitor typecheck passed.", "infra structural policy validation passed."],
+    "shared_bundle_gate": ["deployed runtime/live bindings", "trusted time/TSA", "WORM and three-account independence qualification", "crash/rotation/isolation evidence", "base A6.10 probe 3/3"]
+  }
     },
     {
       "id": "T5-W1",
