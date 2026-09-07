@@ -1373,7 +1373,7 @@
         "O-MINTKEY",
         "T7-W4b"
       ],
-      "next_action": "Code and focused test sources integrated; library and4 targeted test crates passed warm metadata checks. Runtime/fullCI/live keyed acceptance only at complete sprint.",
+      "next_action": "T1-W5 acceptance is accepted and complete at implementation target 486b573; retain the mint-readiness evidence and run complete Sprint 1 validation only at the composed bundle tip.",
       "blockers": [],
       "commits": [
         "f43898914dab1ed65c37bbac196b394aa7acaa89",
@@ -1387,9 +1387,21 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-mint-readiness.json"
+        "docs/plan/execution/2026-09-05-mint-readiness.json",
+        "Acceptance artifact 2426c2c records mint_readiness_routes: 5/5 passed at implementation target 486b573."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "target_commit": "486b573",
+        "source_commit": "2426c2ce845315ad3d93b2b33c01a3f72609f3dc",
+        "integration_commit": "560d481",
+        "evidence": [
+          "docs/validation/evidence/sprint1-t1-w5-acceptance-2026-09-06.md",
+          "mint_readiness_routes: 5/5 passed."
+        ]
+      }
     },
     {
       "id": "T1-W6",
