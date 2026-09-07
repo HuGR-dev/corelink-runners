@@ -13,7 +13,7 @@ export type ComputeTerminalAuthorityConfig = {
   terminalAuthority: string;
   terminalPublicKey: string;
   receiptVersion: string;
-  terminalKeyId?: string;
+  terminalKeyId: string;
 };
 
 export type AuthenticatedTerminalReceipt = {
@@ -163,7 +163,7 @@ export async function verifyAuthenticatedTerminalReceipt(
 ): Promise<AuthenticatedTerminalReceipt> {
   const receipt = validateAuthenticatedTerminalReceipt(value, reservationId, expectedState);
   if (!receipt.receipt_version || !receipt.tenant_id || !receipt.grant_digest || !receipt.generation || !receipt.key_id || !receipt.alg || receipt.signed_at_ms === undefined || receipt.expires_at_ms === undefined) throw new ComputeBudgetClientError("ambiguous", "provider terminal envelope is incomplete");
-  if (receipt.authority !== config.terminalAuthority || receipt.receipt_version !== config.receiptVersion || receipt.alg !== "Ed25519" || (config.terminalKeyId !== undefined && receipt.key_id !== config.terminalKeyId)) {
+  if (!AUTHORITY.test(config.terminalKeyId) || receipt.authority !== config.terminalAuthority || receipt.receipt_version !== config.receiptVersion || receipt.alg !== "Ed25519" || receipt.key_id !== config.terminalKeyId) {
     throw new ComputeBudgetClientError("ambiguous", "provider terminal authority mismatch");
   }
   let publicKey: CryptoKey;

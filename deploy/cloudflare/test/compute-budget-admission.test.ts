@@ -41,9 +41,9 @@ function binding(id = reservationId, workloadId = "job-1") {
 }
 const computeEnv = { FABRIC_COMPUTE_URL: "https://fabric.example", FABRIC_COMPUTE_TERMINAL_AUTHORITY: terminalConfig.terminalAuthority, FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY: terminalConfig.terminalPublicKey, FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION: terminalConfig.receiptVersion, FABRIC_COMPUTE_TERMINAL_KEY_ID: terminalConfig.terminalKeyId };
 
-function fixture(fetcher: typeof fetch) {
+function fixture(fetcher: typeof fetch, env = computeEnv) {
   const storage = new Storage();
-  const containment = new ContainmentDO({ storage, blockConcurrencyWhile: gate() } as never, computeEnv as never);
+  const containment = new ContainmentDO({ storage, blockConcurrencyWhile: gate() } as never, env as never);
   vi.stubGlobal("fetch", fetcher);
   return { storage, containment };
 }
@@ -128,6 +128,16 @@ describe("compute budget admission integration", () => {
     await expect(first.containment.abandonUnusedCompute(reservationId)).rejects.toThrow("compute request rejected");
     expect(fetcher.mock.calls.map(call => String(call[0])).filter(url => url.endsWith("/settle"))).toHaveLength(0);
     expect((await first.storage.get<{ phase: string }>(`compute:obligation:${reservationId}`))?.phase).toBe("abandoning");
+  });
+
+  it("retains the obligation when terminal key id configuration is missing", async () => {
+    const fetcher = vi.fn(async (url: string) => url.endsWith("/cancel")
+      ? terminalResponse("cancelled", reservationId)
+      : receipt(url.endsWith("/reserve") ? "prepared" : "active"));
+    const { containment, storage } = fixture(fetcher, { ...computeEnv, FABRIC_COMPUTE_TERMINAL_KEY_ID: undefined });
+    await containment.prepareCompute(binding());
+    await expect(containment.abandonUnusedCompute(reservationId)).rejects.toThrow();
+    expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "abandoning" });
   });
 
   it("retains a failed final-page cleanup retry across the scheduled sweep", async () => {
