@@ -91,6 +91,11 @@ RUN curl -fsSL -o /tmp/code-server.tar.gz \
  && echo "${CODE_SERVER_SHA256}  /tmp/code-server.tar.gz" | sha256sum -c - \
  && mkdir -p /out/code-server \
  && tar -xzf /tmp/code-server.tar.gz -C /out/code-server --strip-components=1 \
+ && fixture_dir=/out/code-server/node_modules/httpolyglot/test/fixtures \
+ && test -d "${fixture_dir}" \
+ && find "${fixture_dir}" -type f -delete \
+ && find "${fixture_dir}" -depth -type d -empty -delete \
+ && test ! -e "${fixture_dir}" \
  && rm -f /tmp/code-server.tar.gz
 
 # ══════════════════════════════════════════════════════════════════════
@@ -190,7 +195,13 @@ COPY --from=bin-downloader /out/code-server /opt/code-server
 COPY entrypoint.sh /entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-RUN ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
+RUN private_key_files="$(grep -RIlE -- '-----BEGIN [A-Z0-9][A-Z0-9 ]*PRIVATE KEY-----' /opt/code-server || true)" \
+ && if [ -n "${private_key_files}" ]; then \
+      echo "private-key material found in /opt/code-server:" >&2; \
+      printf '%s\n' "${private_key_files}" >&2; \
+      exit 1; \
+    fi \
+ && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
  && chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd \
               /opt/code-server/bin/code-server /opt/code-server/lib/node \
  && chmod 0755 /entrypoint.sh
