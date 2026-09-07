@@ -1326,10 +1326,9 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "T9-W1 implementation is complete and its bounded authority is ready. Keep acceptance unaccepted until the Sprint 1 bundle gate records the version-bound R2/R3/R5 receipts and closes the F005/F007 provider-terminal dependencies.",
+      "next_action": "T9-W1 code acceptance is complete. The shared Sprint 1 bundle gate retains full CI plus the version-bound deployed runtime, keys and protocol, R2/R3/R5 receipts, F005/F007 terminal/use/ingest/recovery, external baseline, and materialization evidence before B1 merge.",
       "blockers": [
-        "Authority remains partial: executor protocol is unpromoted and provider materialization is disabled.",
-        "Version-bound R2/R3/R5 live receipts and F005/F007 qualified provider terminal/cancellation and actual usage remain required at the Sprint 1 bundle gate."
+        "Shared Sprint 1 bundle gate: full CI; deployed runtime bindings, keys, and executor protocol; R2/R3/R5 live receipts; F005/F007 terminal, use, ingest and recovery; external baseline and materialization evidence."
       ],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
@@ -1373,15 +1372,15 @@
         "reason": "The earlier card did not qualify a target. The bounded non-production authority is now recorded below; it does not satisfy the remaining version-bound R2/R3/R5 or F005/F007 bundle-gate requirements."
       },
       "acceptance": {
-        "status": "ready",
-        "complete": false,
+        "status": "accepted",
+        "complete": true,
         "runner_source_commits": ["e27d714", "9985c251", "33d1b76", "fbbf956", "d7eb858bc5ebbf3709b1e9ea2680549ef46b36a5"],
         "authority_source_commits": ["f73c218", "7267ffb", "391b1c8"],
         "integration_tip": "a6a6688ce4be8d5d1eb4abbdaf3682663558aa12",
         "authority_evidence": "docs/plan/execution/2026-09-07-t9-w1-nonprod-authority.json",
         "public_binding": "workers.dev binding, authority version 5d7fe5f5-14f3-43ba-a605-3c685cdd4076, source SHA-256 1aaf0b179941bd3395ad7c1514bd305fc49ac69420df4c66fe89e8fd266b019f",
         "evidence": ["T9 focused Worker suite: 66/66 passed.", "deploy/cloudflare typecheck passed.", "authority composed tsc and authority evidence JSON parsing passed."],
-        "residual": ["authority is partial: executor protocol remains unpromoted and compute materialization disabled", "live R2/R3/R5 receipts remain", "F005/F007 provider-terminal dependencies remain"]
+        "shared_bundle_gate": ["full Sprint 1 CI", "deployed runtime bindings, keys, and executor protocol", "R2/R3/R5 live receipts", "F005/F007 terminal, use, ingest, and recovery evidence", "external baseline and materialization evidence"]
       }
     },
     {
