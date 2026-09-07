@@ -1,0 +1,55 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "o-fleetbusy-fleet-idle-20260907",
+  "kind": "probe",
+  "status": "PASS",
+  "observed_at": "2026-09-07T23:21:47Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "8140abae9c7540bc35359dc12b9fc5c769f8b95c",
+    "path": "docs/plan/evidence/O-FLEETBUSY-fleet-idle-20260907.json"
+  },
+  "claims": ["O-FLEETBUSY"],
+  "version": {
+    "id": "8140abae9c7540bc35359dc12b9fc5c769f8b95c"
+  },
+  "evidence": {
+    "endpoint": "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy",
+    "http_status": 200,
+    "schema": "PASS",
+    "busy": 0,
+    "checked": 0,
+    "unverifiable": 0,
+    "force": false,
+    "fingerprint_sha256_prefix": "bd05ad204063",
+    "timestamps": {
+      "oob_key_created_at": "2026-09-07T23:12:45Z",
+      "cloudflare_secret_updated_at": "2026-09-07T23:13:14Z",
+      "github_secret_updated_at": "2026-09-07T23:13:40Z",
+      "endpoint_verified_at": "2026-09-07T23:21:46Z",
+      "gate_started_at": "2026-09-07T23:21:46Z",
+      "gate_completed_at": "2026-09-07T23:21:47Z"
+    },
+    "consumer_convergence": {
+      "cloudflare_worker_secret_name": "FLEET_BUSY_READ_KEY",
+      "github_actions_secret_name": "FLEET_BUSY_READ_KEY",
+      "oob_file_mode": "0600",
+      "secret_value": "excluded"
+    },
+    "commands": [
+      "wrangler secret put FLEET_BUSY_READ_KEY --name corelink-spawn-worker < OOB_FILE",
+      "GET /internal/v1/fleet/busy with x-corelink-internal-auth: <REDACTED>",
+      "gh secret set FLEET_BUSY_READ_KEY --repo HuGR-Labs/corelink-runners < OOB_FILE",
+      "scripts/ci/wait-for-idle-fleet.sh with FLEET_BUSY_READ_KEY and FORCE=false"
+    ],
+    "gate": {
+      "exit": 0,
+      "polls": 1,
+      "verdict": "fleet idle; safe to roll"
+    },
+    "deploy_invoked": false,
+    "image_push_invoked": false,
+    "code_deploy_invoked": false
+  },
+  "notes": "This closes O-FLEETBUSY only. It does not provide T2-W2b deploy evidence or implementation/live completion."
+}
