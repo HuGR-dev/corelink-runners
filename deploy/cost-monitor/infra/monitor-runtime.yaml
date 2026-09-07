@@ -15,6 +15,17 @@ Parameters:
   SigningKeyArn: {Type: String, AllowedPattern: '^arn:[^:]+:kms:[^:]+:975306274105:key/.+$'}
   SensitivitySchedulerRoleArn: {Type: String, AllowedPattern: '^arn:[^:]+:iam::286590629898:role/.+$'}
   SchedulerDeadLetterQueueArn: {Type: String, AllowedPattern: '^arn:[^:]+:sqs:[^:]+:975306274105:.+$'}
+  MonitorConfigJson:
+    Type: String
+    NoEcho: true
+    MinLength: 2
+    Description: Exact validated MONITOR_CONFIG_JSON; no runtime defaults are permitted.
+  AuditLogId: {Type: String, AllowedPattern: '^[A-Za-z0-9._:/-]{1,256}$'}
+  OnCallAccountIds:
+    Type: CommaDelimitedList
+    Description: IAM account IDs permitted to acknowledge a page.
+  PageAckMaxSkewMs: {Type: Number, MinValue: 1}
+  PageAckTtlMs: {Type: Number, MinValue: 1}
 Resources:
   MonitorFunction:
     Type: AWS::Lambda::Function
@@ -28,6 +39,13 @@ Resources:
       ReservedConcurrentExecutions: 10
       Environment:
         Variables:
+          MONITOR_CONFIG_JSON: !Ref MonitorConfigJson
+          MONITOR_AUDIT_LOG_ID: !Ref AuditLogId
+          MONITOR_API_ID: !Ref HttpApi
+          MONITOR_API_STAGE: '$default'
+          MONITOR_ONCALL_ACCOUNT_IDS: !Join [',', !Ref OnCallAccountIds]
+          MONITOR_PAGE_ACK_MAX_SKEW_MS: !Ref PageAckMaxSkewMs
+          MONITOR_PAGE_ACK_TTL_MS: !Ref PageAckTtlMs
           STATE_TABLE: !Ref FoundationTableName
           JOURNAL_BUCKET_ARN: !Ref FoundationBucketArn
           RECEIPT_TOPIC_ARN: !Ref FoundationTopicArn

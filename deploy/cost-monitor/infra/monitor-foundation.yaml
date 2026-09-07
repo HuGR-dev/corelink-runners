@@ -163,7 +163,12 @@ Resources:
                 Action: [s3:PutObject, s3:GetObject, s3:GetObjectRetention, s3:PutObjectRetention]
                 Resource: !Sub '${JournalBucket.Arn}/journal/*'
               - {Effect: Allow, Action: [kms:Encrypt, kms:Decrypt, kms:GenerateDataKey], Resource: !GetAtt JournalKey.Arn}
-              - {Effect: Allow, Action: [kms:Sign, kms:GetPublicKey], Resource: !GetAtt SigningKey.Arn}
+              # The runtime can sign only with the three distinct monitor
+              # authorities it binds from MONITOR_CONFIG_JSON.  It has no
+              # wildcard KMS authority and cannot manage or decrypt keys.
+              - Effect: Allow
+                Action: [kms:Sign, kms:GetPublicKey]
+                Resource: [!GetAtt SigningKey.Arn, !GetAtt RecoveryKey.Arn, !GetAtt PageAckKey.Arn]
               - {Effect: Allow, Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents], Resource: '*'}
   SchedulerRole:
     Type: AWS::IAM::Role
