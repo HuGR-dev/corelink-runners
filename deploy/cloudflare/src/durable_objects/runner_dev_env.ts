@@ -128,7 +128,7 @@ export class RunnerDevEnvDO extends Container<any> {
       terminalAuthority: this.env.FABRIC_COMPUTE_TERMINAL_AUTHORITY ?? "",
       terminalPublicKey: this.env.FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY ?? "",
       receiptVersion: this.env.FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION ?? "",
-      ...(this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID ? { terminalKeyId: this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID } : {}),
+      terminalKeyId: this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID ?? "",
     };
     return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? "", fetch, terminalConfig), terminalConfig);
   }

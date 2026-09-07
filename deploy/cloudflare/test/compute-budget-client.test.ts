@@ -91,6 +91,12 @@ describe("ComputeBudgetClient", () => {
     await expect(client(fetcher, true).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
   });
 
+  it("rejects a valid signed envelope when terminal key id is omitted", async () => {
+    const response = await ok("cancelled");
+    const fetcher = vi.fn(async () => new Response(await response.text(), { status: 200 }));
+    await expect(new ComputeBudgetClient("https://fabric.example", fetcher, { ...terminalConfig, terminalKeyId: "" }).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
+  });
+
   it("maps HTTP outcomes without reflecting response secrets", async () => {
     for (const [status, code] of [[429, "over_compute"], [503, "baseline_or_unavailable"], [401, "unauthorized"], [409, "conflict"], [400, "invalid"]] as const) {
       const fetcher = vi.fn(async () => new Response("secret server detail", { status }));
