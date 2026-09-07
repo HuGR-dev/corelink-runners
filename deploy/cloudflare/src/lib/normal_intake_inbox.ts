@@ -20,6 +20,8 @@ export class NormalIntakeConflictError extends Error {
 const EVENT = "normal-inbox:v1:event:";
 const PENDING = "normal-inbox:v1:pending:";
 const COUNT = "normal-inbox:v1:count";
+const INSTALLATION_TOMBSTONE = "normal-inbox:v1:installation-tombstone:";
+const INSTALLATION_TOMBSTONE_DELIVERY = "normal-inbox:v1:installation-tombstone-delivery:";
 const MAX = 500;
 const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
@@ -57,11 +59,12 @@ function validateBody(body: string): void { if (!SHA.test(body)) throw new Error
 export class NormalIntakeInbox {
   constructor(private readonly storage: AuthorityStorage) {}
 
-  async enqueue(input: NormalIntakeInput, now = Date.now(), delayMs = 0): Promise<{ status: "accepted" | "duplicate" | "conflict" | "full"; record?: NormalIntakeRecord }> {
+  async enqueue(input: NormalIntakeInput, now = Date.now(), delayMs = 0): Promise<{ status: "accepted" | "duplicate" | "conflict" | "full" | "tombstoned"; record?: NormalIntakeRecord }> {
     const normalized = validateInput(input);
     validateNow(now);
     if (!Number.isSafeInteger(delayMs) || delayMs < 0 || now > Number.MAX_SAFE_INTEGER - delayMs) throw new Error("invalid normal intake delay");
     return this.storage.transaction(async (tx: AuthorityTransaction) => {
+      if (await tx.get(`${INSTALLATION_TOMBSTONE}${encodeURIComponent(normalized.installation_id)}`) !== undefined) return { status: "tombstoned" };
       const key = eventKey(normalized.event_id);
       const old = await tx.get<unknown>(key);
       if (old !== undefined) {
@@ -86,6 +89,53 @@ export class NormalIntakeInbox {
       await tx.put(COUNT, count + 1);
       return { status: "accepted", record };
     });
+  }
+
+  /** Installation deletion is durable authority, not a KV TTL hint. */
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string, now = Date.now()): Promise<"accepted" | "duplicate" | "conflict"> {
+    if (!/^\d{1,20}$/.test(installationId) || !text(eventId) || !SHA.test(bodySha)) throw new Error("invalid installation tombstone");
+    validateNow(now);
+    return this.storage.transaction(async tx => {
+      const key = `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
+      const deliveryKey = `${INSTALLATION_TOMBSTONE_DELIVERY}${encodeURIComponent(eventId)}`;
+      const priorDelivery = await tx.get<{ installation_id?: unknown; body_sha256?: unknown }>(deliveryKey);
+      if (priorDelivery !== undefined) {
+        if (priorDelivery?.installation_id !== installationId || priorDelivery?.body_sha256 !== bodySha) return "conflict";
+        return "duplicate";
+      }
+      const prior = await tx.get<{ event_id?: unknown; body_sha256?: unknown }>(key);
+      if (prior !== undefined) {
+        if (prior?.event_id !== eventId || prior?.body_sha256 !== bodySha) return "conflict";
+        return "duplicate";
+      }
+      const page = await tx.list<unknown>({ prefix: EVENT, limit: MAX + 1 });
+      if (page.size > MAX) fail("event index exceeds capacity");
+      let count = await tx.get<unknown>(COUNT);
+      if (count === undefined) count = 0;
+      if (!validCount(count)) fail("malformed active count");
+      for (const [eventKeyName, raw] of page) {
+        const record = raw as NormalIntakeRecord;
+        if (!validRecord(record) || eventKeyName !== eventKey(record.event_id)) fail("malformed event record");
+        if (record.installation_id !== installationId || record.state !== "pending") continue;
+        await tx.delete(pendingKey(record));
+        await tx.put(eventKeyName, { ...record, state: "complete" as const });
+        if (count < 1) fail("active count underflow");
+        count--;
+      }
+      await tx.put(COUNT, count);
+      const record = { schema_version: 1, installation_id: installationId, event_id: eventId, body_sha256: bodySha, deleted_at_ms: now };
+      await tx.put(key, record);
+      await tx.put(deliveryKey, record);
+      return "accepted";
+    });
+  }
+
+  async installationTombstoned(installationId: string): Promise<boolean> {
+    // Historical repository-hook mappings may use a non-numeric synthetic
+    // installation id.  They can never equal an App deletion tombstone, so they
+    // remain compatible while the deletion ingress itself validates strictly.
+    if (!/^\d{1,20}$/.test(installationId)) return false;
+    return (await this.storage.get(`${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`)) !== undefined;
   }
 
   async pending(now: number, limit = 25): Promise<NormalIntakeRecord[]> {
