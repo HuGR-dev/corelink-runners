@@ -69,12 +69,11 @@ pub(crate) fn scope_for(method: Method, url: &str, base: &str) -> Option<AuthSco
         Some(AuthScope::Spawn)
     } else if method == Method::Post && url == exec {
         Some(AuthScope::Exec)
-    } else if method == Method::Post && (url == teardown || url == cutoff) {
-        Some(AuthScope::Lifecycle)
-    } else if method == Method::Get
-        && url
-            .strip_prefix(&status_prefix)
-            .is_some_and(|handle| !handle.is_empty())
+    } else if (method == Method::Post && (url == teardown || url == cutoff))
+        || (method == Method::Get
+            && url
+                .strip_prefix(&status_prefix)
+                .is_some_and(|handle| !handle.is_empty()))
     {
         Some(AuthScope::Lifecycle)
     } else {
