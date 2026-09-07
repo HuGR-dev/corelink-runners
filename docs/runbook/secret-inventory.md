@@ -93,10 +93,17 @@ bindings visible without ever recording a value.
 | `FABRIC_GITHUB_APP_PRIVATE_KEY` | Optional fabricd GitHub-App PEM fallback credential for runner minting. |
 | `FABRIC_PAT` | Fabric-side PAT name used by the local/CI operator tooling. |
 | `PINNED_IMAGE_DIGEST` | Spawn-worker image admission `var`; absent leaves the optional pin disarmed. |
+| `FABRIC_COMPUTE_TERMINAL_AUTHORITY` | Spawn-worker compute terminal-receipt authority expected from `FABRIC_COMPUTE_URL`; mismatches fail closed. |
+| `FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY` | Spawn-worker Ed25519 public key used to verify authenticated compute terminal receipts; missing or invalid configuration fails closed. |
+| `FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION` | Spawn-worker compute terminal-receipt schema/version expected from `FABRIC_COMPUTE_URL`; mismatches fail closed. |
+| `FABRIC_COMPUTE_TERMINAL_KEY_ID` | Spawn-worker compute terminal-receipt signing key id expected from `FABRIC_COMPUTE_URL`; missing or mismatched configuration fails closed. |
+| `FABRIC_CREDENTIAL_ISSUER_AUTH_KEY` | Fabricd credential-issuer authorization key forwarded to the container; absent leaves issuer authorization disabled. |
 | `CORELINK_ADMIN_KEY` | Local operator alias for the fabric admin key; value is never logged. |
 | `CLOUDFLARE_API_TOKEN` | CI/API fallback token for Cloudflare deploy and container operations. |
 | `CLOUDFLARE_CONTAINERS_API_TOKEN` | Preferred CI/API token for Cloudflare container operations. |
 | `GITHUB_TOKEN` | GitHub Actions job token used by repository automation. |
+| `GITHUB_RECONCILER_TOKEN` | Reconciler credential used by the repository automation path. |
+| `GITHUB_WEBHOOK_REPO_SECRET` | Repository webhook HMAC secret used by the reconciler ingress. |
 | `NPM_TOKEN` | Optional npm publish credential in the release workflow. |
 | `PYPI_TOKEN` | Optional PyPI publish credential in the release workflow. |
 | `RESEND_API_KEY` | Canary notification credential; absent makes notifications a no-op. |
