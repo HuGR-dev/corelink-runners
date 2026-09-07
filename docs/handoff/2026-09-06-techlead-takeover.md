@@ -453,13 +453,13 @@ exact SHA in `/private/tmp/corelink-b2-integration-20260907`, branch
 14 items; no product code, PR, push, deployment, CI or heavy test ran for this
 scaffold.
 
-The canonical DAG has been promoted and frozen after two valid PRE quiet reviews
-of `fdf3a27fab6aa2231323ed6a95af369ae46f136a`; it remains `NOT DISPATCHABLE`
-with post-promotion quiet count 0. The invalid PRE review of root `19eb…` earns
-no credit. Two independent POST reviews and the clean post-incident baseline are
-still required. At a later valid dispatch gate, read the ledger's exact D/O/R
-predecessors again; the first source-continuation candidate is T3-W2, while
-T2-W2b remains blocked by O1, O-DEVENV-PIN and O-FLEETBUSY.
+The canonical DAG is promoted, frozen and `DISPATCHABLE`. The two valid PRE
+reviews targeted `fdf3a27fab6aa2231323ed6a95af369ae46f136a`; the two independent
+POST conclusions targeted the clean baseline
+`220090f8d9a0408c955d2f7a915308f6496028f8` and enabled dispatch. The invalid PRE
+review of root `19eb…` and POST HOLD `b2_quiet_post_2` earn no credit. Dispatch
+still reads each row's exact D/O/R predecessors and blockers: T3-W2 is the first
+write target, while T2-W2b remains blocked by O1, O-DEVENV-PIN and O-FLEETBUSY.
 
 ### B2 card reconciliation — source versus local versus external
 
@@ -470,7 +470,8 @@ ledger/evidence validation. Local product gaps remain T3-W2/F007, T8-W1,
 T8-W3 (atomic claim and required-mint proof) and T3-W9 (spawn durability).
 External/live gates remain T2-W2b, T2-W4 and T2-W6, plus the named live gates
 for source-done WPs. This reconciliation changes neither B2's 14-WP scope nor
-the canonical no-dispatch gate; it performs no freeze or promotion.
+any individual WP state or blocker; later gate promotion only enables canonical
+row-by-row dispatch.
 
 ### B2 F007 decision and source-proof reconciliation
 
