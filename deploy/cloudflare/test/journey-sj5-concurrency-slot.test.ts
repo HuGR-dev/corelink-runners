@@ -612,6 +612,7 @@ function installFetchRouter() {
             token_plaintext: "cas-pat-plaintext",
             pat_id: "pat-sj5",
             tenant: "acme",
+            lifecycle_generation: "1",
             max_concurrency: mintConcurrency,
           }),
           { status: 200 },

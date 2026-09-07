@@ -28,6 +28,7 @@ function mockMint(capture: { req?: { headers: Headers; body: unknown } }) {
           pat_id: "pat_123",
           token_id: "tok_123",
           tenant: "3c7d77b1-0a50-4f87-893f-36ac785670df",
+          lifecycle_generation: "1",
           max_concurrency: 20,
           expires_ms: 9_999_999_999_999,
         }),

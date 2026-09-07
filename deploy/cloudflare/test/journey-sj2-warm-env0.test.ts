@@ -273,6 +273,7 @@ function installFetchRouter() {
             token_plaintext: RAW_PAT,
             pat_id: "pat-1",
             tenant: mintTenant,
+            lifecycle_generation: "1",
             ...(mintMaxConcurrency != null ? { max_concurrency: mintMaxConcurrency } : {}),
         };
         if (typeof body?.operation_id === "string") issuedOperations.set(body.operation_id, response.pat_id);

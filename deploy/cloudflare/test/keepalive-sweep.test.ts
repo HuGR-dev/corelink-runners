@@ -144,7 +144,7 @@ function installFetchRouter() {
         const body = JSON.parse(String(init?.body ?? "{}")) as { operation_id?: unknown };
         if (typeof body.operation_id === "string") issuedOperations.set(body.operation_id, "p1");
         return new Response(
-          JSON.stringify({ token_plaintext: "pat", pat_id: "p1", tenant: "acme", max_concurrency: 10 }),
+          JSON.stringify({ token_plaintext: "pat", pat_id: "p1", tenant: "acme", lifecycle_generation: "1", max_concurrency: 10 }),
           { status: 200 },
         );
       }
