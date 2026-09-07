@@ -95,7 +95,7 @@ EXPECTED_RUNNER_LABEL_DIAGNOSTICS: Counter[tuple[str, str]] = Counter(
         (".github/workflows/ci.yml", "corelink"): 1,
         (".github/workflows/clw-ticket-propagation-check.yml", "corelink-dogfood"): 1,
         (".github/workflows/corelink-smoke.yml", "corelink"): 1,
-        (".github/workflows/corelink-stress.yml", "corelink"): 1,
+        (".github/workflows/corelink-stress.yml", "corelink"): 3,
         (".github/workflows/dco.yml", "corelink"): 1,
         (".github/workflows/deploy-spawn-worker.yml", "corelink"): 2,
         (".github/workflows/dogfood-smoke.yml", "corelink-dogfood"): 1,
@@ -109,6 +109,7 @@ EXPECTED_RUNNER_LABEL_DIAGNOSTICS: Counter[tuple[str, str]] = Counter(
         (".github/workflows/pg-suite.yml", "corelink"): 1,
         (".github/workflows/prove-baked-buildkit.yml", "corelink"): 1,
         (".github/workflows/release.yml", "corelink"): 3,
+        (".github/workflows/secret-scan.yml", "corelink"): 1,
         (".github/workflows/spawn-worker-ci.yml", "corelink"): 1,
     }
 )
