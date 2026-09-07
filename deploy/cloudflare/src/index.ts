@@ -240,6 +240,10 @@ export { MetricsDO };
 
 export interface Env {
   FABRIC_COMPUTE_URL?: string;
+  FABRIC_COMPUTE_TERMINAL_AUTHORITY?: string;
+  FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY?: string;
+  FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION?: string;
+  FABRIC_COMPUTE_TERMINAL_KEY_ID?: string;
   RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
   // The Container DO for a check-host lease (CF-native check-host, campaign B).
   // A `mode:"check"` /v1/spawn routes HERE (not RUNNER_CONTAINER); /v1/exec dials
@@ -545,7 +549,13 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 // recovery/commit can advance the cursor.
 export class ContainmentDO extends DurableObject<Env> {
   private computeObligations(): ComputeObligations {
-    return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? ""));
+    const terminalConfig = {
+      terminalAuthority: this.env.FABRIC_COMPUTE_TERMINAL_AUTHORITY ?? "",
+      terminalPublicKey: this.env.FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY ?? "",
+      receiptVersion: this.env.FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION ?? "",
+      ...(this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID ? { terminalKeyId: this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID } : {}),
+    };
+    return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? "", fetch, terminalConfig), terminalConfig);
   }
 
   async prepareCompute(binding: ComputeBinding): Promise<void> {

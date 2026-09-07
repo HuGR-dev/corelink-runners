@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ComputeBudgetClient, ComputeBudgetClientError, type AuthenticatedTerminalReceipt } from "../src/lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding, type ComputeObligationStorage, type ComputeTransport } from "../src/lib/compute_budget_obligation";
+import { terminalConfig, terminalEnvelope } from "./compute-terminal-test-helpers";
 
 const tenantId = "22222222-2222-4222-8222-222222222222";
 const firstId = "11111111-1111-4111-8111-111111111111";
@@ -20,7 +21,7 @@ function makeToken(id: string, workloadId: string, now = 1_000_000) {
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
 }
 function binding(id = firstId, workloadId = "job-1"): ComputeBinding { return { token: makeToken(id, workloadId), reservationId: id, tenantId, workloadKind: "spawn_worker_runner", workloadId, vcpuCount: 4, maximumWallMs: 28_800_000 }; }
-function client(fetcher: typeof fetch) { return new ComputeBudgetClient("https://fabric.example", fetcher); }
+function client(fetcher: typeof fetch) { return new ComputeBudgetClient("https://fabric.example", fetcher, terminalConfig); }
 function ok(state: string, id = firstId) { return new Response(JSON.stringify({ reservation_id: id, state }), { status: 200 }); }
 
 describe("compute obligation recovery integration", () => {
@@ -40,7 +41,13 @@ describe("compute obligation recovery integration", () => {
   it("keeps terminal cancellation idempotent and accepts only the same settlement proof", async () => {
     const storage = new Storage();
     let settleCalls = 0;
-    const fetcher = vi.fn(async (url: string) => url.endsWith("/reserve") ? ok("prepared") : url.endsWith("/activate") ? ok("active") : url.endsWith("/cancel") ? new Response("conflict", { status: 409 }) : (settleCalls++, new Response(JSON.stringify(terminal("settled", "11111111-1111-4111-8111-111111111112")), { status: 200 })));
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.endsWith("/reserve")) return ok("prepared");
+      if (url.endsWith("/activate")) return ok("active");
+      if (url.endsWith("/cancel")) return new Response("conflict", { status: 409 });
+      settleCalls++;
+      return new Response(JSON.stringify(await terminalEnvelope("settled", "11111111-1111-4111-8111-111111111112")), { status: 200 });
+    });
     const obligations = new ComputeObligations(storage, client(fetcher));
     await obligations.prepare(binding(), 1_000_500);
     await expect(obligations.abandonUnused(firstId)).rejects.toThrow("compute request rejected");
@@ -49,9 +56,10 @@ describe("compute obligation recovery integration", () => {
     const dispatched = new ComputeObligations(storage, client(fetcher));
     const secondId = "11111111-1111-4111-8111-111111111112";
     await storage.put(`compute:obligation:${secondId}`, { binding: binding(secondId, "job-2"), phase: "dispatched", deadlineMs: 1_060_000 });
-    await dispatched.settleProven(secondId, terminal("settled", secondId));
-    await dispatched.settleProven(secondId, terminal("settled", secondId));
-    await expect(dispatched.settleProven(secondId, terminal("settled", secondId, "13"))).rejects.toThrow("conflict");
+    const proof = await terminalEnvelope("settled", secondId);
+    await dispatched.settleProven(secondId, proof as AuthenticatedTerminalReceipt);
+    await dispatched.settleProven(secondId, proof as AuthenticatedTerminalReceipt);
+    await expect(dispatched.settleProven(secondId, { ...proof, actual_vcpu_ms: "13" } as AuthenticatedTerminalReceipt)).rejects.toThrow("conflict");
   });
 
   it("drains pages fairly with a two-effect budget and skips corrupt records", async () => {
