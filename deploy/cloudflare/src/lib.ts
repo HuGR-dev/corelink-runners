@@ -91,7 +91,11 @@ export interface KvLike {
   // the spawn-Worker (the per-tenant concurrency counter that used it moved to the
   // atomic ConcurrencySlotsDO in W7/F7); kept optional for KVNamespace shape
   // parity so the real binding still satisfies this runtime-agnostic subset.
-  list?(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
+  list?(options: { prefix: string; cursor?: string }): Promise<{
+    keys: { name: string }[];
+    cursor?: string;
+    list_complete?: boolean;
+  }>;
 }
 
 // How long a spawn claim lives — past the longest CI job, a self-cleaning
@@ -228,120 +232,24 @@ export async function verifyGithubHmac(secret: string, sig: string, body: string
   return safeEqual(`sha256=${hex}`, sig);
 }
 
-// The frozen mint-request inputs (server-derived-tenant seam, 2026-07-04). The
-// Worker sends `repo_full_name` + `installation_id`; the SERVER derives the tenant
-// (we no longer send `owner_tenant`). `job_id` is the GH workflow_job.id.
 export interface MintParams {
   jobId: string;
-  repoFullName: string; // evt.repository.full_name
-  installationId: string; // evt.installation.id (stringified)
-  scope?: string; // default "read-write"
-  ttlSeconds?: number; // optional PAT TTL override
-  // Option-C (per-tenant-PAT dispatch, server confirmed live 2026-07-21): when set,
-  // the mint resolves the tenant by INTROSPECTING this acquiring PAT instead of
-  // deriving it from installation_id. Presented as `Authorization: Bearer <pat>`
-  // ALONGSIDE the dispatcher's `x-corelink-internal-auth` (both required — the
-  // internal-auth is still the trust boundary; the PAT only names the tenant), and
-  // `installation_id` is OMITTED from the body (server rejects a null/"" as
-  // malformed → 400). Used for repos in REPO_TENANT_PAT_MAP; empty map ⇒ never set.
+  repoFullName: string;
+  installationId: string;
+  scope?: string;
+  ttlSeconds?: number;
   acquiringPat?: string;
+  /** Issuer cleanup remains active until the durable Worker adoption ACK. */
+  credentialOperationId?: string;
+  computeReservationId?: string;
 }
-
-// The per-job CAS PAT mint result. `tenant` is the SERVER-DERIVED, authoritative
-// tenant (injected as CLW_TENANT + used as the billed tenant); `maxConcurrency`
-// is the per-tenant runner ceiling (absent ⇒ no ceiling enforced).
 export interface MintResult {
   token: string;
   patId: string;
   tenant: string;
+  lifecycleGeneration: string;
   maxConcurrency?: number;
-  /** Monthly compute allowance (vCPU-h). Absent ⇒ no metered ceiling on file. */
   maxVcpuH?: number;
-}
-
-// A 403 from the mint is a HARD DENY (installation not mapped / tenant suspended /
-// repo not allowlisted / not runner-entitled). It is thrown as a DISTINCT error so
-// the caller ABORTS the spawn — it must NEVER fail-open to a wrong-tenant cold
-// spawn. Any OTHER failure (5xx, network) is a plain Error ⇒ fail-open to cold.
-export class MintForbiddenError extends Error {
-  constructor(message = "runner mint unauthorized") {
-    super(message);
-    this.name = "MintForbiddenError";
-  }
-}
-
-// Mint a per-job CAS PAT via the runner-mint seam (corelink-server). The server
-// DERIVES the tenant from installation_id + repo_full_name (authorization happens
-// HERE): a 403 ⇒ MintForbiddenError (hard deny, abort); a 5xx/network ⇒ plain
-// Error (caller falls open to a COLD spawn — cache absent ⇒ slow, never broken).
-async function mintCasPat(env: MintEnv, params: MintParams): Promise<MintResult> {
-  const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
-  // Option-C (per-tenant-PAT dispatch): resolve the tenant by introspecting the
-  // acquiring PAT. The dispatcher trust boundary (x-corelink-internal-auth) is
-  // UNCHANGED — the Bearer PAT is additive and only names the tenant (server
-  // runner_mint.ts:407-427). `installation_id` MUST be omitted entirely (a null/""
-  // is rejected as malformed → 400); server-confirmed scope for this path is cas:rw.
-  const optionC = !!params.acquiringPat;
-  const headers: Record<string, string> = {
-    ...cfAccessHeaders(env),
-    "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
-    "content-type": "application/json",
-    "user-agent": "corelink-spawn-worker",
-  };
-  if (optionC) headers["authorization"] = `Bearer ${params.acquiringPat}`;
-  const resp = await fetch(`${base}/internal/v1/runner/mint`, {
-    method: "POST",
-    headers,
-    // FROZEN request body: NO owner_tenant (server derives the tenant). Option-C
-    // OMITS installation_id (tenant comes from PAT introspection) and pins scope
-    // cas:rw; the default installation-derived path is byte-identical to before.
-    body: JSON.stringify({
-      job_id: params.jobId,
-      repo_full_name: params.repoFullName,
-      ...(optionC ? {} : { installation_id: params.installationId }),
-      scope: params.scope ?? (optionC ? "cas:rw" : "read-write"),
-      ...(params.ttlSeconds != null ? { ttl_seconds: params.ttlSeconds } : {}),
-    }),
-  });
-  // 403 FORBIDDEN ⇒ HARD DENY. Propagate a distinct error so the caller aborts
-  // the spawn (no JIT, no container) rather than fail-open to a wrong-tenant cold.
-  if (resp.status === 403) {
-    throw new MintForbiddenError(
-      `runner mint unauthorized (403): ${await resp.text().catch(() => "")}`,
-    );
-  }
-  // Any other non-2xx (5xx D1 error "runner mint unavailable", etc.) ⇒ plain Error
-  // ⇒ the caller MAY fail-open to a cold spawn (unchanged discipline).
-  if (!resp.ok) throw new Error(`runner mint ${resp.status}`);
-  // FROZEN 200 wire: {token_plaintext, pat_id, token_id, tenant (DERIVED,
-  // AUTHORITATIVE), expires_ms, max_concurrency}. Keys logged on a miss so any
-  // future drift is loud. A malformed 200 fails open to cold (not a hard deny).
-  const j = (await resp.json()) as {
-    token_plaintext?: string;
-    pat_id?: string;
-    tenant?: string;
-    max_concurrency?: number;
-    // ADDITIVE (server #975): the monthly compute allowance. OMITTED for a tenant
-    // with no metered ceiling, so `undefined` here is the normal case, not a
-    // contract violation — it must never fail the mint.
-    max_vcpu_h?: number;
-  };
-  if (!j.token_plaintext) {
-    throw new Error(`runner mint: no token_plaintext (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  if (!j.pat_id) {
-    throw new Error(`runner mint: no pat_id (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  if (!j.tenant) {
-    throw new Error(`runner mint: no tenant (200 keys: ${Object.keys(j).join(",")})`);
-  }
-  return {
-    token: j.token_plaintext,
-    patId: j.pat_id,
-    tenant: j.tenant,
-    maxConcurrency: typeof j.max_concurrency === "number" ? j.max_concurrency : undefined,
-    maxVcpuH: typeof j.max_vcpu_h === "number" ? j.max_vcpu_h : undefined,
-  };
 }
 
 // Revoke a per-job CAS PAT via D-9 — keyed by `pat_id` (the live /revoke contract:
@@ -353,10 +261,12 @@ export async function revokeCasPatById(
   env: MintEnv,
   patId: string,
   ownerTenant?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const base = env.CORELINK_MINT_URL ?? "https://corelink-api.humangr.com";
   const resp = await fetch(`${base}/internal/v1/runner/revoke`, {
     method: "POST",
+    signal,
     headers: {
       ...cfAccessHeaders(env),
       "x-corelink-internal-auth": env.CORELINK_RUNNER_MINT_AUTH_KEY ?? "",
@@ -367,7 +277,7 @@ export async function revokeCasPatById(
     // the mint (fallback: wrangler's CLW_TENANT for legacy single-tenant deploys).
     body: JSON.stringify({ pat_id: patId, owner_tenant: ownerTenant ?? env.CLW_TENANT }),
   });
-  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}: ${await resp.text()}`);
+  if (!resp.ok) throw new Error(`D-9 revoke ${resp.status}`);
 }
 
 // The result of the AUTHORIZE + warm-mint step. `authz` is the gate the caller
@@ -386,9 +296,15 @@ export async function revokeCasPatById(
  */
 export type ColdReason = "mint_key_unarmed" | "no_repo" | "no_installation_or_pat";
 
-export interface ContainerEnvResult {
+interface ContainerEnvResultBase {
+  /** Exact concurrency holder created by this preparation. */
+  preparationId?: string;
+  /** Durable shared compute reservation, held independently of PAT cleanup. */
+  computeReservationId?: string;
   authz: "ok" | "forbidden";
   containerEnv: Record<string, string>;
+  /** Present on a 403 so edge-proxy failures are retryable and authz is auditable. */
+  forbiddenReason?: "edge_proxy" | "authz";
   /** Set iff the spawn is COLD; absent on a warm mint. */
   coldReason?: ColdReason;
   patId?: string;
@@ -397,11 +313,15 @@ export interface ContainerEnvResult {
   /**
    * Monthly compute allowance in vCPU-HOURS (server #975). Warm only, and
    * ABSENT for a tenant with no metered ceiling — absent means "nothing to warn
-   * against", never "zero allowance". ADVISORY: it is not consulted by any
-   * admission decision, only by the near-ceiling warning at completion.
+   * against", never "zero allowance". The paired authorization grant enforces
+   * metered admission; this returned value also supports completion warnings.
    */
   maxVcpuH?: number;
 }
+
+export type ContainerEnvResult =
+  | (ContainerEnvResultBase & { authz: "forbidden"; lifecycleGeneration?: never })
+  | (ContainerEnvResultBase & { authz: "ok"; lifecycleGeneration: string });
 
 // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
 //
@@ -488,153 +408,15 @@ export function decideRedeem(
   return { status: 200, cred: rec.cred }; // MULTI-USE: no consume — cred served until expiry
 }
 
-// AUTHORIZE the runner + build the cache-warm CLW_* overlay. Opt-in: only when the
-// runner-mint key is configured AND we have the authz inputs (repo + installation).
-// A 403 ⇒ authz:"forbidden" (HARD DENY — never a wrong-tenant cold spawn). A 5xx/
-// network/malformed-200 ⇒ authz:"ok" with an EMPTY overlay (FAIL-OPEN to cold —
-// the job still runs, uncached). CLW_TENANT is the SERVER-DERIVED tenant, never
-// wrangler's CLW_TENANT var. Returns pat_id/tenant/max_concurrency on a warm mint.
-//
-// env-0: when `deps.stash` + `deps.fabricEndpoint` are provided, the PAT is
-// STASHED and a single-use CLW_CRED_TICKET is injected INSTEAD of CLW_TOKEN — the
-// untrusted container never sees the raw PAT. When they're absent, the default is
-// FAIL-CLOSED (spawn COLD, no PAT) unless `env.ALLOW_LEGACY_PAT_ENV === "1"` is
-// explicitly set (the non-prod pre-env-0 escape hatch). A stash FAILURE also never
-// falls back to CLW_TOKEN — it spawns COLD (the whole point is no PAT in the untrusted env).
-export async function buildContainerEnv(
-  env: MintEnv,
-  params: MintParams,
-  deps?: { stash?: CredStashLike; fabricEndpoint?: string },
-): Promise<ContainerEnvResult> {
-  // ── Why these are no longer ONE condition (★A3.17 / union-01) ───────────────
-  //
-  // Three unrelated facts used to collapse into a single silent
-  // `{ authz: "ok", containerEnv: {} }`, and the collapse is the defect: an
-  // OPERATOR MISCONFIGURATION was indistinguishable from an ordinary cold spawn.
-  //
-  //   mint_key_unarmed        — OUR deployment is wrong. Every job on the whole
-  //                             fleet spawns COLD, tenantless and unattributed,
-  //                             and nothing anywhere says so. Money silently
-  //                             stops being attributable.
-  //   no_repo                 — a malformed request; nothing to authorize against.
-  //   no_installation_or_pat  — an ORDINARY cold spawn. A repo webhook carries no
-  //                             installation id and REPO_INSTALLATION_MAP covers
-  //                             one repo, so this is the expected path for
-  //                             everything outside the map. It is not a fault.
-  //
-  // Each now names itself in `coldReason`, so the caller can log and count them
-  // apart. The behaviour is otherwise unchanged: all three still spawn COLD.
-  //
-  // ⚠️ ON FAIL-CLOSED. A3.17 asks the worker to REFUSE to serve when the mint key
-  // is unarmed. That is available here — `REQUIRE_MINT_KEY=1` turns the
-  // misconfiguration into a hard deny — but it is deliberately NOT the default,
-  // and the reason is fresh evidence rather than timidity: on 2026-08-31 a
-  // fail-closed guard that ran before the control plane could bind turned a
-  // recoverable dependency fault into a twelve-day total outage. Refusing every
-  // spawn on a config slip trades silent misattribution for a fleet-wide CI stop.
-  // The loud half — which is what makes the failure *findable* — ships on by
-  // default; the refusing half is one deliberate var away. Arming it is the
-  // owner's ratification, not this code's assumption.
-  if (!env.CORELINK_RUNNER_MINT_AUTH_KEY) {
-    return env.REQUIRE_MINT_KEY === "1"
-      ? { authz: "forbidden", containerEnv: {}, coldReason: "mint_key_unarmed" }
-      : { authz: "ok", containerEnv: {}, coldReason: "mint_key_unarmed" };
-  }
-  if (!params.repoFullName) {
-    return { authz: "ok", containerEnv: {}, coldReason: "no_repo" };
-  }
-  // Authorizable when we have EITHER an installation_id (tenant derived from it) OR
-  // an acquiring PAT (Option-C: tenant derived by introspection).
-  if (!params.installationId && !params.acquiringPat) {
-    return { authz: "ok", containerEnv: {}, coldReason: "no_installation_or_pat" };
-  }
-  try {
-    const m = await mintCasPat(env, params);
-    const endpoint = env.CLW_ENDPOINT ?? "https://corelink-api.humangr.com";
-    // env-0 ON (stash + fabric endpoint configured): stash the PAT, inject a
-    // single-use ticket — NEVER CLW_TOKEN. A stash failure spawns COLD (no leak).
-    if (deps?.stash && deps?.fabricEndpoint) {
-      // The stash is idempotent per lease: it returns the EFFECTIVE ticket (the
-      // existing one if a prior spawn attempt for this jobId already stashed, else
-      // the fresh one). Inject whatever it returns so retries converge on one ticket.
-      let ticket: string;
-      try {
-        ticket = await deps.stash.stash(
-          params.jobId,
-          randomTicket(),
-          { token: m.token, endpoint, tenant: m.tenant },
-          CRED_TICKET_TTL_S * 1000,
-        );
-      } catch (e) {
-        // Stash failed ⇒ we CANNOT do env-0. Never fall back to CLW_TOKEN — spawn
-        // COLD (the minted PAT is undelivered and TTL-expires). No PAT ever leaks.
-        console.log(`cred-stash failed, spawning COLD (no token leaked): ${(e as Error).message}`);
-        return { authz: "ok", containerEnv: {} };
-      }
-      return {
-        authz: "ok",
-        containerEnv: {
-          CLW_ENDPOINT: endpoint,
-          CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
-          CLW_CRED_TICKET: ticket, // multi-use, lease-scoped; redeemed in-process by each clw
-          CLW_LEASE_ID: params.jobId, // the redemption key (= GH jobId)
-          CLW_FABRIC_ENDPOINT: deps.fabricEndpoint, // where clw redeems the ticket
-          CLW_REF_DOMAIN: "runner",
-        },
-        patId: m.patId,
-        tenant: m.tenant,
-        maxConcurrency: m.maxConcurrency,
-        maxVcpuH: m.maxVcpuH,
-      };
-    }
-    // env-0 NOT configured. FAIL-CLOSED by default: never silently inject the raw
-    // PAT (`CLW_TOKEN`) into the untrusted container. The legacy PAT overlay is a
-    // pre-env-0 transition escape hatch, gated behind an EXPLICIT non-prod flag
-    // (`ALLOW_LEGACY_PAT_ENV="1"`) — coordinator env-0 review must-fix #1. Without
-    // it we spawn COLD: the minted PAT is undelivered (TTL-expires), no leak. In
-    // prod, env-0 (`SPAWN_WORKER_PUBLIC_URL`) is armed, so this branch is dead.
-    // F2-5 (W3): refuse the legacy raw-PAT overlay whenever the PROD marker
-    // (SPAWN_WORKER_PUBLIC_URL) is present — even if ALLOW_LEGACY_PAT_ENV="1" was
-    // mis-set and the env-0 deps weren't passed. In prod the env-0 branch above
-    // already wins; this closes the residual "deps missing + flag mis-set in prod"
-    // hole so a raw PAT can NEVER reach an untrusted container in a prod deploy.
-    const legacyRefusedInProd = env.ALLOW_LEGACY_PAT_ENV === "1" && !!env.SPAWN_WORKER_PUBLIC_URL;
-    if (env.ALLOW_LEGACY_PAT_ENV !== "1" || legacyRefusedInProd) {
-      console.log(
-        legacyRefusedInProd
-          ? "ALLOW_LEGACY_PAT_ENV=1 REFUSED (SPAWN_WORKER_PUBLIC_URL set ⇒ prod env-0 armed): spawning COLD"
-          : "env-0 not configured and ALLOW_LEGACY_PAT_ENV not set: spawning COLD (no raw PAT in the untrusted container env)",
-      );
-      return { authz: "ok", containerEnv: {} };
-    }
-    // Legacy (explicit non-prod opt-in) — pre-launch transition only: inject CLW_TOKEN.
-    console.log("ALLOW_LEGACY_PAT_ENV=1: injecting legacy CLW_TOKEN (non-prod transition path)");
-    return {
-      authz: "ok",
-      containerEnv: {
-        CLW_ENDPOINT: endpoint,
-        CLW_TENANT: m.tenant, // server-DERIVED, authoritative (NEVER wrangler's var)
-        CLW_TOKEN: m.token, // per-job; never logged
-        CLW_REF_DOMAIN: "runner",
-      },
-      patId: m.patId,
-      tenant: m.tenant,
-      maxConcurrency: m.maxConcurrency,
-      maxVcpuH: m.maxVcpuH,
-    };
-  } catch (e) {
-    if (e instanceof MintForbiddenError) {
-      // 403 HARD DENY ⇒ ABORT. An unauthorized repo must not run at all — never
-      // let a 403 degrade into a (wrong-tenant) cold spawn.
-      console.log(`runner mint FORBIDDEN (aborting spawn): ${(e as Error).message}`);
-      return { authz: "forbidden", containerEnv: {} };
-    }
-    // 5xx ("runner mint unavailable") / network / malformed-200 ⇒ FAIL-OPEN to
-    // cold. The entrypoint's cache-warm hook is also fail-open — slow, never broken.
-    console.log(`warm-mint failed, spawning COLD: ${(e as Error).message}`);
-    return { authz: "ok", containerEnv: {} };
-  }
-}
+/* Required mint/env-0 implementation is exported from ./lib/build_container_env. */
+/* The old implementation was removed; this marker keeps the surrounding pure
+   credential-stash helpers and their compatibility contracts in this module. */
+export {
+  buildContainerEnv,
+  mintCasPat,
+  MintForbiddenError,
+  classifyMintForbidden,
+} from "./lib/build_container_env";
 
 // ── Concurrency slots (W7/F7) — ATOMIC per-key + fleet cap, DO-backed ─────────
 //
@@ -663,33 +445,14 @@ export const SLOT_TTL_S = 2700;
 // (no idle cost). The HARD ceiling is the account limit (~343 standard-4 runners
 // after the cache fleet's vCPU share); beyond that needs a CF account-limit raise.
 export const FLEET_MAX_CONCURRENCY = 250;
-// ── Fail-open BUDGET for the admission path (★A3.16 / RH3) ──────────────────
-//
-// `acquireConcurrencySlot` admits when the slot Durable Object THROWS, so an infra
-// hiccup never blocks a legitimate job. That intent is right and is kept. What was
-// wrong is that the fail-open had no bound: while the DO is throwing, NOTHING
-// enforces the per-tenant entitlement or `FLEET_MAX_CONCURRENCY`, so a sustained DO
-// fault admits every arrival — the one shape that turns "flat concurrency with
-// unlimited minutes" into unbounded spend.
-//
-// A budget separates the two cases the old code could not tell apart. A handful of
-// errors is a hiccup: absorb it, admit, stay out of the way. A sustained stream of
-// them is an outage, and during an outage the cap is not being enforced by anyone —
-// so admission must stop rather than run unmetered. Beyond the budget the answer is
-// a refusal with a distinct reason, not a silent yes.
-//
-// ⚠️ APPROXIMATE BY CONSTRUCTION. The counter is a KV read-modify-write, which is
-// not atomic and is eventually consistent, so concurrent fail-opens can undercount
-// and the real admits can exceed the number below. It is a ceiling within a factor,
-// not an exact quota — which is the whole distance from "unbounded" to "bounded",
-// and is worth having even though it is not exact. Do not cite it as an exact bound.
+// Legacy pure fail-open decision helpers retained for compatibility with their
+// historical unit suite. Production admission uses the transactional global
+// ContainmentDO authority in lib/admission_budget.ts; these helpers do no storage
+// access and are not used by acquireConcurrencySlot.
 export const FAILOPEN_WINDOW_S = 60;
-// Deliberately small. Sized for a transient, NOT to keep a fleet running through a
-// DO outage: at this rate a sustained fault admits far fewer boxes than it would
-// have, while a genuine blip (a few requests) is entirely absorbed.
 export const FAILOPEN_MAX_PER_WINDOW = 5;
 
-/** Bucket key for the current fail-open window. Exported for the test to pin it. */
+/** Legacy bucket key helper; production authority uses a rolling durable record. */
 export function failOpenWindowKey(nowMs: number): string {
   return `failopen:${Math.floor(nowMs / (FAILOPEN_WINDOW_S * 1000))}`;
 }
@@ -699,10 +462,7 @@ export function failOpenWindowKey(nowMs: number): string {
  * `decideSlotAcquire`): given how many fail-open admissions this window has already
  * recorded, may this one be admitted?
  *
- * `null` means the count could not be read at all. That is NOT treated as zero: if
- * both the slot DO and the counter store are unavailable, nothing anywhere is
- * bounding the fleet, and admitting into that is exactly the unbounded case. Two
- * independent stores failing at once is an outage, not a hiccup.
+ * `null` remains a refusal for the historical pure decision contract.
  */
 export function decideFailOpenAdmission(
   countThisWindow: number | null,
@@ -983,6 +743,8 @@ export function isInstallationAllowlisted(raw: string | undefined, installationI
 /** The subset of Env the reconciler's GitHub listing reads. */
 export interface ReconcilerEnv {
   GITHUB_MINT_TOKEN?: string;
+  /** Token minted for the verified installation during registry discovery. */
+  GITHUB_RECONCILER_TOKEN?: string;
 }
 
 interface GhRun {
@@ -1121,7 +883,7 @@ export async function listOrphanRunnerJobs(
   const gh = async (path: string): Promise<unknown> => {
     const r = await fetch(`https://api.github.com${path}`, {
       headers: {
-        authorization: `Bearer ${env.GITHUB_MINT_TOKEN ?? ""}`,
+        authorization: `Bearer ${env.GITHUB_RECONCILER_TOKEN ?? env.GITHUB_MINT_TOKEN ?? ""}`,
         accept: "application/vnd.github+json",
         "user-agent": "corelink-spawn-worker",
       },
@@ -1130,15 +892,48 @@ export async function listOrphanRunnerJobs(
     return r.json();
   };
   try {
-    const runs = (await gh(`/repos/${repo}/actions/runs?status=queued&per_page=30`)) as {
-      workflow_runs?: GhRun[];
-    };
+    const runs: GhRun[] = [];
+    let runCursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const query = runCursor
+        ? `?status=queued&per_page=30&after=${encodeURIComponent(runCursor)}`
+        : "?status=queued&per_page=30";
+      const pageBody = (await gh(`/repos/${repo}/actions/runs${query}`)) as {
+        workflow_runs?: GhRun[];
+        next_cursor?: string | null;
+        next_page?: string | null;
+      };
+      runs.push(...(pageBody.workflow_runs ?? []));
+      const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
+      if (next == null || next === "") break;
+      if (typeof next !== "string" || next === runCursor || page === 19) return [];
+      runCursor = next;
+    }
     const orphans: { jobId: string; labels: string[] }[] = [];
-    for (const run of runs.workflow_runs ?? []) {
+    for (const run of runs) {
       const age = nowMs - Date.parse(run.created_at);
       if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
-      const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as { jobs?: GhJob[] };
-      for (const j of jobs.jobs ?? []) {
+      const jobs: GhJob[] = [];
+      let jobCursor: string | undefined;
+      for (let page = 0; page < 20; page++) {
+        // Keep the original first-page URL byte-stable; subsequent pages use
+        // the provider cursor. This also avoids changing the live seam for
+        // installations whose GitHub proxy only recognizes the canonical path.
+        const query = jobCursor
+          ? `?per_page=100&after=${encodeURIComponent(jobCursor)}`
+          : "";
+        const pageBody = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs${query}`)) as {
+          jobs?: GhJob[];
+          next_cursor?: string | null;
+          next_page?: string | null;
+        };
+        jobs.push(...(pageBody.jobs ?? []));
+        const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
+        if (next == null || next === "") break;
+        if (typeof next !== "string" || next === jobCursor || page === 19) return [];
+        jobCursor = next;
+      }
+      for (const j of jobs) {
         const matched = matchManagedLabels(j.labels ?? [], configured);
         // "runnerless" = no runner assigned. GitHub's Actions jobs API reports an
         // unassigned queued job as `runner_id: 0` (observed live 2026-07-20 — NOT
@@ -1154,7 +949,9 @@ export async function listOrphanRunnerJobs(
         }
       }
     }
-    return orphans;
+    return [...new Map(orphans.map((job) => [job.jobId, job])).values()].sort((a, b) =>
+      a.jobId.localeCompare(b.jobId, undefined, { numeric: true }),
+    );
   } catch (e) {
     console.log(`reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`);
     return [];
@@ -1242,6 +1039,9 @@ export interface OrphanRecord {
   // the placement-confirmation block below. Absent ⇒ the record is a plain
   // failure/refusal dead-letter and follows the original retry path.
   placedMs?: number;
+  /** First failure classification; retained in the same orphan: record for
+   * bounded retry/audit and never used as authorization input. */
+  failure_class?: "edge_proxy_403" | "authz_403";
 }
 
 // ── Placement confirmation (2026-08-03) — a spawn that "succeeded" and produced
@@ -1631,20 +1431,6 @@ const BILLING_SOURCE = "corelink-runners/spawn-worker";
 const RUNNER_SLOT_SECONDS_KIND = "runner_slot_seconds";
 
 /**
- * The BILLABLE runner compute kind (2026-08-02). `qty` is wall-clock ALLOCATED
- * seconds × the box's vCPU count, because the entitlement it meters against
- * (`runners_entitlement.max_vcpu_h`) is denominated in vCPU-HOURS.
- *
- * A slot-second is NOT a vCPU-second. On the current 4-vCPU runner they differ
- * by exactly 4×, and both read as "seconds" — so pushing slot-seconds against a
- * vCPU-hour ceiling under-bills by 4× and looks completely reasonable while
- * doing it. That is the whole reason this is a separate kind rather than a
- * redefinition of `runner_slot_seconds`: changing what an existing kind's `qty`
- * MEANS is invisible to every consumer already reading it.
- */
-const RUNNER_VCPU_SECONDS_KIND = "runner_vcpu_seconds";
-
-/**
  * vCPU count of the runner box, and the ONLY place the fleet's shape enters the
  * billing math. Pinned to `RunnerContainer`'s `instance_type` in wrangler.jsonc
  * (`standard-4` = 4 vCPU / 12 GiB / 20 GB — which is also this Cloudflare
@@ -1713,30 +1499,18 @@ export async function buildUsageEvent(opts: {
   startedMs: number;
   completedMs: number;
   region: string;
-  /**
-   * vCPU count of the box that ran this job. Defaults to the single fleet size
-   * ({@link RUNNER_BOX_VCPU}) but is a PARAMETER, not a constant read, so a
-   * mixed-size fleet only has to pass the real number here — the billing math
-   * above it never changes.
-   */
+  /** @deprecated Accepted for source compatibility; the wire contract is slot-seconds. */
   vcpu?: number;
 }): Promise<UsageEvent> {
   const allocatedS = Math.max(0, Math.floor((opts.completedMs - opts.startedMs) / 1000));
-  // Guard the multiplier the same way the duration is guarded: a non-finite or
-  // non-positive vCPU count would silently zero the bill (or negate it), and a
-  // zeroed bill is indistinguishable from a job that never ran.
-  const vcpu = Number.isFinite(opts.vcpu) && (opts.vcpu as number) > 0
-    ? (opts.vcpu as number)
-    : RUNNER_BOX_VCPU;
-  const qty = allocatedS * vcpu;
   const period = billingPeriod(opts.completedMs);
   return {
     tenant_id: opts.tenantId,
-    // BILLABLE unit — vCPU-seconds, matching the vCPU-HOUR entitlement. See
-    // RUNNER_VCPU_SECONDS_KIND for why this is a distinct kind and not a
-    // redefinition of runner_slot_seconds.
-    event_kind: RUNNER_VCPU_SECONDS_KIND,
-    qty,
+    // Frozen wire contract: every Worker completion path emits one canonical
+    // per-job slot-seconds event. vCPU accounting, where needed, is derived by
+    // the owning entitlement path and never changes this event's meaning.
+    event_kind: RUNNER_SLOT_SECONDS_KIND,
+    qty: allocatedS,
     billing_period: period,
     region: opts.region,
     source: BILLING_SOURCE,
@@ -1751,7 +1525,7 @@ export async function buildUsageEvent(opts: {
  * returns `{accepted, deduped, total}`; we only need the 2xx (the aggregator
  * reconciles, and idem_key makes a retry safe).
  */
-export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<void> {
+export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent, signal?: AbortSignal): Promise<void> {
   const resp = await fetch(env.BILLING_INGEST_URL ?? "", {
     method: "POST",
     headers: {
@@ -1761,6 +1535,7 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent): Promise<v
       "user-agent": "corelink-spawn-worker",
     },
     body: JSON.stringify([ev]),
+    ...(signal ? { signal } : {}),
   });
   if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
 }
@@ -1952,6 +1727,7 @@ export async function reconcileCompletedJobBilling(
   env: BillingReconcileEnv,
   configured: string | undefined,
   nowMs: number,
+  readAttribution?: (jobId: string) => Promise<{ jobId: string; tenant: string } | null>,
 ): Promise<number> {
   const repos = parseReconcilerRepos(env.RECONCILER_REPOS);
   if (repos.length === 0) return 0; // opt-in: no allowlist ⇒ off (mirrors the orphan re-drive)
@@ -1968,27 +1744,73 @@ export async function reconcileCompletedJobBilling(
       nowMs,
     );
     for (const job of jobs) {
-      // The ledger is the tenant-safe source of truth: it carries the DERIVED
-      // tenant the GitHub jobs API never does. No record ⇒ not backfillable
-      // (preserves the prior skip-and-count behavior — never mis-bill).
-      const rec = await readUsageLedger(env.RUNNER_JOB_PATS, job.jobId);
-      if (!rec) {
+      // A complete usage ledger supplies tenant + execution region. When the
+      // completion webhook was lost, T4-W1's ContainmentDO reader supplies the
+      // immutable tenant attribution instead.
+      let rec: UsageLedgerRecord | null;
+      try {
+        rec = await readUsageLedger(env.RUNNER_JOB_PATS, job.jobId);
+      } catch (error) {
+        // A per-job KV read failure must not abort the rest of the sweep. Keep
+        // the source untouched and let the next tick retry this same job.
+        logEvent("error", "billing_reconcile_ledger_read_failed", {
+          jobId: job.jobId,
+          error: (error as Error).message,
+        });
+        continue;
+      }
+      let tenant = rec?.tenant;
+      // GitHub's authenticated completed-job response is the lifecycle source
+      // for both timestamps. Durable attribution supplies ownership only.
+      const startedMs = rec?.startedMs ?? job.startedMs;
+      if (!tenant && readAttribution) {
+        try {
+          const attribution = await readAttribution(job.jobId);
+          if (attribution?.jobId === job.jobId && attribution.tenant.trim()) {
+            tenant = attribution.tenant;
+          }
+        } catch (error) {
+          logEvent("error", "billing_reconcile_attribution_read_failed", { jobId: job.jobId, error: (error as Error).message });
+        }
+      }
+      if (!tenant) {
         skipped += 1;
         continue;
       }
       // Prefer the region stored at completion (where the job actually ran); fall
-      // back to BILLING_REGION. Ingest validates 3-char — skip if neither is one.
-      const region = rec.region.length === 3 ? rec.region : (env.BILLING_REGION ?? "");
-      if (region.length !== 3) {
+      // back to an explicitly configured BILLING_REGION. Never invent a region.
+      const region = rec?.region?.toLowerCase() ?? env.BILLING_REGION?.toLowerCase() ?? "";
+      if (!/^[a-z]{3}$/.test(region)) {
         skipped += 1;
         continue;
       }
+      if (!rec) {
+        // A lost completion webhook has no complete usage row. Freeze the
+        // authenticated lifecycle evidence before the first HTTP attempt so a
+        // prolonged ingest outage remains recoverable after GitHub lookback.
+        if (!env.RUNNER_JOB_PATS) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await writeUsageLedger(env.RUNNER_JOB_PATS, {
+            jobId: job.jobId,
+            tenant,
+            startedMs: job.startedMs,
+            completedMs: job.completedMs,
+            region,
+          });
+        } catch (error) {
+          logEvent("error", "billing_reconcile_ledger_write_failed", { jobId: job.jobId, error: (error as Error).message });
+          continue;
+        }
+      }
       try {
         const ev = await buildUsageEvent({
-          tenantId: rec.tenant,
-          jobId: rec.jobId,
-          startedMs: rec.startedMs,
-          completedMs: rec.completedMs,
+          tenantId: tenant,
+          jobId: job.jobId,
+          startedMs,
+          completedMs: rec?.completedMs ?? job.completedMs,
           region,
         });
         await pushUsageEvent(env, ev);
@@ -1997,7 +1819,7 @@ export async function reconcileCompletedJobBilling(
         // Fail-open backstop: a push error just means the next tick retries
         // (idem_key makes the re-push safe). Never break the scan.
         logEvent("error", "billing_reconcile_push_failed", {
-          jobId: rec.jobId,
+          jobId: job.jobId,
           error: (e as Error).message,
         });
       }

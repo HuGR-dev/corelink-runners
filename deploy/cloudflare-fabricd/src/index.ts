@@ -36,6 +36,11 @@ export interface Env {
   FABRIC_INTROSPECT_AUTH_KEY: string;
   BILLING_INGEST_AUTH_KEY?: string;
   CLOUDFLARE_SPAWN_AUTH_TOKEN?: string;
+  // Scoped control credentials for the fabric's Cloudflare engine. Each is
+  // forwarded independently into the container; the Rust engine refuses a
+  // partial or shared-token configuration before it can send requests.
+  CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
+  CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
   // A GitHub PAT with repo Administration:write — lets fabricd's PAT broker mint
   // JIT runner configs WITHOUT a GitHub App (the mechanism the autoscaler uses).
   // Absent ⇒ fabricd falls back to the FABRIC_GITHUB_APP_* App path. When set it
@@ -110,6 +115,8 @@ export interface Env {
   FABRIC_INTROSPECT_MAX_INFLIGHT?: string;
   // Enforcement / observability / safety (optional passthroughs; inert until set)
   FABRIC_ADMIN_KEY?: string;
+  FABRIC_COMPUTE_GRANT_PUBLIC_KEYS?: string;
+  FABRIC_CREDENTIAL_ISSUER_AUTH_KEY?: string;
   FABRIC_OBSERVABILITY_KEY?: string;
   // DEV/TEST-ONLY out-of-band cred-ticket mint (POST /v1/test/mint-cred-ticket).
   // OFF by default: absent ⇒ the route 404s (inert). Arms a SENSITIVE mint surface,
@@ -226,6 +233,12 @@ export class FabricdContainer extends Container<Env> {
       ...(env.CLOUDFLARE_SPAWN_AUTH_TOKEN
         ? { CLOUDFLARE_SPAWN_AUTH_TOKEN: env.CLOUDFLARE_SPAWN_AUTH_TOKEN }
         : {}),
+      ...(env.CLOUDFLARE_EXEC_AUTH_TOKEN
+        ? { CLOUDFLARE_EXEC_AUTH_TOKEN: env.CLOUDFLARE_EXEC_AUTH_TOKEN }
+        : {}),
+      ...(env.CLOUDFLARE_LIFECYCLE_AUTH_TOKEN
+        ? { CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: env.CLOUDFLARE_LIFECYCLE_AUTH_TOKEN }
+        : {}),
       ...(env.FABRIC_GITHUB_MINT_TOKEN
         ? { FABRIC_GITHUB_MINT_TOKEN: env.FABRIC_GITHUB_MINT_TOKEN }
         : {}),
@@ -299,6 +312,8 @@ export class FabricdContainer extends Container<Env> {
       // + Stage-B autoscaler passthroughs so a future `wrangler secret put` /
       // var actually reaches the container (all inert until set).
       ...(env.FABRIC_ADMIN_KEY ? { FABRIC_ADMIN_KEY: env.FABRIC_ADMIN_KEY } : {}),
+      ...(env.FABRIC_COMPUTE_GRANT_PUBLIC_KEYS ? { FABRIC_COMPUTE_GRANT_PUBLIC_KEYS: env.FABRIC_COMPUTE_GRANT_PUBLIC_KEYS } : {}),
+      ...(env.FABRIC_CREDENTIAL_ISSUER_AUTH_KEY ? { FABRIC_CREDENTIAL_ISSUER_AUTH_KEY: env.FABRIC_CREDENTIAL_ISSUER_AUTH_KEY } : {}),
       ...(env.FABRIC_OBSERVABILITY_KEY ? { FABRIC_OBSERVABILITY_KEY: env.FABRIC_OBSERVABILITY_KEY } : {}),
       // DEV/TEST-ONLY out-of-band cred-ticket mint — forwarded so a dev/test
       // `wrangler secret put FABRIC_TEST_MINT_KEY` actually reaches the container

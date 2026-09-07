@@ -1,0 +1,1724 @@
+{
+  "schema_version": "disjoint-execution/v1",
+  "baseline": "063b4afc2a1e34b19d77c9a50e507a79ce0e2f85",
+  "registry": "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+  "ledger": "docs/plan/delivery-ledger.json",
+  "policy": {
+    "max_active_executors": 4,
+    "one_executor_per_wp": true,
+    "ci": "complete sprint only",
+    "scope": "Preserve all70 canonical WPs and four sprint acceptance scopes. These are execution rights, not new completion credits.",
+    "dispatch": "Only explicit packet allowlists; no wildcards. Unclosed cross-WP decisions or unpinned baseline block dispatch.",
+    "already_reviewed": "Preserve reviewed code and existing green evidence; do not manufacture red baseline or reimplement working modules.",
+    "canonical_validation": "disjoint-plan.py invokes existing delivery-ledger.py --check for all70IDs/four frozen scopes/dependencies.",
+    "execution_dependency_rule": "R1 is behavior-preserving extraction of source already composed at baseline; execution prerequisite is ancestor source commit, not promotion of canonical acceptance. No external flag, mint policy, live action, rollout or product dependency is satisfied by R1. Future feature/live dispatch must wait for a D0-resolved packet and actual hard prerequisites.",
+    "context": "Dispatch packet <=12000chars; exact owned files + contract + named tests, no whole-repo rediscovery. Runtime model context is not controlled by this guard."
+  },
+  "control_work": {
+    "D0": {
+      "owner": "root",
+      "scope": "Own cross-WP decisions, contracts and packet readiness; executors own private implementation only."
+    },
+    "I0": {
+      "owner": "root",
+      "owns": [
+        "crates/corelink-cloud-engine/src/cloudflare.rs",
+        "crates/corelink-fabric-server/src/app.rs",
+        "crates/corelink-fabric-server/src/reaper.rs",
+        "crates/corelink-fabric-server/src/runner_cas_mint.rs",
+        "crates/corelink-fabric-server/src/server.rs",
+        "crates/corelink-fabric/src/ledger.rs",
+        "crates/corelink-fabric/src/lib.rs",
+        "crates/corelink-fabric/src/pg_ledger.rs",
+        "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/rules.ts",
+        "deploy/cloudflare-canary/src/types.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-fabricd/src/index.ts",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/src/lib/authority_storage.ts",
+        "deploy/cloudflare/src/lib/credential_authority_contract.ts",
+        "deploy/cloudflare/src/metrics.ts",
+        "deploy/cloudflare/test/check-host.test.ts",
+        "deploy/cloudflare/test/cred-stash-do.test.ts",
+        "deploy/cloudflare/wrangler.jsonc",
+        "deploy/cost-monitor/Containerfile",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/package-lock.json",
+        "deploy/cost-monitor/package.json",
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/types.ts"
+      ],
+      "scope": "Serial wiring and composition only. Domain behavior moves into exclusively owned modules; no agent patch to these files."
+    }
+  },
+  "packets": [
+    {
+      "id": "T4-W4",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-fabric-server/tests/acceptance_infra_capacity.rs",
+        "crates/corelink-fabric-server/tests/corelink_admission_arms.rs"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/**"
+      ],
+      "dependencies": [
+        "T3-W4",
+        "D1",
+        "R1"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance."
+    },
+    {
+      "id": "T3-W10",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-fabric-server/src/handlers/cas_cred.rs",
+        "crates/corelink-fabric-server/tests/cas_cred_error_body.rs",
+        "crates/corelink-fabric-server/tests/reaper_teardown_retry.rs"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/reaper.rs"
+      ],
+      "dependencies": [
+        "T3-W4",
+        "T4-W4"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "7142f239effd7d54fd17962d8327ac1ab804a345",
+        "c2fd9bff2550b51dcaf8e2fbd99c5b44a4390d3e",
+        "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
+        "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
+        "9fe16556b992175e0164ccfa69a743b392ef2322",
+        "dbe9b4340c0512cd80637e0388d42922fe55b62e",
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Code and metadata checks complete. Execute runtime acceptance only in complete Sprint1 CI; discovery of unbound/historical identities is explicitly tracked as successor F-20260905-005."
+    },
+    {
+      "id": "T6-W2",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        ".github/workflows/moat-action-test.yml",
+        ".github/workflows/moat-benchmark.yml",
+        "actions/corelink-memoize/action.yml"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "D11"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "7489786a35e402732c58a74c4d005486ed3e4aba"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Reviewed clw patch ready in docs/plan/relays. Await explicit sibling-fence exception requested from owner; then isolated client implementation/release and runnerconsumer pin."
+    },
+    {
+      "id": "T6-W4",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        ".github/workflows/corelink-stress.yml",
+        ".github/workflows/secret-scan.yml",
+        "deploy/cloudflare-canary/package-lock.json",
+        "deploy/cloudflare-canary/package.json",
+        "deploy/cloudflare-canary/src/config.ts",
+        "deploy/cloudflare-canary/src/tick_outbox.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failclosed.test.ts",
+        "deploy/cloudflare-canary/test/fabric-probe-flag-failvisible.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack-recovery.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-ack.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-envelope.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-order.test.ts",
+        "deploy/cloudflare-canary/test/scheduled-tick-outbox-recovery.test.ts",
+        "docs/plan/evidence/T6-W4-stress-host.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/types.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc"
+      ],
+      "dependencies": [
+        "T3-W18",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "f77e4d03fa0db053522bd6571a9ef5286099a130",
+        "f8270299f581e9eefa7274bfcf1a0304acb2a8f4",
+        "e1501f6246fba66d6deaa9aad9ddd4be0be71586"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Producer, secret-scan and stress code approved. Run full acceptance only after complete sprint composition; owner config/live evidence remains pending."
+    },
+    {
+      "id": "T6-W15",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cost-monitor/src/ack_recovery.ts",
+        "deploy/cost-monitor/src/acks.ts",
+        "deploy/cost-monitor/src/delivery.ts",
+        "deploy/cost-monitor/src/ingest.ts",
+        "deploy/cost-monitor/src/lifecycle.ts",
+        "deploy/cost-monitor/src/outbox.ts",
+        "deploy/cost-monitor/src/page_ack.ts",
+        "deploy/cost-monitor/test/ack-recovery.test.ts",
+        "deploy/cost-monitor/test/ack-token.test.ts",
+        "deploy/cost-monitor/test/canary-missing-tick.test.ts",
+        "deploy/cost-monitor/test/credential-isolation.test.ts",
+        "deploy/cost-monitor/test/delivery-dedupe.test.ts",
+        "deploy/cost-monitor/test/delivery.test.ts",
+        "deploy/cost-monitor/test/incident-state.test.ts",
+        "deploy/cost-monitor/test/independence.test.ts",
+        "deploy/cost-monitor/test/ingest-idempotency.test.ts",
+        "deploy/cost-monitor/test/lifecycle-missing.test.ts",
+        "deploy/cost-monitor/test/outbox-periodic-head.test.ts",
+        "deploy/cost-monitor/test/outbox-quarantine.test.ts",
+        "deploy/cost-monitor/test/outbox-recovery.test.ts",
+        "deploy/cost-monitor/test/outbox-transition-head.test.ts",
+        "deploy/cost-monitor/test/page-ack-auth.test.ts",
+        "deploy/cost-monitor/test/scheduler.test.ts",
+        "deploy/cost-monitor/test/state.test.ts",
+        "deploy/cost-monitor/tsconfig.json",
+        "deploy/cost-monitor/vitest.config.ts",
+        "docs/plan/evidence/T6-W15-monitor-base.json",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts"
+      ],
+      "reads_only": [
+        "deploy/cost-monitor/Containerfile",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/package-lock.json",
+        "deploy/cost-monitor/package.json",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts",
+        "deploy/cost-monitor/src/types.ts"
+      ],
+      "dependencies": [
+        "T6-W4",
+        "O-MONITORHOST",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Owner input pending: identify authorized non-Cloudflare runtime and alert channel. Establish required independent storage/scheduler/credential capabilities before monitor implementation."
+    },
+    {
+      "id": "T5-W1",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "actions/corelink-memoize/README.md"
+      ],
+      "reads_only": [
+        "docs/onboarding/**"
+      ],
+      "dependencies": [
+        "R6"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/onboarding/**; actions/corelink-memoize/README.md."
+    },
+    {
+      "id": "T5-W2",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [],
+      "reads_only": [
+        "integrations/**"
+      ],
+      "dependencies": [
+        "D7",
+        "D3"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/**."
+    },
+    {
+      "id": "T5-W3",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "integrations/github-actions/action.yml",
+        "integrations/github-actions/test/validate.sh"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T5-W2"
+      ],
+      "source_commits": [
+        "8505fda9245ac02665ddac264c7e5f3414022de2"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at integrations/github-actions/action.yml; integrations/github-actions/test/validate.sh."
+    },
+    {
+      "id": "T2-W3",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [],
+      "reads_only": [
+        ".github/workflows/*.yml"
+      ],
+      "dependencies": [
+        "T2-W1a",
+        "T6-W1",
+        "T6-W2",
+        "T6-W3",
+        "T6-W4",
+        "T6-W8",
+        "T7-W4"
+      ],
+      "source_commits": [
+        "2171dd91034e46d18cce6d6e50624a6d44879858"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip."
+    },
+    {
+      "id": "T4-W1",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "integrated",
+      "owns": [
+        "deploy/cloudflare/src/lib/job_attribution.ts",
+        "deploy/cloudflare/src/lib/job_attribution_authority.ts",
+        "deploy/cloudflare/test/job-attribution-completion.test.ts",
+        "deploy/cloudflare/test/job-attribution-list.test.ts",
+        "deploy/cloudflare/test/job-attribution.test.ts",
+        "deploy/cloudflare/test/webhook-installation-allowlist.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T3-W18",
+        "T8-W4b",
+        "D13"
+      ],
+      "source_commits": [
+        "4c849cd80ac37f0eeff09e4da7e0195451a4b188",
+        "8b7ff393486177991246e9e693e9d02ec8ff5218",
+        "5956df4c8949746413271045a3f2457f93d9e8f1",
+        "f54788e74d1f2f6bb8df2abe4cedc85102668e7e",
+        "708b1e7227ebc4a965168a15aed4e4c1e168b716",
+        "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": true,
+      "contract": "docs/plan/execution/rework-20260906/T4-W1-packet.md",
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Review completed no-TTL transactional attribution and authoritative enumeration; D13 ratification remains required for whole-WP implementation. Pair consumer tests with T4-W2/T8-W5. Completion test is production handler with authority stub, not real DO restart proof.",
+      "allowed_writes": [
+        "deploy/cloudflare/src/lib/job_attribution_authority.ts"
+      ],
+      "gate_commands": [
+        "./node_modules/.bin/vitest run test/job-attribution-list.test.ts test/job-attribution.test.ts test/job-attribution-completion.test.ts --pool=threads --maxWorkers=1 --minWorkers=1 --silent",
+        "git diff --check"
+      ],
+      "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
+      "execution_kind": "preserve_existing_source",
+      "requires_source_ancestor": "407f2ea4d9f2ae3b17c581cd9649bd9ad87f224d",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t4-w1-20260906",
+      "result_commit": "4cbafa77c66f4484d21e52b1763cd777c17db5a9",
+      "merge_commit": "b8479fa4283575566fc2f6b1604c1df6395dbac7",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
+    },
+    {
+      "id": "T4-W2",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "integrated",
+      "owns": [
+        "deploy/cloudflare/src/billing_recovery.ts",
+        "deploy/cloudflare/test/billing-recovery.test.ts",
+        "deploy/cloudflare/test/usage-event-conformance.test.ts",
+        "deploy/cloudflare/test/usage-ledger-backfill.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T4-W1",
+        "R2"
+      ],
+      "source_commits": [
+        "303622df89b201e0a53e5e23cea4a4bcba7061d3",
+        "9a15de63c993aaa149917ca7a73f3d9334a55984",
+        "0516442ef5e2095b27e6ef760d4ca20e2b59a10c",
+        "116bf98f46baa509119c0a2c1342afb351b3abb2",
+        "ffc5dadff397c546817673d04ad62e8ab527deae"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": true,
+      "contract": "docs/plan/execution/rework-20260906/T4-W2-packet.md",
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Approved source candidate held for predecessor composition; T4-W1/D13 and R2 remain real gates. Validate paired source at sprint composition.",
+      "allowed_writes": [
+        "deploy/cloudflare/test/billing-recovery.test.ts"
+      ],
+      "gate_commands": [
+        "./node_modules/.bin/vitest run test/billing-recovery.test.ts --pool=threads --maxWorkers=1 --minWorkers=1 --silent",
+        "git diff --check"
+      ],
+      "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
+      "execution_kind": "preserve_existing_source",
+      "requires_source_ancestor": "ffc5dadff397c546817673d04ad62e8ab527deae",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t4-w2-20260906",
+      "result_commit": "5e1c105633ae9ae68ac43beecc52f1c4f851e86c",
+      "merge_commit": "e2265c11cee9f89c84458753e1a6bfea644e83d2",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
+    },
+    {
+      "id": "T3-W3",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/reconciler.ts",
+        "deploy/cloudflare/test/orphan-box-reconcile.test.ts",
+        "deploy/cloudflare/test/reconciler-discovery.test.ts",
+        "docs/plan/relays/runner-reconciler-registry-source.md",
+        "docs/plan/relays/runner-reconciler-registry.patch"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T4-W2"
+      ],
+      "source_commits": [
+        "e39d7a0f5078215396c58cf08fd4a6bd4adb4ecd",
+        "31ab8b9c7c83b39572051eea0825808a620a61ca",
+        "2c0114e89fecb21cee52be55aceac663aeb75965",
+        "77cb30f6c5627c56d582d9d3c65f2d76295e9474"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Root review latest bounded registry source and relay. Real server relay application/integration remains pending sibling fence exception."
+    },
+    {
+      "id": "T3-W1",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-cloud-engine/src/http.rs",
+        "crates/corelink-cloud-engine/src/lib.rs",
+        "crates/corelink-cloud-engine/tests/acceptance_cloud.rs",
+        "crates/corelink-cloud-engine/tests/cloudflare_conformance.rs",
+        "deploy/cloudflare/test/spawn-conformance.test.ts"
+      ],
+      "reads_only": [
+        "crates/corelink-cloud-engine/src/cloudflare.rs",
+        "deploy/cloudflare/src/index.ts"
+      ],
+      "dependencies": [
+        "T3-W3"
+      ],
+      "source_commits": [
+        "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
+        "87b1c07e81ebaa0a0c971d1ff169b2ae39627720",
+        "a54470eabad870568ae8ab8fbeec83c0f45099ba"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Source review approved; hold isolated candidate until canonical predecessor composition, then verify composed Sprint2. Authored Rust tests have not executed."
+    },
+    {
+      "id": "T3-W2",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/lifecycle_cleanup.ts",
+        "deploy/cloudflare/test/containment-intake.test.ts",
+        "deploy/cloudflare/test/journey-sj2-warm-env0.test.ts",
+        "deploy/cloudflare/test/metrics-do.test.ts",
+        "deploy/cloudflare/test/t3-w2-lifecycle.test.ts",
+        "docs/plan/evidence/T3-W2-lifecycle.json"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/runner_cas_mint.rs",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/src/metrics.ts",
+        "deploy/cloudflare/test/check-host.test.ts"
+      ],
+      "dependencies": [
+        "T3-W1",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "1ef55b33260fbb722c4094b89a859be9c1b0c406",
+        "6496cb3578be0b5c127d248b5341aaa4146699f5"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Safe diagnostic repair reviewed: no KV-driven deletes/releases. F007 still blocks A3.12 authoritative recovery; other focused lifecycle/source components retained."
+    },
+    {
+      "id": "T8-W1",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-cloud-engine/src/control_auth.rs",
+        "deploy/cloudflare/src/lib/admission_budget.ts",
+        "deploy/cloudflare/src/lib/control_auth.ts",
+        "deploy/cloudflare/test/admission-budget-authority.test.ts",
+        "deploy/cloudflare/test/admission-failopen-budget.test.ts",
+        "deploy/cloudflare/test/cold-reason-attribution.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T3-W2"
+      ],
+      "source_commits": [
+        "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
+        "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae",
+        "2053a7221e3a1fdabdbb3c53113d3a6741acfe0f"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "A3.16 source reviewed with production DO/caller100-request evidence. Close A3.14 required-enrichment ordering and A3.15 paired engine/Worker credential domains before whole-WP approval."
+    },
+    {
+      "id": "T8-W3",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/required_mint_retry.ts",
+        "deploy/cloudflare/test/option-c-pat-dispatch.test.ts",
+        "deploy/cloudflare/test/spawn-claim-atomic.test.ts",
+        "docs/plan/evidence/T8-W3-required-mint.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/wrangler.jsonc"
+      ],
+      "dependencies": [
+        "T8-W1",
+        "O-MINTKEY",
+        "T6-W9",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T3-W14",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/required_enrichment.ts",
+        "deploy/cloudflare/test/retry-epoch.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T8-W3"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T3-W9",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/optional_cache_degradation.ts",
+        "deploy/cloudflare/test/spawn-durability.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T3-W14",
+        "O-APP"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T8-W5",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "integrated",
+      "owns": [
+        "crates/corelink-fabric-server/src/handlers/enforcement.rs",
+        "crates/corelink-fabric-server/src/tenant_suspension_dispatch.rs",
+        "crates/corelink-fabric/src/pg_ledger/tenant_suspension.rs",
+        "deploy/cloudflare/src/lib/credential_obligation_authority.ts",
+        "deploy/cloudflare/src/lib/revocation_outbox.ts",
+        "deploy/cloudflare/test/credential-revocation.test.ts",
+        "deploy/cloudflare/test/suspension-revocation.test.ts"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/app.rs",
+        "crates/corelink-fabric-server/src/reaper.rs",
+        "crates/corelink-fabric/src/ledger.rs",
+        "crates/corelink-fabric/src/lib.rs",
+        "crates/corelink-fabric/src/pg_ledger.rs",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/src/lib/credential_authority_contract.ts",
+        "deploy/cloudflare/src/metrics.ts",
+        "deploy/cloudflare/test/cred-stash-do.test.ts"
+      ],
+      "dependencies": [
+        "T3-W9"
+      ],
+      "source_commits": [
+        "50ab03667fe8d877321b6096439677938e0b3918",
+        "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147",
+        "e34819c30411ae02fdff415365aa3b6738e31529",
+        "651c5aae801632726be14cb4c874c04a015e058a",
+        "8834e9f5bdbeb33cc5381767a615608da7294df7",
+        "e860910647b37b6bc43e2ec70064e7cd48a1f65d",
+        "8f8bdf5a206f792e0d7e53d346636dcae04d4c06",
+        "51ae0c3609ff788f7d69a177d0f6f5026c76c08d",
+        "e7d95fa98e578788f3ff2aff474303e97808b13f",
+        "86e9c0865070174edf149e17dfe4d8984530ee7c",
+        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": true,
+      "contract": "docs/plan/execution/rework-20260906/T8-W5-packet.md",
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Exact credential authority components reviewed; root9focusedtests passed. Finish F008 suspension epochs/migration and job-terminal coverage; no whole-WP seal or delivery.",
+      "allowed_writes": [
+        "deploy/cloudflare/src/lib/credential_obligation_authority.ts"
+      ],
+      "gate_commands": [
+        "./node_modules/.bin/vitest run test/suspension-revocation.test.ts --pool=threads --maxWorkers=1 --minWorkers=1 --silent",
+        "git diff --check"
+      ],
+      "execution_step": "R1 extraction/regression repair only; canonical WP acceptance remains unchanged",
+      "execution_kind": "preserve_existing_source",
+      "requires_source_ancestor": "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
+      "dispatch_baseline": "e66db97269cea9a8045337b1ba50a7b054c6288d",
+      "dispatched_at": "2026-09-06T03:30:13.031908+00:00",
+      "worktree": "/private/tmp/corelink-rework-t8-w5-20260906",
+      "result_commit": "a9f67d3634a22fc472f0731be164afabc04acbbe",
+      "merge_commit": "66e15b445aa54a94cd0181a36b4f337d0e6cc96d",
+      "verified_at": "2026-09-06T03:35:28.592588+00:00",
+      "verification": "R1 focused composed suite:39tests passed; no canonical whole-WP credit."
+    },
+    {
+      "id": "T8-W2",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/spawn_claim_authority.ts",
+        "deploy/cloudflare/test/cred-cred-route.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/test/cred-stash-do.test.ts"
+      ],
+      "dependencies": [
+        "T8-W5"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T3-W16",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/attempt_binding.ts",
+        "deploy/cloudflare/test/attempt-handle-reconcile.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-ack-recovery.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-ack.test.ts",
+        "deploy/cloudflare/test/attempt-monitor-outbox.test.ts",
+        "deploy/cloudflare/test/inventory-crosscheck.test.ts",
+        "docs/plan/evidence/T3-W16-attempt-handle-crosscheck.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T8-W2",
+        "T2-W2b",
+        "T6-W15",
+        "O-CFINVENTORY",
+        "O-CFCANCEL",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement canonical Cloudflare reconciliation plus explicit F-20260905-005 Rust caller/legacy reconciliation; Northflank requires its own equivalent authority, not Cloudflare capability tokens."
+    },
+    {
+      "id": "T3-W15",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/spawn_redrive.ts",
+        "deploy/cloudflare/test/redrive-state-machine.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts"
+      ],
+      "dependencies": [
+        "T3-W16"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T8-W4b",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/check-host/entrypoint.sh",
+        "deploy/check-host/test/auth-secret-bridge.sh",
+        "deploy/cloudflare/entrypoint.sh",
+        "deploy/cloudflare/src/lib/clw.ts",
+        "deploy/cloudflare/supervisord.conf",
+        "deploy/cloudflare/test/auth-secret-bridge.test.ts",
+        "deploy/cloudflare/test/customer-unprivileged-user-flow.test.ts",
+        "deploy/cloudflare/test/deep-step-by-step-audit.test.ts",
+        "deploy/cloudflare/test/e2e-40-stories-driver.test.ts",
+        "deploy/cloudflare/test/user-journey-driver.test.ts"
+      ],
+      "reads_only": [
+        "crates/corelink-check-exec-server/src/**",
+        "crates/corelink-check-exec-server/tests/**",
+        "deploy/cloudflare/src/durable_objects/runner_dev_env.ts",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/test/check-host.test.ts",
+        "deploy/cloudflare/test/devenv-do.test.ts"
+      ],
+      "dependencies": [
+        "T3-W18",
+        "T9-W0"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Code independently approved; validate complete sprint and later deployed image/process evidence. Re-review only if DevEnv integration changes bridge."
+    },
+    {
+      "id": "T8-W6",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/au3.23b-completion-pat-revocation.json",
+        "docs/plan/evidence/au4.16b-suspension-pat-revocation.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T8-W5",
+        "T8-W2",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au4.16b-suspension-pat-revocation.json; docs/plan/evidence/au3.23b-completion-pat-revocation.json."
+    },
+    {
+      "id": "T8-W7",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/au3.26b-jitconfig-process-surface.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T8-W4a",
+        "T2-W2a",
+        "T2-W2b",
+        "T2-W4",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/au3.26b-jitconfig-process-surface.json."
+    },
+    {
+      "id": "T3-W5",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/lib/warm_jit.ts",
+        "deploy/cloudflare/test/burst-above-ceiling.test.ts",
+        "deploy/cloudflare/test/orphan-retry.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/src/lib.ts",
+        "deploy/cloudflare/wrangler.jsonc"
+      ],
+      "dependencies": [
+        "D4",
+        "T3-W15"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts."
+    },
+    {
+      "id": "T9-W1",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare/src/durable_objects/runner_dev_env.ts",
+        "deploy/cloudflare/test/devenv-do.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/src/durable_objects/runner_dev_env.ts",
+        "deploy/cloudflare/test/devenv-do.test.ts"
+      ],
+      "dependencies": [
+        "D2",
+        "T8-W4b",
+        "T9-W0"
+      ],
+      "source_commits": [
+        "f1836f94b4dcdc840bd756738589d5fe85b1b478",
+        "9b87d3b5e588fe19357741fb76c270bad3fe7437",
+        "2158fbc9ea122ddedbc5ddbe025aba3d4fc121b8",
+        "64509e86133207a9a187f2036cad82d11c75875a",
+        "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
+        "dc336b89a034d9961d8cd6a6c5b239edbbc494f9",
+        "33d808240cfe3126bd3c42284ae7dacc2ddb00e4"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Runners credential/billing code integrated. Apply reviewed server relay after explicit sibling exception; implement monthly hard-stop using owner-selected shared/separate budget authority."
+    },
+    {
+      "id": "T1-W5",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-fabric-server/tests/mint_selfcheck.rs",
+        "docs/plan/evidence/T1-W5-mint-selfcheck.json"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/runner_cas_mint.rs",
+        "crates/corelink-fabric-server/src/server.rs"
+      ],
+      "dependencies": [
+        "T3-W10",
+        "T3-W18",
+        "O-MINTKEY",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "f43898914dab1ed65c37bbac196b394aa7acaa89",
+        "af0795ef4099a49d3b6650d301bdcf0203d13e60"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Code and focused test sources integrated; library and4 targeted test crates passed warm metadata checks. Runtime/fullCI/live keyed acceptance only at complete sprint."
+    },
+    {
+      "id": "T1-W6",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "crates/corelink-fabric-server/src/billing_export.rs",
+        "crates/corelink-fabric-server/src/main.rs",
+        "crates/corelink-fabric-server/src/monitor_interlock.rs",
+        "crates/corelink-fabric-server/src/monitor_outbox.rs",
+        "crates/corelink-fabric-server/src/monitor_transaction_fence.rs",
+        "crates/corelink-fabric-server/tests/monitor_ack.rs",
+        "crates/corelink-fabric-server/tests/monitor_ack_recovery.rs",
+        "crates/corelink-fabric-server/tests/monitor_outbox.rs",
+        "crates/corelink-fabric-server/tests/monitor_transaction_fence.rs",
+        "crates/corelink-fabric-server/tests/monitor_tuple_interlock.rs",
+        "crates/corelink-fabric-server/tests/monitor_tuple_interlock_race.rs",
+        "crates/corelink-fabric/src/billing_sink.rs",
+        "crates/corelink-fabric/src/pg_monitor_fence.rs",
+        "crates/corelink-fabric/tests/pg_monitor_transaction_fence.rs",
+        "crates/corelink-fabric/tests/pg_refusal_breaker.rs",
+        "deploy/cloudflare-fabricd/src/monitor_outbox.ts",
+        "deploy/cloudflare-fabricd/test/idle-no-wake.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-ack-recovery.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-ack.test.ts",
+        "deploy/cloudflare-fabricd/test/monitor-outbox.test.ts",
+        "deploy/cloudflare-fabricd/test/pg-flag-failclosed.test.ts",
+        "deploy/cloudflare-fabricd/test/resilience.test.ts",
+        "deploy/cloudflare-fabricd/wrangler.jsonc",
+        "docs/plan/evidence/T1-W6-pg-durable-live.json"
+      ],
+      "reads_only": [
+        "crates/corelink-fabric-server/src/server.rs",
+        "crates/corelink-fabric/src/pg_ledger.rs",
+        "deploy/cloudflare-fabricd/src/index.ts"
+      ],
+      "dependencies": [
+        "D12",
+        "T1-W5",
+        "T6-W12",
+        "O-CFINVENTORY",
+        "O-PG-REARM",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at crates/corelink-fabric/src/pg_ledger.rs; crates/corelink-fabric/src/billing_sink.rs."
+    },
+    {
+      "id": "T1-W2",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T1-W2-control-plane.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W2-control-plane.json."
+    },
+    {
+      "id": "T1-W3",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T1-W3-resilience.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W3-resilience.json."
+    },
+    {
+      "id": "T1-W4",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T1-W4-boot-rate.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T6-W14",
+        "T6-W10",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T1-W4-boot-rate.json."
+    },
+    {
+      "id": "T2-W2b",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T2-W2b-deploy.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T2-W1a",
+        "T3-W18",
+        "T8-W4a",
+        "T8-W4b",
+        "O1",
+        "O-DEVENV-PIN",
+        "O-FLEETBUSY",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W2b-deploy.json."
+    },
+    {
+      "id": "T2-W4",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T2-W4-image-ship.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T2-W2b",
+        "T8-W4a",
+        "T8-W4b",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W4-image-ship.json."
+    },
+    {
+      "id": "T2-W5",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T2-W5-runbook-compat.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W5-runbook-compat.json."
+    },
+    {
+      "id": "T2-W6",
+      "sprint": 2,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/au1.8-fabricd-secret-rotation.json",
+        "docs/runbook/secret-rotation.md"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T7-W4",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/runbook/secret-rotation.md; docs/plan/evidence/au1.8-fabricd-secret-rotation.json."
+    },
+    {
+      "id": "T3-W7",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T3-W7-moat.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W7-moat.json."
+    },
+    {
+      "id": "T3-W8",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T3-W8-inventory-hitrate.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T3-W7",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T3-W8-inventory-hitrate.json."
+    },
+    {
+      "id": "T4-W7",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T4-W7-money.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T4-W2",
+        "T9-W1",
+        "O-BILLING",
+        "R1",
+        "R2",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W7-money.json."
+    },
+    {
+      "id": "T4-W8",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T4-W8-billing-reconcile.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T4-W2",
+        "T9-W1",
+        "O-BILLING",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T4-W8-billing-reconcile.json."
+    },
+    {
+      "id": "T5-W4",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T5-W4-stranger.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "D7",
+        "D3",
+        "D8",
+        "R3",
+        "T5-W1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W4-stranger.json."
+    },
+    {
+      "id": "T5-W5",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T5-W5-stranger-adversarial.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "D7",
+        "D3",
+        "D8",
+        "R3",
+        "T5-W4",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W5-stranger-adversarial.json."
+    },
+    {
+      "id": "T5-W6",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T5-W6-release-artifacts.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T3-W18",
+        "D7",
+        "D3",
+        "T5-W3",
+        "O-PUBLISH",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T5-W6-release-artifacts.json."
+    },
+    {
+      "id": "T6-W5",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T6-W5-e2e.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W5-e2e.json."
+    },
+    {
+      "id": "T6-W6",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T6-W6-canary.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T6-W9",
+        "T6-W12",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W6-canary.json."
+    },
+    {
+      "id": "T6-W7",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T6-W7-authz.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T2-W2b",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W7-authz.json."
+    },
+    {
+      "id": "T6-W9",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare-canary/src/notify.ts",
+        "deploy/cloudflare-canary/test/rules.test.ts",
+        "docs/plan/evidence/T6-W9-alert-rules.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare-canary/src/rules.ts"
+      ],
+      "dependencies": [
+        "T6-W4",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566",
+        "04743acf9a7a7f2385ccce1ebd13882530b7d4f1",
+        "47ae1bc370c6a68f79aa126e203ecf661b59415a"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Named C1-C5 rule/channel source integrated. Real external binding, deployed detectors and end-to-end acceptance remain pending at canonical later gates; no live credit."
+    },
+    {
+      "id": "T6-W10",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T6-W10-alerting-depth.json",
+        "docs/plan/evidence/T6-W14-canary-no-wake.json",
+        "docs/plan/evidence/au6.17-synthetic-slot-lifecycle.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T6-W6",
+        "T6-W9",
+        "T6-W12",
+        "T6-W14",
+        "T1-W6",
+        "O-CANARY-ACTIVATE",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W14-canary-no-wake.json; docs/plan/evidence/T6-W10-alerting-depth.json."
+    },
+    {
+      "id": "T6-W11",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T6-W11-runbook-execution.json"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T6-W11-runbook-execution.json."
+    },
+    {
+      "id": "T7-W5",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/au4.19-cloudflare-container-rate.json",
+        "docs/plan/evidence/au7.11-queued-running-latency.json",
+        "docs/plan/evidence/au7.12-memoization-hit-rate.json",
+        "docs/product/pricing.md"
+      ],
+      "reads_only": [],
+      "dependencies": [
+        "O1",
+        "O-CFRATE",
+        "T3-W7",
+        "T1-W6",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at docs/product/pricing.md; docs/plan/evidence/au7.11-queued-running-latency.json."
+    },
+    {
+      "id": "T6-W12",
+      "sprint": 3,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cost-monitor/migrations/0002-provider-cursors.json",
+        "deploy/cost-monitor/migrations/0003-window-journal.json",
+        "deploy/cost-monitor/src/capability_rules.ts",
+        "deploy/cost-monitor/src/clock.ts",
+        "deploy/cost-monitor/src/correlator.ts",
+        "deploy/cost-monitor/src/journal_reconciler.ts",
+        "deploy/cost-monitor/src/provider.ts",
+        "deploy/cost-monitor/src/rearm_attestation.ts",
+        "deploy/cost-monitor/src/sensitivity.ts",
+        "deploy/cost-monitor/src/synthetic_ingest.ts",
+        "deploy/cost-monitor/src/window_journal.ts",
+        "deploy/cost-monitor/test/acked-incident-update.test.ts",
+        "deploy/cost-monitor/test/c1-c5-rules.test.ts",
+        "deploy/cost-monitor/test/c1-c5-synthetic-ingest.test.ts",
+        "deploy/cost-monitor/test/clock-freshness.test.ts",
+        "deploy/cost-monitor/test/correlator.test.ts",
+        "deploy/cost-monitor/test/cursor-crash.test.ts",
+        "deploy/cost-monitor/test/incident-boundary.test.ts",
+        "deploy/cost-monitor/test/provider-stale-frozen.test.ts",
+        "deploy/cost-monitor/test/provider-unavailable.test.ts",
+        "deploy/cost-monitor/test/provider.test.ts",
+        "deploy/cost-monitor/test/rearm-tuple-attestation.test.ts",
+        "deploy/cost-monitor/test/recovery-horizon.test.ts",
+        "deploy/cost-monitor/test/sensitivity-window.test.ts",
+        "deploy/cost-monitor/test/window-journal-fork.test.ts",
+        "deploy/cost-monitor/test/window-journal-reconcile.test.ts",
+        "deploy/cost-monitor/test/window-journal-writeahead.test.ts",
+        "deploy/cost-monitor/test/window-journal.test.ts",
+        "docs/plan/evidence/T6-W12-independent-monitor.json"
+      ],
+      "reads_only": [
+        "deploy/cost-monitor/Containerfile",
+        "deploy/cost-monitor/config.schema.json",
+        "deploy/cost-monitor/package-lock.json",
+        "deploy/cost-monitor/package.json",
+        "deploy/cost-monitor/src/incidents.ts",
+        "deploy/cost-monitor/src/index.ts",
+        "deploy/cost-monitor/src/scheduler.ts",
+        "deploy/cost-monitor/src/state.ts",
+        "deploy/cost-monitor/src/types.ts"
+      ],
+      "dependencies": [
+        "T6-W15",
+        "T6-W9",
+        "T3-W16",
+        "O-CFINVENTORY",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cost-monitor/Containerfile; deploy/cost-monitor/config.schema.json."
+    },
+    {
+      "id": "T3-W18",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "docs/plan/evidence/T3-W18-containment-live.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare/wrangler.jsonc"
+      ],
+      "dependencies": [
+        "T3-W17",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and execute the genuine three-state 10/10 and nonempty ordered resume proof, including side-effect and running-instance observations. Existing live artifact remains RED."
+    },
+    {
+      "id": "T6-W13",
+      "sprint": 1,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare-canary/src/probe_outcomes.ts",
+        "deploy/cloudflare-canary/test/metrics-key-lane.test.ts",
+        "docs/plan/evidence/T6-W13-canary-key-lane.json"
+      ],
+      "reads_only": [
+        "deploy/cloudflare-canary/src/**",
+        "deploy/cloudflare-canary/wrangler.jsonc"
+      ],
+      "dependencies": [
+        "T6-W4",
+        "T6-W9",
+        "O-CANARY",
+        "T7-W4b"
+      ],
+      "source_commits": [
+        "bb165bad54125460ebae213e405df3a75baa6566"
+      ],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Verify complete key-lane behavior and collect twelve-tick deployed evidence after composition."
+    },
+    {
+      "id": "T6-W14",
+      "sprint": 4,
+      "model": "gpt-5.6-luna",
+      "state": "queued",
+      "owns": [
+        "deploy/cloudflare-canary/src/lifecycle_outbox.ts",
+        "deploy/cloudflare-canary/src/synthetic_outbox.ts",
+        "deploy/cloudflare-canary/src/synthetic_slot.ts",
+        "deploy/cloudflare-canary/test/lifecycle-monitor-envelope.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-sampler-outbox.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-synthetic-ack-recovery.test.ts",
+        "deploy/cloudflare-canary/test/lifecycle-synthetic-ack.test.ts",
+        "deploy/cloudflare-canary/test/no-wake-target.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-correlation.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-credential-isolation.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-default-off.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-lifecycle.test.ts",
+        "deploy/cloudflare-canary/test/synthetic-slot-outbox.test.ts",
+        "deploy/cloudflare-fabricd/src/lifecycle.ts",
+        "deploy/cloudflare-fabricd/test/lifecycle-marker.test.ts"
+      ],
+      "reads_only": [
+        "deploy/cloudflare-canary/src/index.ts",
+        "deploy/cloudflare-canary/src/rules.ts",
+        "deploy/cloudflare-canary/src/types.ts",
+        "deploy/cloudflare-canary/wrangler.jsonc",
+        "deploy/cloudflare-fabricd/src/index.ts"
+      ],
+      "dependencies": [
+        "T6-W13",
+        "T6-W12",
+        "T1-W6",
+        "O-CANARY",
+        "O-MONITORHOST",
+        "T7-W4b"
+      ],
+      "source_commits": [],
+      "decision_owner": "D0",
+      "integration_owner": "I0",
+      "decisions_closed": false,
+      "contract": null,
+      "acceptance_ref": "docs/plan/2026-09-01-reconciled-dispatch-dag.md#canonical-node-table",
+      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare-fabricd/src/index.ts; deploy/cloudflare-fabricd/src/lifecycle.ts."
+    }
+  ],
+  "waves": [
+    {
+      "id": "R1",
+      "kind": "behavior-preserving module extraction",
+      "wps": [
+        "T4-W1",
+        "T8-W5",
+        "T4-W2"
+      ],
+      "acceptance": "Parity against preserved production implementation; no F006/F007/F008 or D13 completion credit.",
+      "state": "complete",
+      "completed_at": "2026-09-06T03:35:28.592588+00:00",
+      "composed_source": "24988a3caeacd99feff734afecdb1e49d2c8f317"
+    }
+  ]
+}

@@ -46,6 +46,7 @@ function makeStorage() {
     async deleteAll(): Promise<void> {
       map.clear();
     },
+    async deleteAlarm(): Promise<void> {},
     async setAlarm(ms: number): Promise<void> {
       alarms.push(ms);
     },
@@ -56,7 +57,12 @@ function makeStorage() {
 // DurableObject stub just assigns this.ctx = ctx).
 function makeDO() {
   const storage = makeStorage();
-  const ctx = { storage } as never;
+  let gate = Promise.resolve();
+  const ctx = { storage, blockConcurrencyWhile: (fn: () => Promise<unknown>) => {
+    const result = gate.then(fn);
+    gate = result.then(() => undefined, () => undefined);
+    return result;
+  } } as never;
   const doInst = new CredStashDO(ctx, {} as never);
   return { doInst, storage };
 }
@@ -173,12 +179,13 @@ describe("POST /v1/leases/{id}/cas-cred — route + DO redeem (must-fix #2, rout
     expect(await again.json()).toEqual(expected);
   });
 
-  it("wrong ticket ⇒ 401 with NO cas_pat, and the correct ticket still redeems", async () => {
+  it("wrong ticket ⇒ uniform 404 with NO cas_pat, and the correct ticket still redeems", async () => {
     await env.CRED_STASH.get(env.CRED_STASH.idFromName("job-2")).stash(TICKET, CRED, TTL_MS);
 
     const bad = await worker.fetch(redeemReq("job-2", { ticket: "c".repeat(64) }), env, {} as never);
-    expect(bad.status).toBe(401);
+    expect(bad.status).toBe(404);
     const badBody = (await bad.json()) as Record<string, unknown>;
+    expect(badBody.error).toBe("no such lease"); // no ticket/lease oracle
     expect(badBody.cas_pat).toBeUndefined(); // the PAT never leaves on a bad ticket
 
     const good = await worker.fetch(redeemReq("job-2", { ticket: TICKET }), env, {} as never);
@@ -216,4 +223,132 @@ describe("CredStashDO.stash — IDEMPOTENT per lease (spawn-reliability retries)
     expect(r.status).toBe(200);
     expect(r.cred).toEqual(CRED);
   });
+});
+
+
+describe("CredStashDO.stash — absolute PAT deadline", () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+  it("does not extend the PAT expiry by a delayed RPC/storage read", async () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { doInst, storage } = makeDO();
+    const read = storage.get.bind(storage);
+    storage.get = async (key) => { now = 4000; return read(key); };
+    await doInst.stash(TICKET, CRED, 10000, 11000);
+    expect(storage.map.get("rec")).toMatchObject({ expiresMs: 11000 });
+    expect(storage.alarms).toEqual([11000]);
+  });
+
+  it("rejects a grant that expires while awaiting storage without storing its PAT", async () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { doInst, storage } = makeDO();
+    storage.get = async () => { now = 11000; return undefined; };
+    await expect(doInst.stash(TICKET, CRED, 10000, 11000)).rejects.toThrow("credential deadline");
+    expect(storage.map.has("rec")).toBe(false);
+    expect(storage.alarms).toEqual([]);
+  });
+
+  it("caps an existing live stash without replacing its ticket or extending its deadline", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    await doInst.stash(TICKET, CRED, 10000);
+    expect(await doInst.stash("b".repeat(64), CRED, 10000, 5000)).toBe(TICKET);
+    expect(await doInst.stash("c".repeat(64), CRED, 10000, 9000)).toBe(TICKET);
+    expect(storage.map.get("rec")).toMatchObject({ ticket: TICKET, expiresMs: 5000 });
+    expect(storage.alarms).toEqual([11000, 5000]);
+  });
+
+  it.each([NaN, Infinity, -1, 1000])("rejects invalid absolute expiry %s", async (expiry) => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    await expect(doInst.stash(TICKET, CRED, 10000, expiry)).rejects.toThrow("credential deadline");
+    expect(storage.map.has("rec")).toBe(false);
+  });
+});
+
+
+describe("CredStashDO.wipe — durable closure against late stash RPC", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a stash arriving after confirmed cleanup cannot reopen the session", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    await doInst.wipe(11000);
+    await expect(doInst.stash(TICKET, CRED, 10000, 11000)).rejects.toThrow("credential lease is closed");
+    expect(await doInst.redeem(TICKET)).toEqual({ status: 404 });
+    expect(storage.map.has("rec")).toBe(false);
+    expect(storage.map.get("closedUntilMs")).toBe(11000);
+  });
+
+  it("cleanup waits for an in-flight stash, then closes and deletes its credential", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    const read = storage.get.bind(storage);
+    let release!: () => void;
+    let reading!: () => void;
+    const entered = new Promise<void>((resolve) => { reading = resolve; });
+    const pause = new Promise<void>((resolve) => { release = resolve; });
+    storage.get = async (key) => {
+      if (key === "rec") { reading(); await pause; }
+      return read(key);
+    };
+    const stash = doInst.stash(TICKET, CRED, 10000, 11000);
+    await entered;
+    let cleaned = false;
+    const cleanup = doInst.wipe(11000).then(() => { cleaned = true; });
+    await Promise.resolve();
+    expect(cleaned).toBe(false);
+    release();
+    await Promise.all([stash, cleanup]);
+    expect(await doInst.redeem(TICKET)).toEqual({ status: 404 });
+    expect(storage.map.has("rec")).toBe(false);
+  });
+
+  it("a failed deletion still denies redemption and keeps the closure for retry", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    await doInst.stash(TICKET, CRED, 10000, 11000);
+    vi.spyOn(storage, "delete").mockRejectedValueOnce(new Error("storage offline"));
+    await expect(doInst.wipe(11000)).rejects.toThrow("storage offline");
+    expect(await doInst.redeem(TICKET)).toEqual({ status: 404 });
+    await doInst.wipe(11000);
+    expect(storage.map.has("rec")).toBe(false);
+  });
+
+  it("clearing a closure at its alarm still cannot admit the expired in-flight grant", async () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { doInst } = makeDO();
+    await doInst.wipe(11000);
+    now = 11000;
+    await doInst.alarm();
+    await expect(doInst.stash(TICKET, CRED, 10000, 11000)).rejects.toThrow("credential deadline");
+    expect(await doInst.redeem(TICKET)).toEqual({ status: 404 });
+  });
+  it("a stale queued alarm cannot erase a closure before the grant expires", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1000);
+    const { doInst, storage } = makeDO();
+    await doInst.wipe(11000);
+    await doInst.alarm();
+    expect(storage.map.get("closedUntilMs")).toBe(11000);
+    expect(storage.alarms.at(-1)).toBe(11000);
+    await expect(doInst.stash(TICKET, CRED, 10000, 11000)).rejects.toThrow("credential lease is closed");
+    expect(await doInst.redeem(TICKET)).toEqual({ status: 404 });
+  });
+
+  it("an old queued alarm cannot delete a newer live stash", async () => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { doInst, storage } = makeDO();
+    await doInst.stash(TICKET, CRED, 1000);
+    now = 3000;
+    const newTicket = "b".repeat(64);
+    await doInst.stash(newTicket, CRED, 10000);
+    await doInst.alarm();
+    expect(storage.alarms.at(-1)).toBe(13000);
+    expect(await doInst.redeem(newTicket)).toEqual({ status: 200, cred: CRED });
+  });
+
 });

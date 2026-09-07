@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "corelink-t9w1-authority-20260907-0047",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": {
+    "T9_AUTHORITY_ID": "corelink-t9w1-authority-20260907-0047",
+    "T9_GRANT_KEY_ID": "t9w1-accept-20260907",
+    "T9_GRANT_PUBLIC_KEY": "Drsq7xkgGdecepNgba2zk2zPMkCCK5JS4USbOgYbQPQ",
+    "T9_TERMINAL_PUBLIC_KEY": "UeNT1GDmd63N5hwyH86xTY7LSgcSSEg_QvfQPgfsUD4",
+    "T9_MAX_VCPU_MS": "1000",
+    "T9_MAX_WALL_MS": "1000",
+    "T9_EXPIRES_AT_MS": "1788785252000",
+    "T9_EXECUTOR_PROTOCOL": "unpromoted",
+    "T9_SOURCE_SHA256": "1aaf0b179941bd3395ad7c1514bd305fc49ac69420df4c66fe89e8fd266b019f"
+  },
+  "d1_databases": [
+    {
+      "binding": "T9_AUTHORITY_DB",
+      "database_name": "corelink-t9w1-authority-20260907-0047",
+      "database_id": "6011a014-718d-4901-928a-1c9ac3acb558",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": { "bindings": [{ "name": "T9_TENANT_ADMISSION", "class_name": "TenantAdmission" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantAdmission"] }]
+}

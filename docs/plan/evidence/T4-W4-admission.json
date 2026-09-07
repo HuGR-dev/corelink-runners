@@ -1,0 +1,65 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t4-w4-admission",
+  "kind": "test",
+  "status": "PASS",
+  "observed_at": "2026-09-06T00:00:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "f27de8ff384ce4bb6fea32dbbdea96f55b0c8a93",
+    "path": "docs/plan/evidence/T4-W4-admission.json"
+  },
+  "claims": [],
+  "version": {
+    "id": "f27de8ff384ce4bb6fea32dbbdea96f55b0c8a93"
+  },
+  "evidence": {
+    "original": {
+      "wp": "T4-W4",
+      "result": "ACCEPT",
+      "observed_at": "2026-09-06",
+      "tip": "2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51",
+      "reviewed_source": "bb165bad54125460ebae213e405df3a75baa6566",
+      "source_reachable": true,
+      "source_check": {
+        "command": "git merge-base --is-ancestor bb165bad54125460ebae213e405df3a75baa6566 HEAD",
+        "exit": 0
+      },
+      "focused_vectors": [
+        {
+          "command": "cargo test -p corelink-fabric-server --test acceptance_infra_capacity -- --nocapture",
+          "tests": 5,
+          "passed": 5,
+          "failed": 0,
+          "exit": 0,
+          "coverage": "capacity-1 queue re-dispatch, bounded park timeout, reject-mode capacity 503, fatal provision failure, ProviderCapacityError downcast"
+        },
+        {
+          "command": "cargo test -p corelink-fabric-server --test corelink_admission_arms -- --nocapture",
+          "tests": 9,
+          "passed": 9,
+          "failed": 0,
+          "exit": 0,
+          "coverage": "valid cap admit-under-N/reject-at-N, uncapped and invalid fail-closed, transport/status/malformed introspect failures, ledger-error 503 and zero side effects, ceiling capacity 429"
+        }
+      ],
+      "configuration_acceptance": {
+        "status": "available",
+        "evidence": [
+          "deploy/cloudflare-fabricd/src/index.ts sets FABRIC_AUTH_BACKEND=corelink",
+          "deploy/cloudflare-fabricd/src/index.ts forwards FABRIC_TENANT_MAX_CONCURRENCY=100, CORELINK_INTROSPECT_URL and FABRIC_INTROSPECT_AUTH_KEY",
+          "deploy/cloudflare-fabricd/wrangler.jsonc pins CORELINK_INTROSPECT_URL and declares the matching secret bindings",
+          "crates/corelink-fabric-server/src/admission.rs defaults FABRIC_ADMISSION_MODE to reject and rejects unknown values"
+        ],
+        "posture": "fail-closed"
+      },
+      "fix": null,
+      "root_cause": null,
+      "notes": [
+        "No production source change was required.",
+        "The Northflank JSON remains an explicit template with FILL placeholders and was not treated as live deployment evidence; the applicable Sprint 1 fabricd path is Cloudflare Containers."
+      ]
+    }
+  },
+  "notes": "Canonical inventory record preserving the original candidate evidence payload. Status is explicit and remains RED when deployment or live proof is pending."
+}

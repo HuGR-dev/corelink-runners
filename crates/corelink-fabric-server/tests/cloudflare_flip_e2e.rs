@@ -51,7 +51,9 @@
 //!    tests; here we assert the load-bearing integration facts (endpoint, method,
 //!    bearer, digest-pinned image, jitconfig wired through the fabric).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -66,8 +68,8 @@ use corelink_fabric_server::cloud_exec::{
     BoxProvisioner, BoxRegistry, CloudflareBoxProvisioner, SelectedBackend, select_backend,
 };
 use corelink_fabric_server::{
-    AppState, LeasedExec, MockBroker, NoBoxExec, RunnerRegistrationBroker, StaticPlans,
-    StaticTokenStore, SystemClock, app,
+    AppState, Clock, LeasedExec, MockBroker, NoBoxExec, RunnerRegistrationBroker, StaticPlans,
+    StaticTokenStore, app,
 };
 use tower::ServiceExt;
 
@@ -77,6 +79,15 @@ use tower::ServiceExt;
 /// and the lease gate accept. The spawn-Worker request must carry this verbatim.
 const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+// Keep the fixture aligned with the Worker control-plane contract: spawn,
+// exec, and lifecycle requests each carry their own exact, distinct token.
+// The runner path does not exec, but the same engine reaches lifecycle auth
+// during close (and probe/reaper paths), so leaving either scoped credential
+// unset makes the acquire fail before the fake Worker is contacted.
+const SPAWN_AUTH_TOKEN: &str = "fixture-spawn-auth-token";
+const EXEC_AUTH_TOKEN: &str = "fixture-exec-auth-token";
+const LIFECYCLE_AUTH_TOKEN: &str = "fixture-lifecycle-auth-token";
 
 fn acme() -> TenantId {
     TenantId::new("acme").expect("valid tenant id")
@@ -136,21 +147,34 @@ impl HttpTransport for FakeWorker {
 
 // ── Harness: the REAL fabric over a Cloudflare backend on the fake transport ──
 
-/// Build the full fabric router with:
-///   - one tenant (`acme`) + a plan (so admission can reserve a slot),
-///   - the real in-memory ledger (the accounting oracle the fail-closed case
-///     inspects),
-///   - a `MockBroker` (so a RUNNER acquire mints a JIT config and reaches the
-///     provision step — mirrors `acceptance_moat.rs`),
-///   - the Cloudflare backend injected via the PUBLIC `with_cloud_backend`: the
-///     runner-direct exec half (`NoBoxExec`) + a `CloudflareBoxProvisioner` over
-///     a `CloudflareEngine` on the supplied [`FakeWorker`], sharing `registry`.
-///
-/// Returns the router, the ledger (for slot assertions), the shared registry (for
-/// binding assertions), and the `Arc<FakeWorker>` (for request assertions).
+/// Deterministic clock used to make stale-Pending eligibility explicit.
+#[derive(Clone)]
+struct ManualClock(Arc<AtomicU64>);
+
+impl ManualClock {
+    fn set(&self, now_ms: u64) {
+        self.0.store(now_ms, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Build the full fabric router with the real ledger, runner broker, and a
+/// Cloudflare backend over the supplied fake Worker. It also returns its shared
+/// registry, state, and deterministic clock for lifecycle assertions.
 fn cloudflare_harness(
     worker: Arc<FakeWorker>,
-) -> (Router, Arc<dyn LeaseLedger + Send + Sync>, BoxRegistry) {
+) -> (
+    Router,
+    Arc<dyn LeaseLedger + Send + Sync>,
+    BoxRegistry,
+    AppState,
+    ManualClock,
+) {
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
     let plans = StaticPlans::new([TenantPlan {
         tenant: acme(),
@@ -168,7 +192,8 @@ fn cloudflare_harness(
         // CloudflareEngine consumes the transport by value; clone the Arc-wrapped
         // worker into it so the test keeps its own handle for request assertions.
         ArcWorker(Arc::clone(&worker)),
-        CloudflareConfig::new("https://spawn.example.dev", "super-secret-token"),
+        CloudflareConfig::new("https://spawn.example.dev", SPAWN_AUTH_TOKEN)
+            .with_scoped_tokens(EXEC_AUTH_TOKEN, LIFECYCLE_AUTH_TOKEN),
     ));
     let prov: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
         engine,
@@ -177,11 +202,12 @@ fn cloudflare_harness(
     let exec: Arc<dyn LeasedExec> = Arc::new(NoBoxExec);
 
     let broker: Arc<dyn RunnerRegistrationBroker> = Arc::new(MockBroker::new());
-    let state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(SystemClock))
+    let clock = ManualClock(Arc::new(AtomicU64::new(1_000)));
+    let state = AppState::new(ledger.clone(), Arc::new(plans), Arc::new(clock.clone()))
         .with_cloud_backend(exec, prov)
         .with_runner_broker(broker);
 
-    (app(store, state), ledger, registry)
+    (app(store, state.clone()), ledger, registry, state, clock)
 }
 
 /// `CloudflareEngine` takes the transport by value but the test needs to keep a
@@ -285,7 +311,7 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
     // spawn → {handle}; status/teardown → 200. One canned response suffices: the
     // spawn parses the handle, teardown treats 200 as success.
     let worker = Arc::new(FakeWorker::new(200, r#"{"handle":"cf-handle-xyz"}"#));
-    let (router, ledger, registry) = cloudflare_harness(Arc::clone(&worker));
+    let (router, ledger, registry, _, _) = cloudflare_harness(Arc::clone(&worker));
 
     // ── 1. acquire (RUNNER) ───────────────────────────────────────────────────
     let resp = do_acquire(&router, &runner_acq_body()).await;
@@ -315,7 +341,7 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
         "spawn must address the configured Worker /v1/spawn endpoint"
     );
     assert_eq!(
-        spawn.bearer_token, "super-secret-token",
+        spawn.bearer_token, SPAWN_AUTH_TOKEN,
         "spawn must carry the configured Worker bearer token"
     );
     let spawn_body: serde_json::Value = serde_json::from_str(
@@ -374,6 +400,10 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
         teardown.url, "https://spawn.example.dev/v1/teardown",
         "teardown must address the Worker /v1/teardown endpoint"
     );
+    assert_eq!(
+        teardown.bearer_token, LIFECYCLE_AUTH_TOKEN,
+        "teardown must carry the lifecycle-scoped Worker bearer token"
+    );
     let teardown_body: serde_json::Value = serde_json::from_str(
         teardown
             .json_body
@@ -394,22 +424,23 @@ async fn cloudflare_flip_happy_path_acquire_spawn_held_close_teardown() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Case 2 — FAIL-CLOSED: a non-2xx spawn ⇒ no Held lease, no slot, no orphan
+// Case 2 — FAIL-CLOSED: a non-2xx spawn ⇒ no Held/binding, durable cleanup claim
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A spawn-Worker that returns 500 must make the HTTP acquire fail CLOSED: the
 /// `CloudflareEngine::spawn` `bail!`s on the non-2xx, `provision` propagates the
-/// `Err` WITHOUT binding, and `finalize_admitted_lease` rolls back. The three
-/// real-fabric invariants:
+/// `Err` WITHOUT binding, and `finalize_admitted_lease` retains a durable cleanup
+/// claim because a failed spawn does not prove that no provider object exists. The
+/// four real-fabric invariants:
 ///   1. the acquire returns 503 (fail-closed; never a phantom 200 Held),
-///   2. 0 slots reserved on the ledger (the reserved Pending was rolled back —
-///      the cap must NOT leak on a failed spawn),
-///   3. NO binding in the registry (no phantom box from a failed spawn).
+///   2. the Pending claim retains its cap until an authoritative cleanup,
+///   3. NO binding in the registry (no phantom box from a failed spawn),
+///   4. repeated sweep retries cannot fabricate a handle or release the row.
 #[tokio::test]
-async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
+async fn cloudflare_flip_fail_closed_non_2xx_spawn_retains_unknown_pending_claim() {
     // The Worker 500s on spawn — the engine fails closed before any handle.
     let worker = Arc::new(FakeWorker::new(500, "boom"));
-    let (router, ledger, registry) = cloudflare_harness(Arc::clone(&worker));
+    let (router, ledger, registry, state, clock) = cloudflare_harness(Arc::clone(&worker));
 
     let resp = do_acquire(&router, &runner_acq_body()).await;
 
@@ -420,17 +451,30 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
         "a non-2xx spawn must fail the acquire CLOSED (503), never return Held"
     );
 
-    // 2. the reserved slot was rolled back ⇒ 0 occupied (the cap must not leak).
-    let occupied = ledger.by_tenant(&acme()).expect("ledger query").len();
+    // 2. A 500 provides no authoritative provider identity or absence proof.
+    // The Pending stays claimed, retains the cap, and fences both Held and
+    // ordinary remove until a confirmed cleanup can conditionally finish it.
+    let rows = ledger.by_tenant(&acme()).expect("ledger query");
     assert_eq!(
-        occupied, 0,
-        "a failed spawn must roll back the reserved slot — the concurrency cap must NOT leak"
+        rows.len(),
+        1,
+        "unknown partial spawn must retain its durable Pending cleanup claim"
     );
+    let lease_id = rows[0].lease_id.clone();
+    assert_eq!(rows[0].state, corelink_fabric::LeaseState::Pending);
+    assert!(
+        ledger
+            .transition(
+                &lease_id,
+                corelink_runners_contracts::RunnerState::Held,
+                1_001
+            )
+            .is_err()
+    );
+    assert!(ledger.remove(&lease_id).is_err());
 
-    // 3. nothing was ever bound (no phantom box from a failed spawn). The fabric
-    // assigns lease ids; we did not capture one (acquire failed), so assert the
-    // registry holds NOTHING for this tenant's only attempted lease by checking
-    // the spawn was attempted but bound zero handles.
+    // 3. Nothing was ever bound for the actual durable lease id. The spawn was
+    // attempted, but the engine returned before it could bind a real handle.
     let spawn = worker.request_to("/v1/spawn");
     assert!(
         spawn.is_some(),
@@ -447,13 +491,49 @@ async fn cloudflare_flip_fail_closed_non_2xx_spawn_no_held_no_slot_no_orphan() {
         worker.request_to("/v1/teardown").is_none(),
         "a failed spawn must not drive a teardown (nothing was bound to tear down)"
     );
-    // And no stray binding can be resolved (the fabric never reached bind).
-    // We can't know the fabric-minted id, but bind is the ONLY writer of the
-    // registry and provision returned Err before calling it — so the registry is
-    // empty. Probe a representative id to document the invariant.
     assert!(
-        registry.resolve("any-lease-id").is_none(),
-        "no phantom binding may exist after a failed spawn"
+        registry.resolve(&lease_id).is_none(),
+        "the actual failed lease must have no phantom registry binding"
+    );
+
+    // A later stale sweep sees the same claim but cannot substitute missing
+    // registry state for a provider handle. It retains row/cap and sends no
+    // additional spawn or teardown HTTP request.
+    clock.set(2_000);
+    for attempt in 1..=2 {
+        assert_eq!(
+            corelink_fabric_server::pending_cleanup::sweep_stale_pending(
+                &state,
+                Duration::from_millis(1),
+            )
+            .await,
+            0,
+            "unknown sweep attempt {attempt} must retain the durable claim"
+        );
+        assert_eq!(
+            ledger.get(&lease_id).unwrap().unwrap().state,
+            corelink_fabric::LeaseState::Pending,
+            "unknown sweep attempt {attempt} must retain Pending"
+        );
+        assert!(
+            ledger
+                .transition(
+                    &lease_id,
+                    corelink_runners_contracts::RunnerState::Held,
+                    2_000 + attempt,
+                )
+                .is_err(),
+            "unknown sweep attempt {attempt} must keep Held fenced"
+        );
+        assert!(
+            ledger.remove(&lease_id).is_err(),
+            "unknown sweep attempt {attempt} must keep ordinary remove fenced"
+        );
+    }
+    assert_eq!(
+        worker.requests().len(),
+        1,
+        "unknown cleanup must not mint provider I/O"
     );
 }
 

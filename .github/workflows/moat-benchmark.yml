@@ -14,6 +14,8 @@
 # North star: this is a benchmark, not the product path. If the moat is COLD
 # (CLW_* not injected) clw run can't memoize — the workflow reports that and the
 # raw build time, never hangs.
+# The action-level optional|required-hit contract is asserted by moat-action-test;
+# this benchmark remains a direct clw capability measurement.
 name: moat-benchmark
 
 on:
@@ -27,6 +29,8 @@ jobs:
   bench:
     runs-on: corelink-dogfood
     steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
       - name: Moat posture
         run: |
           if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ]; then
@@ -71,10 +75,28 @@ jobs:
           printf '\n// run-unique: %s-%s\n' "${{ github.run_id }}" "${{ github.run_attempt }}" >> moatbench/src/main.rs
           echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines), run-unique key"
 
-      # Helper note: --json makes clw emit its own machine-readable status (incl.
-      # cache hit/miss) on stdout; the wrapped `cargo build -q` is near-silent so
-      # clw's JSON is readable. We capture clw stdout to a file and print it so the
-      # hit/miss is VISIBLE (no inference). rc is clw's exit (125 = clw-internal).
+      # D11/T6-W2: the installed clw 0.1.5 has no authenticated atomic
+      # no-exec HIT/restore operation. The real action must refuse
+      # required-hit with 78 before invoking the planted child command.
+      - name: Required-hit planted miss refuses before child execution
+        id: required_hit
+        continue-on-error: true
+        uses: ./actions/corelink-memoize
+        with:
+          cache-policy: required-hit
+          run: printf 'child-ran\n' > t6-w2-required-hit-child.marker
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Assert required-hit refusal and no child execution
+        run: |
+          set -euo pipefail
+          test "${{ steps.required_hit.outcome }}" = failure
+          test ! -e t6-w2-required-hit-child.marker
+          echo "required-hit refused; planted child never executed (exact exit 78 is covered by actions/corelink-memoize/test/policy.sh)"
+
+      # Helper note: clw 0.1.5 does not provide machine-readable HIT status for
+      # `run`; --json is ignored and child stdout/stderr are proxied. Capture
+      # both streams for diagnostics only; the benchmark does not infer a HIT.
       - name: COLD run (cache MISS — the check actually runs + memoizes)
         id: cold
         run: |

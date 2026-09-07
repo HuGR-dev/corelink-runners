@@ -5,6 +5,7 @@
 //    NEVER logs key material.
 
 import type { Alert, Severity } from "./rules";
+import type { PageDelivery } from "./page_ack";
 
 export interface NotifyEnv {
   /** Resend API key (`wrangler secret put`). Absent ⇒ email is a logged no-op. */
@@ -13,6 +14,7 @@ export interface NotifyEnv {
   ALERT_EMAIL_TO?: string;
   /** From address — MUST be on a Resend-verified humangr.com domain. */
   ALERT_EMAIL_FROM?: string;
+  PAGE_DELIVERY?: PageDelivery;
 }
 
 export interface SendResult {
@@ -33,7 +35,7 @@ function topSeverity(alerts: Alert[]): Severity {
 }
 
 /** Build the plain-text email (subject + body) for a set of alerts. PURE. */
-export function formatAlertEmail(alerts: Alert[], now = Date.now()): { subject: string; text: string } {
+export function formatAlertEmail(alerts: Alert[], now = Date.now(), page?: PageDelivery): { subject: string; text: string } {
   const sev = topSeverity(alerts);
   const tag = sev === "critical" ? "CRITICAL" : sev === "warn" ? "WARN" : "INFO";
   const subject = `[CoreLink canary] ${tag}: ${alerts.length} alert${alerts.length === 1 ? "" : "s"}`;
@@ -47,6 +49,16 @@ export function formatAlertEmail(alerts: Alert[], now = Date.now()): { subject: 
     lines.push("");
   }
   lines.push(`Detected at ${new Date(now).toISOString()}.`);
+  if (page) {
+    lines.push("");
+    lines.push("Human acknowledgement (AWS_IAM SigV4 only):");
+    lines.push(`  page_url: ${page.page_url}`);
+    lines.push(`  incident_id: ${page.incident_id}`);
+    lines.push(`  page_id: ${page.page_id}`);
+    lines.push(`  delivery_id: ${page.delivery_id}`);
+    lines.push(`  destination: ${page.destination}`);
+    lines.push(`  payload_digest: ${page.payload_digest}`);
+  }
   lines.push("Surfaces watched: fabricd /internal/v1/status + /v1/health, spawn-worker /internal/v1/metrics.");
   return { subject, text: lines.join("\n") };
 }
@@ -75,7 +87,7 @@ export async function sendAlert(env: NotifyEnv, alerts: Alert[]): Promise<SendRe
     return { sent: false, reason: "not-configured" };
   }
 
-  const { subject, text } = formatAlertEmail(alerts);
+  const { subject, text } = formatAlertEmail(alerts, Date.now(), env.PAGE_DELIVERY);
   try {
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -86,8 +98,12 @@ export async function sendAlert(env: NotifyEnv, alerts: Alert[]): Promise<SendRe
       body: JSON.stringify({ from, to, subject, text }),
       signal: AbortSignal.timeout(8000),
     });
+    // Always consume the response, including failures, so the Worker can
+    // release the connection. The body is intentionally discarded: provider
+    // error payloads are untrusted and may contain sensitive request data.
+    await resp.text().catch(() => "");
     if (!resp.ok) {
-      // Do NOT echo the response body blindly (avoid leaking anything); status only.
+      // Do NOT echo the response body (avoid leaking anything); status only.
       console.log(`[canary] Resend send failed: HTTP ${resp.status}`);
       return { sent: false, reason: `resend-${resp.status}` };
     }

@@ -4,8 +4,39 @@
   "coverage_status": "RED",
   "generated_at": "2026-09-02T00:00:00Z",
   "repository": "corelink-runners",
-  "commit_sha": "6c83f6baf5432b6991b6aac9aecc49291ab1a184",
-  "artifacts": [],
+  "commit_sha": "f27de8ff384ce4bb6fea32dbbdea96f55b0c8a93",
+  "artifacts": [
+    {
+      "path": "docs/plan/evidence/2026-09-07-T6-W4-acceptance.json",
+      "artifact_id": "t6-w4-acceptance-2026-09-07",
+      "sha256": "579e2501c0b896bd7db460dc8b58009363b3c1430ed784c54ad734f0ccdd7a22"
+    },
+    {
+      "path": "docs/plan/evidence/T3-W18-containment-live.json",
+      "artifact_id": "t3-w18-containment-live",
+      "sha256": "26879f6bdc2f117de55fbf7ca00173f9b4357107a04d0f20d5fb685ece66d4fa"
+    },
+    {
+      "path": "docs/plan/evidence/T3-W2-lifecycle.json",
+      "artifact_id": "t3-w2-lifecycle",
+      "sha256": "48de78f1033daad7e5dd092b8754fb9718c040a84b8a989dddd13851676d7991"
+    },
+    {
+      "path": "docs/plan/evidence/T4-W4-admission.json",
+      "artifact_id": "t4-w4-admission",
+      "sha256": "58aaef4f8818155675b8e1908f3d7505d3793de912ce3177ef58b38d1dfb0f35"
+    },
+    {
+      "path": "docs/plan/evidence/T6-W4-owner-config-template.json",
+      "artifact_id": "t6-w4-owner-config-template-2026-09-07",
+      "sha256": "d635cf059aade3d4976464d2ec714cd115fa23cf1895c2f4333b1c22a508e054"
+    },
+    {
+      "path": "docs/plan/evidence/T6-W9-alert-rules.json",
+      "artifact_id": "t6-w9-alert-rules",
+      "sha256": "1075cb4e30408d7390db7de00d4a951892b2e01e94f41bdb8d8cf488a246d828"
+    }
+  ],
   "claims": [],
   "claim_sources": ["@tracked-markdown"],
   "deployed_versions": {}

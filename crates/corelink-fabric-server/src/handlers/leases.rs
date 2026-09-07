@@ -51,6 +51,7 @@ use crate::admission::AdmissionMode;
 use crate::app::AppState;
 use crate::auth::{BearerPat, CachedIntrospect, error_response};
 use crate::handlers::envelope::HookRegistry;
+use crate::pending_cleanup::{PendingRollbackPhase, rollback_pending_admission};
 
 /// A minted-and-validated lease ready to RESERVE then finalize: the lease id,
 /// the wire `RunnerLease`, and the validated `ContainerSpec`. Bundled so the
@@ -121,8 +122,8 @@ pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
 ///   directly to the caller.
 /// - [`FinalizeOutcome::CapacityError`]: provision failed with a transient
 ///   provider-capacity error. The caller MUST:
-///   - In queue mode: roll back the reserved `Pending` (teardown + ledger
-///     `remove`), re-insert the `QueuedAcquire` context into the queue, and
+///   - In queue mode: finalize the claimed reserved `Pending` through the
+///     cleanup fence, re-insert the `QueuedAcquire` context into the queue, and
 ///     re-enqueue the `WorkItem` so the next tick re-dispatches it.
 ///   - In reject mode (or immediate path): return
 ///     [`capacity_exhausted_503()`] to the client.
@@ -269,6 +270,13 @@ pub(crate) async fn acquire(
     headers: axum::http::HeaderMap,
     Json(req): Json<AcquireRequest>,
 ) -> Response {
+    // An armed mint must prove dispatcher reachability before any action-cache
+    // lookup, cap resolution, slot reservation, provider call, or JIT exchange.
+    // The readiness task is independent of this request, so cancellation cannot
+    // cancel the single-flight probe or start a duplicate.
+    if !crate::mint_readiness::MintReadiness::acquire_guard(state.mint_readiness.as_ref()).await {
+        return fail_closed("runner mint is not ready");
+    }
     let now_ms = state.clock.now_ms();
     // Multi-instance routing: the proxy Worker assigns this acquire a target shard
     // via the frozen `X-Fabricd-*` headers, so the lease-id we mint hashes to THIS
@@ -839,7 +847,7 @@ pub(crate) async fn acquire(
 /// the wire shape is byte-for-byte the same (no `AcquireResponse` divergence).
 ///
 /// On a CAPACITY provision failure it rolls back the reserved `Pending`
-/// (teardown + ledger `remove`, + revoke_pat_for on the give-up path) and
+/// (the Pending cleanup fence, + revoke_pat_for on the give-up path) and
 /// returns [`FinalizeOutcome::CapacityError`] — the caller handles re-enqueue
 /// (queue mode) or the distinct-503 (reject mode). On any other failure it
 /// rolls back and returns [`FinalizeOutcome::Done`] with a fail-closed 503.
@@ -872,8 +880,8 @@ pub(crate) async fn finalize_admitted_lease(
         // at admission, step 0). Defensive: a missing broker here is an internal
         // inconsistency → fail closed, never a config-less runner box.
         if state.runner_broker.is_none() {
-            state.teardown_lease(&lease_id).await;
-            let _ = state.ledger.remove(&lease_id);
+            rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                .await;
             return FinalizeOutcome::Done(fail_closed(
                 "runner lease reached finalize with no registration broker",
             ));
@@ -890,8 +898,8 @@ pub(crate) async fn finalize_admitted_lease(
                 crate::runner_inject::inject_runner_jitconfig(&mut spec, &jitconfig);
             }
             Err(e) => {
-                state.teardown_lease(&lease_id).await;
-                let _ = state.ledger.remove(&lease_id);
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                    .await;
                 return FinalizeOutcome::Done(fail_closed(&format!(
                     "runner registration mint failed: {e}"
                 )));
@@ -933,8 +941,8 @@ pub(crate) async fn finalize_admitted_lease(
             (Some(repo), inst_opt) => Some((repo, inst_opt)),
             (None, None) => None,
             (None, Some(_)) => {
-                state.teardown_lease(&lease_id).await;
-                let _ = state.ledger.remove(&lease_id);
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::BeforeProvision)
+                    .await;
                 return FinalizeOutcome::Done(fail_closed(
                     "acquire declared installation_id without repo_full_name; repo_full_name is \
                      required for a hydrating (moat) lease — fail closed",
@@ -1018,8 +1026,12 @@ pub(crate) async fn finalize_admitted_lease(
                         tenant.as_str(),
                         req.repo_full_name.as_deref()
                     );
-                    state.teardown_lease(&lease_id).await;
-                    let _ = state.ledger.remove(&lease_id);
+                    rollback_pending_admission(
+                        state,
+                        &lease_id,
+                        PendingRollbackPhase::BeforeProvision,
+                    )
+                    .await;
                     return FinalizeOutcome::Done(fail_closed(&format!(
                         "CAS PAT mint failed: {e}"
                     )));
@@ -1031,8 +1043,8 @@ pub(crate) async fn finalize_admitted_lease(
 
     // ── 3b. Provision the container. The slot is ALREADY reserved (Pending in
     // the ledger). A provision failure here means NO Held lease is ever handed
-    // out — AND the reserved Pending MUST be rolled back, or it permanently
-    // consumes a concurrency slot (occupancy + cap leak).
+    // out. Its Pending cleanup is fenced below: an uncertain provider outcome
+    // deliberately retains the reservation for a later confirmed retry.
     //
     // Under `NoBoxProvisioner` (the default), provision is a no-op Ok →
     // acquire behaves exactly as before (no box, exec later fails closed).
@@ -1046,9 +1058,8 @@ pub(crate) async fn finalize_admitted_lease(
         //   quota / rate-limit is transient — provider capacity may free when
         //   another job finishes. Re-enqueue (queue mode) so the next tick can
         //   retry; return CapacityError so the caller handles it.
-        //   Roll back the reserved Pending here (teardown + ledger remove) so
-        //   the cap/occupancy is clean; the re-enqueue caller does NOT roll back
-        //   further (there is nothing left to roll back).
+        //   Attempt fenced cleanup. Only authoritative destruction releases
+        //   cap/occupancy; uncertainty retains the durable claim for retry.
         //   WP-7: do NOT revoke the PAT here — if the caller re-enqueues, the
         //   PAT will be needed on the next provision attempt.  The give-up
         //   path (reject mode or park timeout) is responsible for calling
@@ -1059,22 +1070,26 @@ pub(crate) async fn finalize_admitted_lease(
         //   terminal path (WP-7 A7b: revoke on EVERY terminal teardown path).
         // ─────────────────────────────────────────────────────────────────────
         if is_capacity_error(&e) {
-            // Roll back the slot — teardown then ledger remove.
-            state.teardown_lease(&lease_id).await;
-            let _ = state.ledger.remove(&lease_id);
+            // Roll back the slot only after confirmed pending cleanup.
+            let cleaned =
+                rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision)
+                    .await;
+            if !cleaned {
+                // The claim still owns this id/slot: re-admitting the same id
+                // would race its cleanup or hit a duplicate ledger row.
+                state.revoke_pat_for(&lease_id).await;
+                return FinalizeOutcome::Done(fail_closed(
+                    "provider capacity exhausted; pending cleanup must finish before retry",
+                ));
+            }
             // Signal caller: re-enqueue (queue mode) or distinct-503 (reject).
             return FinalizeOutcome::CapacityError;
         }
         // Fatal provision error — roll back, revoke any minted PAT, fail closed.
-        // Free the reserved slot: tear down any box the (failed) provision may
-        // have partially created, then REMOVE the Pending admission record so
-        // the cap/occupancy frees correctly — no dangling reserved Pending.
-        // Teardown is async and MUST run outside the ledger lock; the removal
-        // takes the lock in its own short critical section after.
-        state.teardown_lease(&lease_id).await;
-        // Best-effort rollback: if the ledger op errors we still return 503 below;
-        // the reaper's terminal sweep is the backstop.
-        let _ = state.ledger.remove(&lease_id);
+        // The cleanup helper claims before provider I/O and releases the
+        // reservation only after authoritative confirmation. An uncertain
+        // partial provisioning remains durably claimed for retry.
+        rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision).await;
         // WP-7 A7b: revoke the minted PAT on this terminal provision-failure
         // path so no per-job PAT is ever leaked on a fatal error.
         state.revoke_pat_for(&lease_id).await;
@@ -1102,7 +1117,7 @@ pub(crate) async fn finalize_admitted_lease(
     // guard across this one slot_meter lock is safe.)
     //
     // A ledger-write failure is a 503, never a half-admitted lease handed to
-    // the caller; the reserved Pending is torn down + removed first.
+    // the caller; its Pending is passed through the cleanup fence first.
     //
     // The `MutexGuard` is guaranteed dead by the time this expression yields
     // its value — the block drops it before returning — so the subsequent
@@ -1132,15 +1147,12 @@ pub(crate) async fn finalize_admitted_lease(
         }
     };
     if let Some(msg) = ledger_err {
-        // Guard is long gone; safe to await teardown. Then free the reserved
-        // Pending so the cap/occupancy does not leak.
-        state.teardown_lease(&lease_id).await;
-        let _ = state.ledger.remove(&lease_id);
+        // Guard is long gone; use the Pending cleanup fence. This may retain
+        // the cap rather than guessing about a possibly-live provisioned box.
+        rollback_pending_admission(state, &lease_id, PendingRollbackPhase::AfterProvision).await;
         // A7b (audit r4): revoke the minted PAT on this terminal Pending→Held
-        // transition-failure path. The ledger row is removed above, so the
-        // stale-Pending reaper sweep never sees this lease — without an explicit
-        // revoke the PAT would live to D-9 self-expiry. Mirrors the
-        // fatal-provision path below.
+        // transition-failure path. The Pending cleanup claim may remain for a
+        // later provider retry, but PAT ownership stays with this caller.
         state.revoke_pat_for(&lease_id).await;
         return FinalizeOutcome::Done(fail_closed(msg));
     }
@@ -1290,107 +1302,51 @@ pub(crate) async fn cancel(
             .into_response()
     };
 
-    // Compute the transition outcome under the ledger lock; capture whether
-    // a real Held→Released transition was performed so we can emit the slot
-    // event OUTSIDE the lock (lock discipline: never nest the slot_meter lock
-    // under the ledger lock; mirror the acquire handler's pattern).
-    //
-    // `emit_released`: Some(lease_id) means "we performed a real transition
-    // and must emit Released"; None means "idempotent path — no transition,
-    // no emit".
-    let (response, emit_released): (Response, Option<String>) = {
-        let ledger = &*state.ledger;
-        let record = match ledger.get(&lease_id) {
-            Ok(Some(record)) => record,
-            Ok(None) => return not_found(),
-            Err(_) => return fail_closed("lease ledger unreadable"),
-        };
-        if record.tenant != tenant {
-            return not_found();
-        }
-
-        match record.state {
-            // Pre-wire: nothing wire-visible exists to cancel (see module doc).
-            LeaseState::Pending => (not_found(), None),
-            LeaseState::Wire(RunnerState::Held) => {
-                // Held → Released through LeaseLedger::transition — the contract
-                // §1 legal matrix, never bypassed, never written directly.
-                // BIL1: emit Released only on the SUCCESSFUL transition (Ok arm).
-                // The idempotent Wire(Released) arm below does NO transition and
-                // therefore emits nothing — double-free avoided.
-                match ledger.transition(&lease_id, RunnerState::Released, state.clock.now_ms()) {
-                    Ok(updated) => {
-                        let id = updated.lease_id.clone();
-                        (released(updated.lease_id), Some(id))
-                    }
-                    Err(_) => (fail_closed("lease ledger refused Held->Released"), None),
-                }
-            }
-            // Idempotent: the goal state is already reached; no transition is
-            // attempted (Released is terminal in the matrix).
-            // BIL1: do NOT emit here — a prior cancel/close already freed the
-            // slot; a second emit would double-free and corrupt the journal.
-            LeaseState::Wire(RunnerState::Released) => (released(record.lease_id), None),
-            // Expired/Crashed are terminal NON-released states: the matrix
-            // forbids any way out, and faking `released` would turn a dead lease
-            // green. Refused with the frozen 400.
-            LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => (
-                error_response(
-                    ApiError::Invalid,
-                    "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
-                ),
-                None,
-            ),
-        }
-        // `ledger` (MutexGuard) is dropped here.
+    // Read and authorize before contacting the provider. No ledger access
+    // guard crosses the teardown await.
+    let record = match state.ledger.get(&lease_id) {
+        Ok(Some(record)) if record.tenant == tenant => record,
+        Ok(_) => return not_found(),
+        Err(_) => return fail_closed("lease ledger unreadable"),
     };
-
-    // ── BIL1 / WP-SLOT-EMIT: emit Released only when WE performed the real
-    // Held→Released transition (emit_released is Some). The ledger lock is
-    // long gone — lock discipline: slot_meter lock never nested under ledger
-    // lock (mirror of the acquire and close handlers). The idempotent
-    // Wire(Released) arm above sets emit_released to None, so a double-cancel
-    // never produces a second Released event in the journal.
-    //
-    // Note: `close_abnormal` (the lifecycle-sweep path for Crashed/abnormal
-    // leases) is NOT a live emission site in the current binary — no running
-    // sweep drives it; Crashed-slot metering is a documented non-goal here,
-    // consistent with the reaper's crash-reclamation non-goal.
-    if let Some(id) = emit_released {
-        state.record_slot(&id, &tenant, SlotEventKind::Released);
-        state.counters.leases_closed.incr();
-
-        // ── CANCEL-TEARDOWN (audit fix): a real Held→Released transition must
-        // reclaim the box + BoxRegistry entry, exactly as `close.rs` does —
-        // otherwise the Northflank job and registry binding are orphaned and
-        // the reaper (which sweeps held()-only) never reclaims them. Best-effort
-        // (no-op under `NoBoxProvisioner`); a teardown failure does NOT change
-        // the cancel response (the provider deadline is the hard backstop).
-        // Gated on the SAME real-transition signal as the slot emit, so an
-        // idempotent re-cancel never tears down twice.
-        //
-        // AUDIT P2-1: a teardown FAILURE here was silently discarded — on a
-        // transient provider 5xx the egress box keeps running (with a still-live
-        // JIT config) until its provider deadline, invisible to the reaper (which
-        // sweeps Held only, and this lease is now Released). We still don't fail
-        // the cancel (the provider deadline is the hard backstop), but the failure
-        // is now LOUD so ops can reconcile — never a silent live-box leak.
-        if !state.teardown_lease(&id).await {
-            eprintln!(
-                "lease {id}: teardown FAILED on cancel — box relies on the provider deadline; \
-                 reconcile if it persists"
+    match record.state {
+        LeaseState::Pending => return not_found(),
+        LeaseState::Wire(RunnerState::Released) => return released(record.lease_id),
+        LeaseState::Wire(RunnerState::Expired | RunnerState::Crashed) => {
+            return error_response(
+                ApiError::Invalid,
+                "lease is terminal (expired/crashed): contract §1 legal matrix forbids release",
             );
         }
-        // GC the lease's side-tables + hook entry (mirror the reaper's
-        // post-teardown `forget_lease`): the lease is terminal, nothing else
-        // will reclaim these.
-        //
-        // WP-7: revoke the CAS PAT before the sync GC (fire-and-forget).
-        state.revoke_pat_for(&id).await;
-        state.forget_lease(&id);
+        LeaseState::Wire(RunnerState::Held) => {}
     }
 
-    response
+    if !state.teardown_lease(&lease_id).await {
+        return fail_closed("lease teardown unconfirmed; lease remains Held");
+    }
+    // Provider confirmation precedes the conditional terminal transition.
+    // A failed ledger write keeps the exact handle for an authoritative retry.
+    match state
+        .ledger
+        .transition(&lease_id, RunnerState::Released, state.clock.now_ms())
+    {
+        Ok(_) => {}
+        Err(_) => {
+            return match state.ledger.get(&lease_id) {
+                Ok(Some(record)) if record.state == LeaseState::Wire(RunnerState::Released) => {
+                    released(record.lease_id)
+                }
+                _ => fail_closed("lease ledger refused Held->Released"),
+            };
+        }
+    }
+
+    // Only the transition winner emits, revokes and forgets provider evidence.
+    state.record_slot(&lease_id, &tenant, SlotEventKind::Released);
+    state.counters.leases_closed.incr();
+    state.revoke_pat_for(&lease_id).await;
+    state.forget_lease(&lease_id);
+    released(lease_id)
 }
 
 // ── Regression tests ─────────────────────────────────────────────────────────
@@ -1493,7 +1449,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use anyhow::Result;
+    use anyhow::{Result, bail};
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use corelink_fabric::{
@@ -1523,6 +1479,33 @@ mod tests {
     /// Content-pinned image accepted by `ContainerSpec::from_lease`.
     const PINNED: &str =
         "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+    /// Return the same durable no-box descriptor used by the production test
+    /// provisioner. Successful test doubles still have to satisfy the real
+    /// provision -> provider_ref -> Pending->Held contract.
+    fn recording_provider_ref(lease_id: &str) -> Result<String> {
+        crate::provider_binding::ProviderBinding {
+            lease_id: lease_id.to_string(),
+            backend: crate::provider_binding::ProviderBackend::NoBox,
+            route: crate::provider_binding::ProviderRoute::NoBox,
+            handle: None,
+            domain: "local:nobox".to_string(),
+        }
+        .encode()
+    }
+
+    fn restore_recording_provider_ref(lease_id: &str, provider_ref: &str) -> Result<()> {
+        let binding = crate::provider_binding::ProviderBinding::decode(provider_ref)?;
+        if binding.lease_id != lease_id
+            || binding.backend != crate::provider_binding::ProviderBackend::NoBox
+            || binding.route != crate::provider_binding::ProviderRoute::NoBox
+            || binding.domain != "local:nobox"
+            || binding.handle.is_some()
+        {
+            bail!("invalid recording provisioner provider binding")
+        }
+        Ok(())
+    }
 
     /// True iff `id` has the WP-FIX-LEASE-ID-UUID mint shape: `lease-<uuid-v4>`
     /// (the `lease-` prefix + a 36-char hyphenated UUID). Used by the tests that
@@ -1579,6 +1562,13 @@ mod tests {
             self.torn_down.lock().unwrap().push(lease_id.to_string());
             Ok(())
         }
+
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            let _ = self.teardown(lease_id);
+            // This fixture's provision always fails before it can create a
+            // box, so its test double explicitly supplies known-no-box proof.
+            crate::CleanupTeardown::ConfirmedDestroyed
+        }
     }
 
     /// Shared log of `(lease_id, env)` captured at provision — one entry per
@@ -1615,6 +1605,14 @@ mod tests {
             Ok(())
         }
 
+        fn provider_ref(&self, lease_id: &str) -> Result<String> {
+            recording_provider_ref(lease_id)
+        }
+
+        fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+            restore_recording_provider_ref(lease_id, provider_ref)
+        }
+
         fn teardown(&self, _lease_id: &str) -> Result<()> {
             Ok(())
         }
@@ -1635,6 +1633,14 @@ mod tests {
             let is_pending = matches!(rec.map(|r| r.state), Some(LeaseState::Pending));
             *self.observed_pending.lock().unwrap() = is_pending;
             Ok(())
+        }
+
+        fn provider_ref(&self, lease_id: &str) -> Result<String> {
+            recording_provider_ref(lease_id)
+        }
+
+        fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+            restore_recording_provider_ref(lease_id, provider_ref)
         }
 
         fn teardown(&self, _lease_id: &str) -> Result<()> {
@@ -2172,6 +2178,15 @@ mod tests {
             fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
                 Ok(())
             }
+
+            fn provider_ref(&self, lease_id: &str) -> Result<String> {
+                recording_provider_ref(lease_id)
+            }
+
+            fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+                restore_recording_provider_ref(lease_id, provider_ref)
+            }
+
             fn teardown(&self, lease_id: &str) -> Result<()> {
                 self.0.lock().unwrap().push(lease_id.to_string());
                 Ok(())

@@ -1,6 +1,6 @@
 // deploy/cloudflare/test/deep-step-by-step-audit.test.ts
 // Microscopic Atom-by-Atom Step-by-Step Deep Behavioral Audit Driver
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Strict Test double with deep inspection trace hooks ───────────────
 interface StepTraceEvent {
@@ -44,7 +44,7 @@ vi.mock("@cloudflare/containers", () => {
       }
       async start(opts: any) {
         this.alive = true;
-        recordTrace(4, "ContainerRuntime", "vm_start", { opts, envVars: { ...this.envVars, CLW_TOKEN: "[REDACTED_TMPFS]" } }, "INV-01: Container microVM bootstrap with cgroup limits");
+        recordTrace(4, "ContainerRuntime", "vm_start", { opts, envVars: { ...this.envVars, CLW_CRED_TICKET: "[REDACTED_STASH_TICKET]" } }, "INV-01: Container microVM bootstrap with cgroup limits");
       }
       async stop() {
         this.alive = false;
@@ -53,6 +53,7 @@ vi.mock("@cloudflare/containers", () => {
       async destroy() {
         this.alive = false;
       }
+      async schedule() {}
       async containerFetch(req: Request | string, port?: number): Promise<Response> {
         const urlStr = typeof req === "string" ? req : req.url;
         const url = new URL(urlStr, "http://localhost");
@@ -104,11 +105,11 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
   let mockStorage: Map<string, any>;
   let mockCtx: any;
   let mockEnv: any;
-  let d1SqlCalls: Array<{ query: string; params: any[] }>;
+  let billingEvents: Array<Record<string, unknown>>;
 
   beforeEach(() => {
     mockStorage = new Map();
-    d1SqlCalls = [];
+    billingEvents = [];
     traceLog.length = 0;
 
     mockCtx = {
@@ -116,12 +117,13 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
         get: vi.fn(async (key: string) => {
           const val = mockStorage.get(key);
           recordTrace(1, "DO_SQLite_Storage", "storage_get", { key, found: val !== undefined }, "INV-07: Atomic SQLite state retrieval");
-          return val;
+          return val === undefined ? undefined : structuredClone(val);
         }),
         put: vi.fn(async (key: string, val: any) => {
-          mockStorage.set(key, val);
+          mockStorage.set(key, structuredClone(val));
           recordTrace(2, "DO_SQLite_Storage", "storage_put", { key, status: val?.status ?? "raw_value" }, "INV-07: Atomic SQLite state persistence");
         }),
+        delete: vi.fn(async (key: string) => mockStorage.delete(key)),
       },
       blockConcurrencyWhile: vi.fn(async (fn: () => Promise<any>) => {
         recordTrace(3, "DO_ConcurrencyGuard", "blockConcurrencyWhile_acquire", { locked: true }, "INV-03: DO Mutex lock acquisition");
@@ -136,24 +138,28 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
     };
 
     mockEnv = {
-      CONFIG_DB: {
-        prepare: vi.fn((sql: string) => ({
-          bind: vi.fn((...params: any[]) => ({
-            run: vi.fn(async () => {
-              d1SqlCalls.push({ query: sql, params });
-              recordTrace(10, "D1_Distributed_Database", "sql_upsert_monthly_vcpu", {
-                tenant_id: params[0],
-                month_at: params[1],
-                vcpu_seconds_added: params[2],
-                recorded_at_epoch_ms: params[3],
-              }, "INV-05: Atomic D1 FinOps ledger accounting with 30s floor");
-              return { success: true };
-            }),
-          })),
-        })),
+      CRED_STASH: {
+        idFromName: vi.fn((name: string) => name),
+        get: vi.fn(() => ({ stash: vi.fn(async () => "d".repeat(64)), wipe: vi.fn(async () => undefined) })),
       },
+      CORELINK_RUNNER_MINT_AUTH_KEY: "dispatcher-key",
+      SPAWN_WORKER_PUBLIC_URL: "https://spawn-worker.example/",
+      BILLING_INGEST_URL: "https://billing.example/internal/v1/billing/usage",
+      BILLING_INGEST_AUTH_KEY: "billing-ingest-key",
+      BILLING_REGION: "gru",
     };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-05T12:00:00.000Z"));
+    vi.stubGlobal("fetch", vi.fn(async (input: any, init: any = {}) => {
+      if (String(input) === "https://billing.example/internal/v1/billing/usage") {
+        billingEvents.push(...JSON.parse(String(init.body)));
+        recordTrace(10, "Billing_Ingest", "usage_event_posted", { event: billingEvents.at(-1) }, "INV-05: Canonical runner vCPU usage ingest");
+      }
+      return new Response("{}", { status: 200 });
+    }));
   });
+
+  afterEach(() => vi.useRealTimers());
 
   it("Executes every single microscopic step: validation -> token-tmpfs -> boot -> ws -> exec -> cas -> d1-ledger -> teardown", async () => {
     // ═══════════════════════════════════════════════════════════════════════
@@ -176,22 +182,27 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
     await new Promise((r) => setTimeout(r, 10)); // drain constructor lock
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ETAPA 3: Invocação de startDevenv (Geração de UUIDv7, cgroups & tmpfs)
+    // ETAPA 3: Invocação de startAuthorizedDevenv (Geração de UUIDv7, cgroups & tmpfs)
     // ═══════════════════════════════════════════════════════════════════════
-    const startResp = await devenv.startDevenv({
+    const startResp = await devenv.startAuthorizedDevenv({
       config: {
         workspaceName: wsName,
         profileName: profName,
         tier: "ultra-16", // 16 vCPU, 32 GB RAM
-        clwEndpoint: "https://corelink-api.humangr.com",
-        clwTenant: tenantId,
-        clwToken: token,
+      },
+      grant: {
+        tenantId,
+        sessionUuid: crypto.randomUUID(),
+        casPat: token,
+        patId: crypto.randomUUID(),
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
       },
     });
 
     expect(startResp.status).toBe("starting");
-    expect(startResp.tier).toBe("ultra-16");
-    expect(DEVENV_TIERS[startResp.tier].vcpus).toBe(16);
+    const startingStatus = await devenv.getStatus();
+    expect(startingStatus.tier).toBe("ultra-16");
+    expect(DEVENV_TIERS[startingStatus.tier].vcpus).toBe(16);
 
     // ═══════════════════════════════════════════════════════════════════════
     // ETAPA 4: Transição onStart (Container Pronto & Portas Ativas)
@@ -210,23 +221,25 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
     expect(snap.workspaceSnapshot.bytesTotal).toBe(10485760);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ETAPA 6: Encerramento Gracioso & Gravação Contábil no D1
+    // ETAPA 6: Encerramento Gracioso & Envio do Evento Canônico de Billing
     // ═══════════════════════════════════════════════════════════════════════
     const stopResp = await devenv.requestStop();
     expect(stopResp.ok).toBe(true);
 
+    vi.setSystemTime(new Date("2026-09-05T12:00:31.000Z"));
     await devenv.onStop();
     const stoppedStatus = await devenv.getStatus();
     expect(stoppedStatus.status).toBe("stopped");
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ETAPA 7: Verificação Estrita dos Parâmetros SQL no D1
+    // ETAPA 7: Verificação Estrita do Evento Canônico de Billing
     // ═══════════════════════════════════════════════════════════════════════
-    expect(d1SqlCalls.length).toBe(1);
-    const d1Record = d1SqlCalls[0];
-    expect(d1Record.query).toContain("INSERT INTO devenv_monthly_vcpu");
-    expect(d1Record.params[0]).toBe("ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"); // tenant_id
-    expect(d1Record.params[2]).toBe(480); // 30s piso * 16 vCPU = 480 vCPU-segundos
+    expect(billingEvents).toHaveLength(1);
+    expect(billingEvents[0].tenant_id).toBe("ee30f7ba-fc25-4d71-939e-ebe130b4c6a3");
+    expect(billingEvents[0].event_kind).toBe("runner_vcpu_seconds");
+    expect(billingEvents[0].qty).toBe(496); // 31s * 16 vCPU
+    expect(billingEvents[0].region).toBe("gru");
+    expect(billingEvents[0].idem_key).toMatch(/^[0-9a-f]{64}$/);
 
     // ═══════════════════════════════════════════════════════════════════════
     // EXIBIR O RASTRO DE EXECUÇÃO DETALHADO PASSO A PASSO

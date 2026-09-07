@@ -615,9 +615,9 @@ mod tests {
         let redeem_resp = cas_cred::redeem(
             State(state.clone()),
             axum::extract::Path(lease_id.clone()),
-            Json(cas_cred::CasCredRequest {
+            Ok(Json(cas_cred::CasCredRequest {
                 ticket: ticket.clone(),
-            }),
+            })),
         )
         .await;
         assert_eq!(redeem_resp.status(), StatusCode::OK);
@@ -639,7 +639,7 @@ mod tests {
         let second = cas_cred::redeem(
             State(state.clone()),
             axum::extract::Path(lease_id.clone()),
-            Json(cas_cred::CasCredRequest { ticket }),
+            Ok(Json(cas_cred::CasCredRequest { ticket })),
         )
         .await;
         assert_eq!(

@@ -11,6 +11,10 @@
 //! hand the cloud engine, so we can assert on `allow_egress` / `run_on_create` /
 //! the injected env without any real box or GitHub call.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -47,6 +51,7 @@ impl CapturingProvisioner {
 }
 
 impl BoxProvisioner for CapturingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         self.specs
             .lock()

@@ -26,11 +26,15 @@ pub mod cf_access;
 pub mod cloud_exec;
 /// WP-6 stub — clw drive seam (A8: exit-transparency + non-zero-not-cached).
 pub mod clw_drive;
+pub mod compute_budget_api;
+mod compute_budget_config;
+pub mod compute_grant;
 pub mod corelink_auth;
 /// WP-BILLING-TARGET — the corelink-billing usage-push adapter (default-off).
 pub mod corelink_billing;
 pub mod corelink_plans;
 pub mod cred_ticket;
+pub mod credential_lifecycle_api;
 mod decimal;
 pub mod envelope_inject;
 pub mod exec;
@@ -44,9 +48,12 @@ pub mod introspect_breaker;
 /// introspect burst into ONE upstream round-trip, with zero cache staleness.
 pub(crate) mod introspect_cache;
 pub(crate) mod introspect_coalesce;
+pub mod mint_readiness;
 /// Golden-signal counters (Stage-C observability) — a lock-free, always-on
 /// operational metric surface exposed via `GET /internal/v1/status`.
 pub mod observability;
+pub mod pending_cleanup;
+pub mod provider_binding;
 pub mod quota_headroom;
 pub mod reaper;
 pub mod runner_broker;
@@ -60,6 +67,8 @@ pub mod shard;
 /// Multi-size runner ladder — the `corelink-<size>` label → box-size resolver.
 /// INERT until activation (ratified design 2026-07-10); pure resolver, unwired.
 pub mod size;
+#[cfg(test)]
+mod suspension_interleaving;
 
 pub use ac_pre_lease::{AcPreLeaseHook, AcPreLeaseOutcome, MockAcHook, NoOpAcHook};
 pub use admission::{
@@ -79,6 +88,7 @@ pub use cloud_exec::{
     BoxProvisioner, BoxRegistry, EngineLeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner,
     ProbeStatus, cloud_backend_from_env, cloud_executor_from_env,
 };
+pub use pending_cleanup::CleanupTeardown;
 // Re-export the capacity-error type so callers (tests, external provisioners)
 // can construct ProviderCapacityError-carrying errors without depending on
 // corelink-cloud-engine directly.

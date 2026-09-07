@@ -30,6 +30,9 @@ npm install
 npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.hugit/secrets/corelink/fabric-signing-key-prod
 npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.hugit/secrets/corelink/fabric-introspect-key
 npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.hugit/secrets/corelink/billing-ingest-key
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-lifecycle-token
 
 # 2. Deploy (builds + pushes the image, creates the Worker + container + DO + cron).
 npm run deploy
@@ -91,7 +94,7 @@ ledger, billing exporter, mint path, image identity, or end-to-end traffic.
 
 ## Single-flight singleton — fragility, mitigations, scaling path
 
-The control plane runs as ONE container (`max_instances: 1` + a fixed DO id
+The control plane was designed as ONE container (`max_instances: 1` + a fixed DO id
 `SINGLETON` in `src/index.ts`), so all `/v1` traffic serializes through one
 instance. Two failure modes were observed + closed on 2026-07-07/08:
 
@@ -142,11 +145,11 @@ not describe either one as the established source of resource burn. See
 
 ## Boxes (checkpoint B+ — when wiring real per-job metrics)
 
-Until a box backend is wired the lease/§13/attestation surface is live but `exec`
+Until a box backend is wired the lease/§13/attestation surface remains pending live verification, while `exec`
 returns 503 (no box backend) — fail-closed, exactly as the dress-rehearsal showed.
 
-⚠️ **The substrate you wire decides which lease KINDS run — this is the trap that
-broke prod once (#195).** `CloudflareEngine` v0 is **runner-only by design** (ADR-0007:
+⚠️ **The substrate you wire decides which lease KINDS run — this trap previously
+broke prod once (#195).** `CloudflareEngine` v0 remains **runner-only by design** (ADR-0007:
 the spawn-Worker's only container is the GitHub-Actions runner image). So:
 
 - **Cloudflare ONLY** (`CLOUDFLARE_SPAWN_WORKER_URL` var + `CLOUDFLARE_SPAWN_AUTH_TOKEN`
@@ -158,19 +161,21 @@ the spawn-Worker's only container is the GitHub-Actions runner image). So:
 - **Rota B — BOTH substrates** (`CLOUDFLARE_SPAWN_*` **and** `NORTHFLANK_API_TOKEN`
   + `NORTHFLANK_PROJECT_ID`) → the composition selects the **Hybrid** backend
   (`select_backend(true,true)`): **runner→Cloudflare** (the R2-co-located moat),
-  **check-exec→Northflank**. This is what the killer needs. Set all four and redeploy.
+  **check-exec→Northflank**. This path supplies the killer's required substrate. Set all four and redeploy.
 
 ```bash
 # wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
 # (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.hugit/secrets/corelink/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.hugit/secrets/corelink/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-lifecycle-token
 npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
 # envVars are read at container start. Applying them requires an owner-approved
 # rollout with preflight, monitoring, and rollback; never delete/restart/deploy
 # merely to diagnose whether a variable is present.
 ```
 
-After the env is live, smoke BOTH kinds before handing the host to the killer: a runner
+After the env becomes active, smoke BOTH kinds before handing the host to the killer: a runner
 acquire → 200 Held + a CF `/v1/spawn` fired; a check acquire → 200 Held + provisioned on
 Northflank (not Cloudflare). The `tests/hybrid_flip_e2e.rs` e2e pins this routing offline;
 the live smoke confirms the real backends. **Never claim boxes work off the boot log alone
@@ -186,16 +191,16 @@ cred-redemption-fix binary, tag
 `validate_mint_arm` boot guard: a successful boot checks that
 `FABRIC_PUBLIC_BASE_URL` is wired when mint is armed (the earlier `cb6fca46…`
 moat-fix binary minted a
-real PAT the box could never redeem — go-live audit wf_63a2b814). `/v1/health → 200 ok`,
+real PAT the box could never redeem — deployment audit wf_63a2b814). `/v1/health → 200 ok`,
 `/v1/attestation/key
-→ key_id faa5b7726ccd2c52` (prod key). The per-job CAS PAT mint is proven REAL (a hydrating
+→ key_id faa5b7726ccd2c52` (prod key). The per-job CAS PAT mint was proven REAL (a hydrating
 check-host acquire went 503→200 across the `token_plaintext` response-parse fix — a mint-armed
 transition a cold-run could never produce), and the attested-cost `intent_metrics_sig` rides the
 close. CF-native: introspect auth + CF spawn-Worker box backend, **no Northflank**.
 None of those dated results establishes the current image, arm state, liveness,
 or end-to-end behavior; re-establish each claim with current, read-only evidence.
 
-⚠️ **Two go-live bugs the earlier "proven" reads MISSED** (both fixed): (1) `index.ts` didn't
+⚠️ **Two deployment bugs the earlier "proven" reads MISSED** (both fixed): (1) `index.ts` didn't
 forward the mint/cred/emit vars into the CONTAINER (only the Worker saw them) → mint OFF → cold-run
 200 masked it; (2) `MintResponseBody` read `token` but the server sends `token_plaintext` →
 fail-closed on every real mint. Lesson: a 200 on a hydrating acquire does NOT prove a mint — only a

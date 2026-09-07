@@ -7,13 +7,18 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, CloseRequest, paths};
-use corelink_fabric_server::{AppState, BoxProvisioner, Clock, StaticPlans, StaticTokenStore, app};
+use corelink_fabric_server::{
+    AppState, BoxProvisioner, CleanupTeardown, Clock, HookRegistry, StaticPlans, StaticTokenStore,
+    app, app_full,
+};
+use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::lease::ContainerSpec;
 use tower::ServiceExt;
 
@@ -48,7 +53,7 @@ fn acme() -> TenantId {
 /// driving HTTP requests through the router.  The `state` is cloned into the
 /// router; `AppState: Clone` propagates `Arc`s so both shares reference the
 /// same `slot_meter`.
-fn harness(max_concurrency: u32) -> (Router, AppState) {
+fn harness(max_concurrency: u32) -> (Router, AppState, Arc<HookRegistry>) {
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
     let plans = StaticPlans::new([TenantPlan {
         tenant: acme(),
@@ -58,8 +63,9 @@ fn harness(max_concurrency: u32) -> (Router, AppState) {
     }]);
     let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
     let state = AppState::new(ledger, Arc::new(plans), fixed_clock(1_717_000_000_000));
-    let router = app(store, state.clone());
-    (router, state)
+    let registry = Arc::new(HookRegistry::default());
+    let router = app_full(store, state.clone(), registry.clone());
+    (router, state, registry)
 }
 
 /// Build a zero-plan `AppState` + `Router` for "acme" — no plan on file →
@@ -134,7 +140,7 @@ async fn do_acquire(router: Router) -> (Router, String) {
 /// After a successful acquire, `occupied == 1` and `peak == 1`.
 #[tokio::test]
 async fn acquire_emits_acquired_slot() {
-    let (router, state) = harness(2);
+    let (router, state, _registry) = harness(2);
     let (_router, _lease_id) = do_acquire(router).await;
 
     let meter = state.slot_meter.lock().unwrap();
@@ -159,13 +165,30 @@ async fn acquire_emits_acquired_slot() {
 /// After acquire then close: `occupied == 0`, `peak` stays 1.
 #[tokio::test]
 async fn close_emits_released_slot() {
-    let (router, state) = harness(2);
+    let (router, state, registry) = harness(2);
     let (router, lease_id) = do_acquire(router).await;
 
-    // Drive close.
+    // Drive close. The fixture ACKs the real hook so this test measures slot
+    // emission rather than the production 30s no-ack fallback.
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        "pat-acme",
+        MetricsCollector::new(Instant::now()),
+    );
+    registry.register(&lease_id, acme(), hook.clone(), "pat-acme");
+    let sub = hook.subscribe("pat-acme").expect("fixture subscriber");
+    let acker = std::thread::spawn(move || {
+        sub.wait_close_signal(std::time::Duration::from_secs(10))
+            .expect("close signal published");
+        sub.ack("pat-acme").expect("in-window fixture ack");
+    });
     let close_path = paths::LEASE_CLOSE.replace("{lease_id}", &lease_id);
     let close_body = serde_json::to_vec(&close_req()).unwrap();
     let resp = router.oneshot(post(&close_path, close_body)).await.unwrap();
+    acker.join().unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "close must succeed");
 
     let meter = state.slot_meter.lock().unwrap();
@@ -236,6 +259,10 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
         fn teardown(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
+        fn teardown_pending(&self, _: &str) -> CleanupTeardown {
+            // The fixture fails before creating any provider object.
+            CleanupTeardown::ConfirmedDestroyed
+        }
     }
 
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
@@ -279,7 +306,7 @@ async fn failed_acquire_via_failing_provisioner_emits_no_slot() {
 /// transition (not on the idempotent `Wire(Released)` arm which does none).
 #[tokio::test]
 async fn cancel_emits_released_slot() {
-    let (router, state) = harness(2);
+    let (router, state, _registry) = harness(2);
     let (router, lease_id) = do_acquire(router).await;
 
     // Drive cancel.
@@ -335,7 +362,7 @@ async fn cancel_emits_released_slot() {
 /// the already-Released idempotent arm must be silent.
 #[tokio::test]
 async fn cancel_idempotent_no_double_free() {
-    let (router, state) = harness(2);
+    let (router, state, _registry) = harness(2);
     let (router, lease_id) = do_acquire(router).await;
 
     let cancel_path = paths::LEASE_CANCEL.replace("{lease_id}", &lease_id);
@@ -383,7 +410,7 @@ async fn peak_tracks_two_concurrent() {
     // Need max_concurrency >= 2. We can't reuse `router` after `.oneshot()` so
     // we must clone before each request; `do_acquire` takes ownership → drive
     // manually here with two clones.
-    let (router, state) = harness(3);
+    let (router, state, registry) = harness(3);
     let store = Arc::new(StaticTokenStore::new([("pat-acme".to_string(), acme())]));
     let _ = store; // not needed, just documenting the setup
 
@@ -428,10 +455,26 @@ async fn peak_tracks_two_concurrent() {
         );
     }
 
-    // Close lease 1.
+    // Close lease 1 with an authenticated fixture ACK.
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        "pat-acme",
+        MetricsCollector::new(Instant::now()),
+    );
+    registry.register(&lease_id_1, acme(), hook.clone(), "pat-acme");
+    let sub = hook.subscribe("pat-acme").expect("fixture subscriber");
+    let acker = std::thread::spawn(move || {
+        sub.wait_close_signal(std::time::Duration::from_secs(10))
+            .expect("close signal published");
+        sub.ack("pat-acme").expect("in-window fixture ack");
+    });
     let close_path = paths::LEASE_CLOSE.replace("{lease_id}", &lease_id_1);
     let close_body = serde_json::to_vec(&close_req()).unwrap();
     let close_resp = router.oneshot(post(&close_path, close_body)).await.unwrap();
+    acker.join().unwrap();
     assert_eq!(close_resp.status(), StatusCode::OK);
 
     let meter = state.slot_meter.lock().unwrap();

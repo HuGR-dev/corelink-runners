@@ -45,6 +45,7 @@ pub mod billing_sink;
 // M1 WAVE-0 frozen anchor — the Stripe/vendor billing export-target seam.
 pub mod billing_target;
 pub mod caps;
+pub mod compute_budget;
 pub mod compute_meter;
 // M1 WAVE-2 — grace-to-expiry tier-downgrade admission policy (WP-DOWNGRADE-GRACE).
 pub mod downgrade_grace;
@@ -76,7 +77,10 @@ pub use global_gate::{
     GlobalAdmit, GlobalAdmitGuard, GlobalGate, GlobalGatePolicy, GlobalMeters, GlobalReject,
 };
 pub use interference::{TenantWaitStats, WaitSnapshot};
-pub use ledger::{AdmitLedger, FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState};
+pub use ledger::{
+    AdmitLedger, AdmitOutcome, ComputeGate, FileLedger, InMemoryLedger, LeaseLedger, LeaseRecord,
+    LeaseState, TenantSuspensionEvent,
+};
 pub use lifecycle::{BoxProbe, LeaseLifecycle};
 pub use meter::{CogsCounters, SlotEventKind, SlotOccupancyEvent};
 pub use pg_ledger::{PgLedger, PgTlsMode, pg_tls_mode_from_env};

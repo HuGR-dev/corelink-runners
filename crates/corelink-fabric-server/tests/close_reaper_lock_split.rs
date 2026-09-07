@@ -92,6 +92,10 @@ impl SlowLedger {
 }
 
 impl LeaseLedger for SlowLedger {
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        self.inner.bind_provider_ref(lease_id, provider_ref)
+    }
+
     fn put(&self, rec: LeaseRecord) -> anyhow::Result<()> {
         self.inner.put(rec)
     }
@@ -142,6 +146,23 @@ impl LeaseLedger for SlowLedger {
     }
     fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
         self.inner.remove_if_pending(lease_id)
+    }
+    fn claim_stale_pending_cleanup(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.inner.claim_stale_pending_cleanup(now_ms, max_age_ms)
+    }
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        self.inner.claim_pending_cleanup(lease_id, now_ms)
+    }
+    fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+        self.inner.finish_pending_cleanup(lease_id)
     }
 }
 

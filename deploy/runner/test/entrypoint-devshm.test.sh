@@ -61,7 +61,7 @@ if [[ -d "$target" ]]; then pass "directory created"; else fail "directory was n
 # Check the two halves separately: `stat`'s low permission field drops the
 # sticky bit on macOS (%Lp prints 777 for a 1777 directory), so asserting the
 # string "1777" would fail on the machine most likely to run this by hand.
-mode="$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target" 2>/dev/null)"
+if mode="$(stat -c '%a' "$target" 2>/dev/null)"; then :; else mode="$(stat -f '%Lp' "$target" 2>/dev/null)"; fi
 if [[ "$mode" == *"777" ]]; then pass "world-writable (${mode})"; else fail "expected 777 bits, got ${mode:-none}"; fi
 if [[ -k "$target" ]]; then pass "sticky bit set"; else fail "sticky bit missing — a world-writable /dev/shm without it lets one job delete another's files"; fi
 if [[ "$out" == *"PLAIN DIRECTORY"* && "$out" == *"disk-backed"* ]]; then

@@ -600,13 +600,20 @@ def require_actionlint_dynamic_runner_rejected(work: Path) -> None:
     shutil.copytree(REPO / ".github" / "workflows", workflow_root)
     workflow = workflow_root / "corelink-stress.yml"
     source = workflow.read_text(encoding="utf-8")
+    runs_on_match = re.search(
+        r"(?m)^(?P<indent>[ \t]+)runs-on:\s*[^\n]+$", source
+    )
+    if runs_on_match is None:
+        raise AssertionError(
+            "dynamic runs-on expression: canonical workflow has no runs-on job"
+        )
+    replacement = (
+        f'{runs_on_match.group("indent")}runs-on: "${{ \'corelink-unexpected\' }}"'
+    )
     workflow.write_text(
-        replace_once(
-            source,
-            "    runs-on: ubuntu-latest",
-            "    runs-on: \"${{ 'corelink-unexpected' }}\"",
-            "dynamic runs-on expression",
-        ),
+        source[: runs_on_match.start()]
+        + replacement
+        + source[runs_on_match.end() :],
         encoding="utf-8",
     )
     result = subprocess.run(

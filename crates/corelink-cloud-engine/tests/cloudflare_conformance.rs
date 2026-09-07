@@ -140,7 +140,8 @@ fn engine_from_vector(
     CloudflareEngine<RecordingTransport>,
     Arc<Mutex<Option<HttpRequest>>>,
 ) {
-    let mut cfg = CloudflareConfig::new("https://spawn.example.dev", "conformance-token");
+    let mut cfg = CloudflareConfig::new("https://spawn.example.dev", "conformance-spawn-token")
+        .with_scoped_tokens("conformance-exec-token", "conformance-lifecycle-token");
     cfg.labels = req["labels"]
         .as_array()
         .expect("vector request.labels must be an array")

@@ -32,6 +32,8 @@ block and are not secrets.
 | Secret | Authenticates / enables | Fail-closed behavior when absent | Notes |
 |---|---|---|---|
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | Inbound `POST /v1/spawn` from fabricd. **Must byte-match** fabricd's `CLOUDFLARE_SPAWN_AUTH_TOKEN`. | Missing/mismatch ⇒ 401 on every spawn. | Shared control-credential across both surfaces. Rotate on BOTH workers together. |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | Inbound `POST /v1/exec` from fabricd. Must byte-match the fabricd exec token. | Missing, mismatched or overlapping domain tokens ⇒ 401. | Rotate matching copies on both Workers; keep distinct from spawn and lifecycle. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | Inbound status, teardown, egress-cutoff and tenant-suspension control from fabricd. Must byte-match the fabricd lifecycle token. | Missing, mismatched or overlapping domain tokens ⇒ 401. | Rotate matching copies on both Workers; keep distinct from spawn and exec. |
 | `EXEC_SERVER_AUTH_TOKEN` | The check-host exec-server; injected into the check-host container at spawn, presented on `/v1/exec`. | Unset ⇒ a `mode:"check"` spawn **fails closed 503** (O7 hardening). | Only needed once check-host is live-flipped. |
 | `GITHUB_WEBHOOK_SECRET` | HMAC (`X-Hub-Signature-256`) verify on `POST /webhook`. | Absent ⇒ `/webhook` returns `503 "autoscaler not configured"`. | Must equal the GitHub App's configured webhook secret (verify via `/app/hook/config`). |
 | `GITHUB_MINT_TOKEN` | First-party JIT runner mint (`generate-jitconfig`), `Administration:write` on `HuGR-Labs` repos. | Absent ⇒ `/webhook` 503. | Dogfood path. Customer repos use the App path instead. |
@@ -57,6 +59,8 @@ Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 | `FABRIC_INTROSPECT_AUTH_KEY` | `x-corelink-internal-auth` for PAT introspection against CoreLink (tenant derivation on acquire). | Absent ⇒ tenant introspection fails ⇒ acquires rejected. | |
 | `BILLING_INGEST_AUTH_KEY` | `x-corelink-internal-auth` for the fabricd billing usage push. | Absent ⇒ no usage-push. | Same role as the spawn-worker's, separate value. |
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | Outbound auth to the spawn-worker's `/v1/spawn` (box provisioning). | Absent ⇒ box backend inert. **Must match** the spawn-worker's copy. | Rotate on BOTH workers together. |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | Outbound auth to the spawn-worker's `/v1/exec`. | Missing or partial scoped-token set ⇒ Cloudflare engine configuration is rejected before transport. | Dedicated exec-control token; never reuse spawn or lifecycle. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | Outbound auth to status, teardown, egress-cutoff, and tenant-suspension control routes. | Missing or partial scoped-token set ⇒ Cloudflare engine configuration is rejected before transport. | Dedicated lifecycle-control token; never reuse spawn or exec. |
 | `CORELINK_RUNNER_MINT_AUTH_KEY` | `x-corelink-internal-auth` for the moat per-job CAS PAT mint (env-0 C2c). | Part of the mint-arm trio; boot guard `validate_mint_arm` fails closed if the arm is partial. | Armed together with `FABRIC_CRED_TICKET_SECRET` + the mint URL var + `FABRIC_PUBLIC_BASE_URL`. |
 | `FABRIC_CRED_TICKET_SECRET` | HMAC for the env-0 cred-ticket (the single-use `CLW_CRED_TICKET` injected instead of the raw PAT). | Part of the mint-arm trio (see above). | Keeps the CAS PAT out of the untrusted container env. |
 | `DATABASE_URL` | Postgres connection for the durable `PgLedger` (persists lease state; arms the vCPU-h ceiling). | Absent ⇒ in-memory ledger (lease state resets on restart), ceiling cannot arm. | Required before raising `FABRIC_NUM_SHARDS`/`max_instances` > 1. Pair with `FABRIC_PG_TLS=require`. |
@@ -89,10 +93,17 @@ bindings visible without ever recording a value.
 | `FABRIC_GITHUB_APP_PRIVATE_KEY` | Optional fabricd GitHub-App PEM fallback credential for runner minting. |
 | `FABRIC_PAT` | Fabric-side PAT name used by the local/CI operator tooling. |
 | `PINNED_IMAGE_DIGEST` | Spawn-worker image admission `var`; absent leaves the optional pin disarmed. |
+| `FABRIC_COMPUTE_TERMINAL_AUTHORITY` | Spawn-worker compute terminal-receipt authority expected from `FABRIC_COMPUTE_URL`; mismatches fail closed. |
+| `FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY` | Spawn-worker Ed25519 public key used to verify authenticated compute terminal receipts; missing or invalid configuration fails closed. |
+| `FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION` | Spawn-worker compute terminal-receipt schema/version expected from `FABRIC_COMPUTE_URL`; mismatches fail closed. |
+| `FABRIC_COMPUTE_TERMINAL_KEY_ID` | Spawn-worker compute terminal-receipt signing key id expected from `FABRIC_COMPUTE_URL`; missing or mismatched configuration fails closed. |
+| `FABRIC_CREDENTIAL_ISSUER_AUTH_KEY` | Fabricd credential-issuer authorization key forwarded to the container; absent leaves issuer authorization disabled. |
 | `CORELINK_ADMIN_KEY` | Local operator alias for the fabric admin key; value is never logged. |
 | `CLOUDFLARE_API_TOKEN` | CI/API fallback token for Cloudflare deploy and container operations. |
 | `CLOUDFLARE_CONTAINERS_API_TOKEN` | Preferred CI/API token for Cloudflare container operations. |
 | `GITHUB_TOKEN` | GitHub Actions job token used by repository automation. |
+| `GITHUB_RECONCILER_TOKEN` | Reconciler credential used by the repository automation path. |
+| `GITHUB_WEBHOOK_REPO_SECRET` | Repository webhook HMAC secret used by the reconciler ingress. |
 | `NPM_TOKEN` | Optional npm publish credential in the release workflow. |
 | `PYPI_TOKEN` | Optional PyPI publish credential in the release workflow. |
 | `RESEND_API_KEY` | Canary notification credential; absent makes notifications a no-op. |
@@ -135,9 +146,11 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
    npx wrangler secret put <NAME> --name <corelink-spawn-worker|corelink-fabricd>
    # (paste the value at the prompt, or pipe from a vault: `vault read ... | wrangler secret put ...`)
    ```
-3. **Shared secrets must move in lockstep.** `CLOUDFLARE_SPAWN_AUTH_TOKEN` and
-   `BILLING_INGEST_AUTH_KEY` exist on both surfaces (or must match a CoreLink
-   counterpart). Rotate BOTH before the old value is retired, or spawns/pushes 401.
+3. **Rotate each control domain on both surfaces.** The spawn, exec and
+   lifecycle tokens must each match between fabricd and the spawn Worker.
+   Rotate the corresponding client and server copies together; the three
+   domains rotate independently of one another and must remain distinct.
+   `BILLING_INGEST_AUTH_KEY` must match its CoreLink counterpart.
 4. **Roll the container** (fabricd only): the singleton reads env at boot, so
    after `wrangler secret put` you MUST trigger a rollout (new image digest +
    `wrangler deploy`) — see the playbook §2b. The spawn-worker picks up secrets

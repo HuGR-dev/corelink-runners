@@ -8,6 +8,7 @@
 // vi.mock the module to a plain test double, exactly so the default fetch handler
 // in src/index.ts is importable + exercisable in node vitest.
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers ───────────────────────────────────
 // One shared fake container per `getContainer(ns, handle)` call, recorded so a
@@ -34,14 +35,15 @@ vi.mock("@cloudflare/containers", () => {
     // real DO; we only drive the worker's fetch handler via getContainer).
     Container: class {},
     getContainer: vi.fn((ns: unknown, handle: string): FakeContainer => {
+      let alive = true;
       const c: FakeContainer = {
         ns,
         handle,
         start: vi.fn(async () => {}),
         startWithEnv: vi.fn(async () => {}),
         containerFetch: vi.fn(async () => nextContainerFetch()),
-        isAlive: vi.fn(async () => true),
-        teardown: vi.fn(async () => {}),
+        isAlive: vi.fn(async () => alive),
+        teardown: vi.fn(async () => { alive = false; }),
         cutEgress: vi.fn(async () => {}),
       };
       containers.push(c);
@@ -57,9 +59,12 @@ import {
   rateLimitDeadLetterStep,
   RATE_LIMIT_DEADLETTER_MAX,
 } from "../src/lib";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
 import { getContainer } from "@cloudflare/containers";
 
 const AUTH = "spawn-secret";
+const CONTROL_EXEC_AUTH = "exec-control-secret";
+const LIFECYCLE_AUTH = "lifecycle-control-secret";
 const EXEC_AUTH = "exec-server-secret";
 const IMG = "registry/check-host@sha256:" + "a".repeat(64);
 
@@ -68,10 +73,12 @@ const RUNNER_NS = { _ns: "runner" };
 const CHECK_NS = { _ns: "check" };
 
 function makeEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
+    CLOUDFLARE_EXEC_AUTH_TOKEN: CONTROL_EXEC_AUTH,
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: LIFECYCLE_AUTH,
     // O7: a check-host spawn now REQUIRES the exec-server bearer (fail-closed
     // without it). Configured by default so the check-path tests exercise the
     // happy path; the dedicated fail-closed test overrides it to undefined.
@@ -79,12 +86,17 @@ function makeEnv(over: Partial<Env> = {}): Env {
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
-function post(path: string, body: unknown, auth = AUTH): Request {
+function post(path: string, body: unknown, auth?: string): Request {
+  const routeAuth = auth ?? (path === "/v1/exec" ? CONTROL_EXEC_AUTH : path.startsWith("/v1/status") || path === "/v1/teardown" || path === "/v1/egress-cutoff" ? LIFECYCLE_AUTH : AUTH);
   return new Request(`https://w${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${routeAuth}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -104,7 +116,14 @@ describe("/v1/spawn mode:'check' (C2)", () => {
         image_digest: IMG,
         mode: "check",
         toolchain_digest: "sha256:deadbeef",
-        env: { CLW_TENANT: "t", CLW_TOKEN: "x" },
+        // Caller-controlled env cannot replace the Worker-owned auth path or
+        // ingress bearer used by the bridge.
+        env: {
+          CLW_TENANT: "t",
+          CLW_TOKEN: "x",
+          EXEC_SERVER_AUTH_TOKEN: "caller-spoof",
+          EXEC_SERVER_AUTH_TOKEN_FILE: "/tmp/caller-spoof",
+        },
       }),
       env,
     );
@@ -124,6 +143,9 @@ describe("/v1/spawn mode:'check' (C2)", () => {
     expect(arg.envVars.CLW_TOKEN).toBe("x");
     // O7: the exec-server bearer is injected into the check-host env (required).
     expect(arg.envVars.EXEC_SERVER_AUTH_TOKEN).toBe(EXEC_AUTH);
+    // The bearer is ingress-only; the entrypoint writes this path and removes
+    // the raw token before the durable exec-server starts.
+    expect(arg.envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(EXEC_SERVER_AUTH_TOKEN_FILE);
     // The check DO was NOT started via the runner-only startWithEnv path.
     expect(containers[0].startWithEnv).not.toHaveBeenCalled();
   });
@@ -197,6 +219,47 @@ describe("/v1/spawn mode:'runner'/absent — unchanged runner path", () => {
 });
 
 describe("/v1/exec (C3)", () => {
+  it("rejects cross-domain bearer reuse at the production handler", async () => {
+    const env = makeEnv();
+    const spawnWithExec = await worker.fetch(
+      post("/v1/spawn", { image_digest: IMG, env: {} }, CONTROL_EXEC_AUTH),
+      env,
+    );
+    const execWithSpawn = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, AUTH),
+      env,
+    );
+    const teardownWithSpawn = await worker.fetch(
+      post("/v1/teardown", { handle: "h" }, AUTH),
+      env,
+    );
+    expect(spawnWithExec.status).toBe(401);
+    expect(execWithSpawn.status).toBe(401);
+    expect(teardownWithSpawn.status).toBe(401);
+    expect(containers).toHaveLength(0);
+  });
+
+  it("honors control-token rotation at the production handler", async () => {
+    const oldEnv = makeEnv();
+    const oldRequest = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      oldEnv,
+    );
+    expect(oldRequest.status).toBe(200);
+
+    const rotatedEnv = makeEnv({ CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-rotated" });
+    const oldToken = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, CONTROL_EXEC_AUTH),
+      rotatedEnv,
+    );
+    const newToken = await worker.fetch(
+      post("/v1/exec", { handle: "h", argv: ["true"], timeout_ms: 1000 }, "exec-control-rotated"),
+      rotatedEnv,
+    );
+    expect(oldToken.status).toBe(401);
+    expect(newToken.status).toBe(200);
+  });
+
   it("relays the container's {exit_code, stdout, stderr} verbatim as 200", async () => {
     nextContainerFetch = async () =>
       new Response(
@@ -292,7 +355,7 @@ describe("/v1/exec (C3)", () => {
 });
 
 describe("status/teardown routing by mode (audit r4)", () => {
-  const get = (path: string, auth = AUTH): Request =>
+  const get = (path: string, auth = LIFECYCLE_AUTH): Request =>
     new Request(`https://w${path}`, {
       method: "GET",
       headers: { authorization: `Bearer ${auth}` },
@@ -354,7 +417,7 @@ describe("status/teardown routing by mode (audit r4)", () => {
     expect(containers[0].ns).toBe(RUNNER_NS);
   });
 
-  it("teardown swallows a destroy() throw → still 204 (idempotent, not 500)", async () => {
+  it.each(["check", "runner"])("%s teardown failure remains unconfirmed and retryable", async (mode) => {
     vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
       const c: FakeContainer = {
         ns,
@@ -372,10 +435,15 @@ describe("status/teardown routing by mode (audit r4)", () => {
       return c as never;
     });
     const resp = await worker.fetch(
-      post("/v1/teardown", { handle: "h1", mode: "check" }),
+      post("/v1/teardown", { handle: "h1", mode }),
       makeEnv(),
     );
-    expect(resp.status).toBe(204);
+    expect(resp.status).toBe(503);
+    expect(await resp.json()).toEqual({ error: "provider teardown unconfirmed" });
+    expect(containers[0].ns).toBe(mode === "check" ? CHECK_NS : RUNNER_NS);
+    expect(containers[0].teardown).toHaveBeenCalledOnce();
+    const retry = await worker.fetch(post("/v1/teardown", { handle: "h1", mode }), makeEnv());
+    expect(retry.status).toBe(204);
   });
 
   it("POST /v1/egress-cutoff (default) → RUNNER_CONTAINER.cutEgress, 204", async () => {
@@ -489,7 +557,7 @@ describe("workflow_job:completed ⇒ runner container teardown (capacity leak fi
     expect(containers).toHaveLength(0); // never resolved a container
   });
 
-  it("a destroy() throw is swallowed (fail-open) and the handle key is still cleared", async () => {
+  it("a destroy() throw is swallowed and the durable handle remains for retry", async () => {
     const kv = fakeKv({ "jhandle:55555": "handle-boom" });
     // Next-resolved container throws on teardown.
     vi.mocked(getContainer).mockImplementationOnce((ns: unknown, handle: string) => {
@@ -510,7 +578,7 @@ describe("workflow_job:completed ⇒ runner container teardown (capacity leak fi
     });
     const resp = await completedWebhook(webhookEnv(kv), "55555", SECRET);
     expect(resp.status).toBe(200); // never a 500 — teardown is best-effort
-    expect(kv.store.has("jhandle:55555")).toBe(false); // key still dropped
+    expect(kv.store.has("jhandle:55555")).toBe(true); // failed teardown remains retryable
   });
 });
 
@@ -577,12 +645,12 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     expect(lim.keys).toEqual(["spawn:acme/api", "spawn:globex/web"]); // distinct per-repo buckets
   });
 
-  it("I1: a payload with NO repository is STILL rate-limited (never fail-open to unbounded)", async () => {
+  it("I1: a payload with NO repository is rejected before it can consume a limiter bucket", async () => {
     const lim = limiter();
     const env = rlEnv(lim, ["303"]);
-    await queuedWebhook(env, "303", undefined, SECRET, {});
-    expect(lim.limit).toHaveBeenCalledTimes(1); // the limiter WAS consulted
-    expect(lim.keys).toEqual(["spawn:"]); // bounded fallback bucket, never skipped
+    const response = await queuedWebhook(env, "303", undefined, SECRET, {});
+    expect(response.status).toBe(400);
+    expect(lim.limit).not.toHaveBeenCalled();
   });
 
   // ── The refusal must not LOSE the job (2026-08-02) ─────────────────────────
@@ -600,7 +668,7 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     };
   }
 
-  it("a RATE-LIMITED job is dead-lettered so the reconciler can re-drive it (429 is backpressure, not loss)", async () => {
+  it("a RATE-LIMITED job is durably queued for deferred intake (202 is not loss)", async () => {
     const lim = refusingLimiter();
     const kv = fakeKv();
     const waits: Promise<unknown>[] = [];
@@ -616,19 +684,16 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "4242", "acme/api", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    // The 429 itself is UNCHANGED — only whether the job survives it.
-    expect(resp.status).toBe(429);
-    await Promise.all(waits); // the record is written in waitUntil, after the response
-    const raw = kv.store.get("orphan:4242");
-    expect(raw).toBeDefined();
-    const rec = JSON.parse(raw as string) as { repo: string; installationId: string };
-    expect(rec.repo).toBe("acme/api");
-    expect(rec.installationId).toBe("999111"); // WARM-recoverable
-    // And it did NOT take a spawn claim — the reconciler claims when it re-drives.
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "4242" });
+    await Promise.all(waits);
+    // Intake authority owns the delayed retry; no orphan or external claim is
+    // manufactured by the rejected admission.
+    expect(kv.store.has("orphan:4242")).toBe(false);
     expect(kv.store.has("spawn:4242")).toBe(false);
   });
 
-  it("dead-lettering is BOUNDED per repo — past the cap the job is dropped LOUDLY, never silently", async () => {
+  it("a rate-limited job still enters durable intake when the legacy dead-letter cap is full", async () => {
     // Recording every refusal would make the limiter the AMPLIFIER: driveSpawn
     // mints the CAS PAT before it checks the concurrency slot, so each reconciler
     // retry costs a real mint even when the spawn is then refused. So the
@@ -651,14 +716,15 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "5353", "acme/api", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    expect(resp.status).toBe(429);
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "5353" });
     await Promise.all(waits);
-    expect(kv.store.has("orphan:5353")).toBe(false); // capped ⇒ no record
-    // The counter is NOT advanced past the cap (no unbounded growth).
+    expect(kv.store.has("orphan:5353")).toBe(false);
+    // The retired counter is not advanced by the durable intake path.
     expect(kv.store.get("rldl:acme/api")).toBe(String(RATE_LIMIT_DEADLETTER_MAX));
   });
 
-  it("a COLD rate-limited job records nothing — the deliberate gap, pinned so it stays deliberate", async () => {
+  it("an unmapped rate-limited job is durably queued without a spawn claim", async () => {
     // No installation id ⇒ not WARM-recoverable: re-driving it would mean
     // spawning without the per-job authz/mint. Same gap the ceiling refusal has
     // (cell12-deadletter-cold). Pinned so a future change has to face it.
@@ -675,7 +741,8 @@ describe("WP-2 2a: per-repo rate-limit key (WEBHOOK_LIMITER)", () => {
     const resp = await queuedWebhook(env, "6464", "cold/repo", SECRET, {
       waitUntil: (p: Promise<unknown>) => waits.push(p),
     });
-    expect(resp.status).toBe(429);
+    expect(resp.status).toBe(202);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, rate_limited: true, job_id: "6464" });
     await Promise.all(waits);
     expect(kv.store.has("orphan:6464")).toBe(false);
     // The counter is not touched either — a cold refusal costs nothing.

@@ -1,28 +1,32 @@
+import { ComputeBudgetClient } from "../lib/compute_budget_client";
+import { ComputeObligations, type ComputeBinding } from "../lib/compute_budget_obligation";
 import { Container } from "@cloudflare/containers";
 import {
   DevenvState,
   DevenvTier,
-  DEVENV_TIERS,
-  StartPayload,
+  AuthorizedDevenvStart,
+  AuthorizedDevenvAck,
   StatusResponse,
   SnapshotRequest,
   SnapshotResponse,
   ResizeRequest,
-  validateWorkspaceName,
-  validateProfileName,
-  validateClwToken,
-  validateTenantId,
   validateStateTransition,
 } from "../types/devenv.js";
+import { DevenvCredentials, launchAuthorizedDevenv } from "../lib/devenv_credentials.js";
 import { pushUsageEvent } from "../lib.js";
-import { hydrateViaClw, snapshotViaClw, acquireSnapshotLock, releaseSnapshotLock } from "../lib/clw.js";
+import { buildDevenvUsageEvent, type DevenvUsageInput } from "../lib/devenv_usage.js";
+import {
+  DEVENV_USAGE_PENDING_KEY,
+  DEVENV_USAGE_SETTLED_KEY,
+  freezeDevenvUsage,
+  nextDevenvUsageAttempt,
+  type DevenvUsagePending,
+} from "../lib/devenv_usage_outbox.js";
 
 /** State machine storage key */
 const STATE_KEY = "state";
 /** Last activity tracking key */
 const ACTIVITY_KEY = "lastActivityAt";
-/** Hard session timeout (ms) — prevents zombie container financial runaway */
-const HARD_MAX_SESSION_MS = 8 * 3600 * 1000;
 /** Exec-server loopback auth token key */
 const EXEC_TOKEN_KEY = "execServerToken";
 /** Exec server internal port */
@@ -39,6 +43,10 @@ interface WsPair {
   containerWs: WebSocket;
 }
 
+type DevenvUsageOutcome =
+  | { readonly outcome: "sent" | "disabled" | "pending" | "no_session" }
+  | { readonly outcome: "invalid"; readonly code: string };
+
 export class RunnerDevEnvDO extends Container<any> {
   override defaultPort = 6080;
   override sleepAfter = "30m";
@@ -50,18 +58,16 @@ export class RunnerDevEnvDO extends Container<any> {
   ];
   override enableInternet = true;
   
-  private static readonly STATIC_ENV_VARS = {
-    CLW_REF_DOMAIN: "runner",
-    CLW_ENDPOINT: "https://corelink-api.humangr.com",
-  } as const;
-
   private devenvState: DevenvState = { status: "stopped", createdAt: Date.now() };
   override envVars: Record<string, string> = {};
   private execToken: string = "default-token";
   private wsPairs: Map<string, WsPair> = new Map();
+  private readonly credentials: DevenvCredentials;
+  private settlementPromise: Promise<DevenvUsageOutcome> | null = null;
 
   constructor(ctx: any, env: any) {
     super(ctx, env);
+    this.credentials = new DevenvCredentials(ctx.storage, env);
     this.ctx.blockConcurrencyWhile(async () => {
       const stored = (await this.ctx.storage.get(STATE_KEY)) as DevenvState | undefined;
       if (stored) {
@@ -96,13 +102,6 @@ export class RunnerDevEnvDO extends Container<any> {
     this.renewActivityTimeout();
   }
 
-  private validateStartPayload(payload: StartPayload): void {
-    validateWorkspaceName(payload.config.workspaceName);
-    validateProfileName(payload.config.profileName);
-    validateClwToken(payload.config.clwToken);
-    validateTenantId(payload.config.clwTenant);
-  }
-
   private buildStatusResponse(): StatusResponse {
     const isRunning = this.devenvState.status === "running" || this.devenvState.status === "starting" || this.devenvState.status === "stopping";
     const tier: DevenvTier = (this.devenvState as any).tier ?? "standard-4";
@@ -119,71 +118,140 @@ export class RunnerDevEnvDO extends Container<any> {
 
   // ── Public RPC API ───────────────────────────────────────────────
 
-  async startDevenv(payload: StartPayload): Promise<StatusResponse> {
-    return await this.ctx.blockConcurrencyWhile(async () => {
-      this.validateStartPayload(payload);
-      
-      const sessionUuid = crypto.randomUUID();
-      const generationId = ((this.devenvState as any).generationId ?? 0) + 1;
-      
-      this.envVars = {
-        ...RunnerDevEnvDO.STATIC_ENV_VARS,
-        CLW_TENANT: payload.config.clwTenant,
-        CLW_TOKEN: payload.config.clwToken,
-        WORKSPACE_NAME: payload.config.workspaceName,
-        PROFILE_NAME: payload.config.profileName,
-        EXEC_SERVER_AUTH_TOKEN: this.execToken,
-        SESSION_UUID: sessionUuid,
-        BILLING_TENANT_UUID: payload.config.clwTenant,
-      };
-      
-      await this.transitionState({
-        status: "starting",
-        createdAt: this.devenvState.createdAt,
-        startedAt: Date.now(),
-        sessionUuid,
-        billingSeq: 0,
-        generationId,
-        workspaceName: payload.config.workspaceName,
-        profileName: payload.config.profileName,
-        tier: payload.config.tier ?? "standard-4",
-      });
-      
-      await this.start({
-        envVars: this.envVars,
-        enableInternet: true,
-      });
-      
-      this.noteActivity();
-      return this.buildStatusResponse();
+  /** Legacy raw-PAT ingress is intentionally closed, including direct RPC calls. */
+  async startDevenv(_payload: unknown): Promise<never> {
+    throw new Error("DEVENV_AUTHORIZED_RPC_REQUIRED");
+  }
+
+  private computeObligations(): ComputeObligations {
+    const terminalConfig = {
+      terminalAuthority: this.env.FABRIC_COMPUTE_TERMINAL_AUTHORITY ?? "",
+      terminalPublicKey: this.env.FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY ?? "",
+      receiptVersion: this.env.FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION ?? "",
+      terminalKeyId: this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID ?? "",
+    };
+    return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? "", fetch, terminalConfig), terminalConfig);
+  }
+
+  async prepareAuthorizedCompute(binding: ComputeBinding): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (binding.workloadKind !== "devenv" || binding.reservationId !== binding.workloadId || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
+        throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      }
+      if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_COMPUTE_SESSION_ACTIVE");
+      const previous = await this.ctx.storage.get<string>("compute:devenv-session");
+      if (previous && previous !== binding.reservationId) await this.computeObligations().abandonUnused(previous);
+      await this.computeObligations().stage(binding, Date.now());
+      await this.ctx.storage.put("compute:devenv-session", binding.reservationId);
+      // Schedule recovery before RPCs; an uncertain reserve still has an owner.
+      await this.schedule(new Date(Date.now() + 90_000), "retryUnusedCompute", { reservationId: binding.reservationId });
+      await this.computeObligations().prepare(binding, Date.now());
     });
+  }
+
+  async abandonAuthorizedCompute(reservationId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().abandonUnused(reservationId));
+  }
+
+  async retryUnusedCompute(payload: { reservationId: string }): Promise<void> {
+    let pending = true;
+    try {
+      pending = await this.ctx.blockConcurrencyWhile(async () => {
+        const cursor = await this.ctx.storage.get<string>("compute:drain-cursor");
+        const result = await this.computeObligations().drainUnused(Date.now(), cursor);
+        const retryRequired = result.retryRequired ||
+          await this.ctx.storage.get<boolean>("compute:drain-retry") === true;
+        if (result.cursor) {
+          // Keep failures from earlier pages until this complete pass finishes.
+          await this.ctx.storage.put("compute:drain-retry", retryRequired);
+          await this.ctx.storage.put("compute:drain-cursor", result.cursor);
+        } else {
+          await this.ctx.storage.delete("compute:drain-cursor");
+          await this.ctx.storage.delete("compute:drain-retry");
+        }
+        return !!result.cursor || retryRequired;
+      });
+    } catch { /* retain the independent retry alarm */ }
+    if (pending) await this.schedule(new Date(Date.now() + 60_000), "retryUnusedCompute", payload);
+  }
+
+  async startAuthorizedDevenv(payload: AuthorizedDevenvStart): Promise<AuthorizedDevenvAck> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const reservationId = payload?.grant?.computeReservationId;
+      if (reservationId && (reservationId !== payload.grant.sessionUuid ||
+          await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId)) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      try {
+        return await launchAuthorizedDevenv({
+          env: this.env, credentials: this.credentials, execToken: this.execToken,
+          getState: () => this.devenvState, transition: (state) => this.transitionState(state),
+          settle: () => this.recordUsage(), completeStopped: () => this.completeStoppedSession(),
+          start: async (envVars) => {
+            if (reservationId) await this.computeObligations().claimProvider(reservationId, payload.grant.sessionUuid, Date.now());
+            this.envVars = envVars;
+            await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
+          },
+          destroy: () => this.destroy(), schedule: (when, callback, value) => this.schedule(when, callback, value),
+          noteActivity: () => this.noteActivity(),
+        }, payload);
+      } catch (error) {
+        if (reservationId) {
+          try { await this.computeObligations().abandonUnused(reservationId); }
+          catch { /* The independently scheduled compute obligation remains. */ }
+        }
+        throw error;
+      }
+    });
+  }
+
+  private recoverTerminalCredentials(): Promise<void> {
+    return this.credentials.recoverTerminal(() => this.destroy(), () => this.completeStoppedSession());
+  }
+
+  /** Session binding makes callbacks from an older SDK schedule harmless. */
+  async expireAuthorizedSession(payload: { sessionUuid: string }): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => this.credentials.expire(
+      payload?.sessionUuid, () => this.destroy(), () => this.completeStoppedSession(),
+    )).catch(() => { console.error(JSON.stringify({ event: "devenv_expiry_cleanup_pending" })); });
   }
 
   async requestStop(): Promise<{ readonly ok: true }> {
     return await this.ctx.blockConcurrencyWhile(async () => {
-      if (this.devenvState.status === "stopped" || this.devenvState.status === "stopping") {
+      if (this.devenvState.status === "stopped" || this.devenvState.status === "errored") {
+        // A terminal container stays stoppable even while billing is unavailable.
+        // Preserve its identity; authorized start requires successful settlement.
+        if (this.devenvState.status === "errored" && !await this.credentials.current()) await this.destroy();
+        await this.recoverTerminalCredentials();
+        await this.recordUsage();
         return { ok: true };
       }
-      
-      if (this.devenvState.status === "errored") {
-        await this.destroy();
-        await this.transitionState({ status: "stopped", createdAt: this.devenvState.createdAt });
+      if (this.devenvState.status === "stopping") {
+        // A repeated stop awaits provider force-stop, not an empty local-state proof.
+        let stopped = false;
+        try {
+          await this.destroy(); stopped = true;
+          await this.completeStoppedSession();
+        } finally { await this.credentials.cleanup(stopped); }
         return { ok: true };
       }
       
       await this.transitionState({
         status: "stopping",
         createdAt: this.devenvState.createdAt,
-        startedAt: (this.devenvState as any).startedAt ?? Date.now(),
-        sessionUuid: (this.devenvState as any).sessionUuid ?? crypto.randomUUID(),
-        billingSeq: (this.devenvState as any).billingSeq ?? 0,
-        generationId: (this.devenvState as any).generationId ?? 1,
-        workspaceName: (this.devenvState as any).workspaceName ?? "",
-        profileName: (this.devenvState as any).profileName ?? "",
-        tier: (this.devenvState as any).tier ?? "standard-4",
+        startedAt: (this.devenvState as any).startedAt,
+        sessionUuid: (this.devenvState as any).sessionUuid,
+        tenantId: (this.devenvState as any).tenantId,
+        billingSeq: (this.devenvState as any).billingSeq,
+        generationId: (this.devenvState as any).generationId,
+        workspaceName: (this.devenvState as any).workspaceName,
+        profileName: (this.devenvState as any).profileName,
+        tier: (this.devenvState as any).tier,
       });
       
-      await this.stop();
+      try { await this.stop(); } catch {
+        await this.credentials.cleanup(false);
+        throw new Error("DEVENV_PROVIDER_STOP_FAILED");
+      }
+      // Let the SIGTERM snapshot finish; onStop wipes credentials on confirmed exit.
       this.noteActivity();
       return { ok: true };
     });
@@ -235,6 +303,7 @@ export class RunnerDevEnvDO extends Container<any> {
         createdAt: this.devenvState.createdAt,
         startedAt: (this.devenvState as any).startedAt,
         sessionUuid: (this.devenvState as any).sessionUuid,
+        tenantId: (this.devenvState as any).tenantId,
         billingSeq: (this.devenvState as any).billingSeq,
         generationId: (this.devenvState as any).generationId,
         workspaceName: (this.devenvState as any).workspaceName,
@@ -248,26 +317,63 @@ export class RunnerDevEnvDO extends Container<any> {
     this.noteActivity();
   }
 
-  override async onStop(): Promise<void> {
-    await this.recordUsage();
-    await this.transitionState({
-      status: "stopped",
-      createdAt: this.devenvState.createdAt,
-      generationId: (this.devenvState as any).generationId,
-    });
+  /** Freeze callback time before any storage or network await. */
+  private terminalUsageSnapshot(): DevenvUsageInput | undefined {
+    const state = this.devenvState;
+    if (state.status === "stopped" || state.status === "errored") return state.terminalUsage;
+    return {
+      tenantId: state.tenantId,
+      sessionId: state.sessionUuid,
+      tier: state.tier,
+      startedAtMs: state.startedAt,
+      completedAtMs: Date.now(),
+      region: this.env.BILLING_REGION,
+    };
   }
 
-  override async onError(error: unknown): Promise<void> {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    await this.recordUsage();
-    await this.transitionState({
-      status: "errored",
+  override async onStop(): Promise<void> {
+    try { await this.completeStoppedSession(); }
+    finally { await this.credentials.cleanup(true); }
+  }
+
+  private async completeStoppedSession(): Promise<void> {
+    const terminalUsage = this.terminalUsageSnapshot();
+    if (!terminalUsage && this.devenvState.status === "errored") {
+      // An old errored record still owns its session even without a timestamp.
+      await this.recordUsage();
+      return;
+    }
+    // Retain the snapshot in memory even when the first durable write fails.
+    // recordUsage persists this state before constructing/delivering an event.
+    this.devenvState = {
+      status: "stopped",
       createdAt: this.devenvState.createdAt,
-      lastError: errMsg.slice(0, 256),
-      lastWorkspaceName: (this.devenvState as any).workspaceName ?? "",
-      generationId: (this.devenvState as any).generationId,
-      tier: (this.devenvState as any).tier,
-    });
+      generationId: this.devenvState.generationId,
+      terminalUsage,
+    };
+    await this.recordUsage();
+  }
+
+  override async onError(_error: unknown): Promise<void> {
+    const terminalUsage = this.terminalUsageSnapshot();
+    const state = this.devenvState;
+    if (state.status !== "stopped" && state.status !== "errored") {
+      this.devenvState = {
+        status: "errored",
+        createdAt: state.createdAt,
+        startedAt: state.startedAt,
+        sessionUuid: state.sessionUuid,
+        tenantId: state.tenantId,
+        billingSeq: state.billingSeq,
+        lastError: "DEVENV_CONTAINER_ERROR",
+        lastWorkspaceName: state.workspaceName,
+        generationId: state.generationId,
+        tier: state.tier,
+        terminalUsage,
+      };
+    }
+    try { await this.recordUsage(); }
+    finally { await this.credentials.cleanup(false); }
   }
 
   // ── In-Container Exec Client ─────────────────────────────────────
@@ -312,77 +418,81 @@ export class RunnerDevEnvDO extends Container<any> {
 
   // ── Billing / Metering ───────────────────────────────────────────
 
-  private async recordUsage(): Promise<void> {
-    const startedAt = (this.devenvState as any).startedAt;
-    if (!startedAt) return;
+  private async recordUsage(): Promise<DevenvUsageOutcome> {
+    if (this.settlementPromise) return this.settlementPromise;
+    this.settlementPromise = this.settleUsage().catch(() => {
+      console.error(JSON.stringify({ event: "devenv_billing_outbox_unavailable" }));
+      return { outcome: "pending" as const };
+    }).finally(() => { this.settlementPromise = null; });
+    return this.settlementPromise;
+  }
 
-    const MIN_BILLABLE_SECONDS = 30;
-    const periodEndMs = Date.now();
-    const rawWallSeconds = Math.max(0, (periodEndMs - startedAt) / 1000);
-    const wallSeconds = Math.max(MIN_BILLABLE_SECONDS, Math.ceil(rawWallSeconds));
-
-    const tier: DevenvTier = (this.devenvState as any).tier ?? "standard-4";
-    const vcpuMultiplier = tier === "standard-2" ? 2 : tier === "power-8" ? 8 : tier === "ultra-16" ? 16 : 4;
-    const vcpuSeconds = wallSeconds * vcpuMultiplier;
-
-    const tenantUuid = this.envVars.BILLING_TENANT_UUID ?? this.envVars.CLW_TENANT ?? "00000000-0000-0000-0000-000000000000";
-    const billingPeriod = new Date(startedAt).toISOString().slice(0, 7);
-
-    const sessionUuid = (this.devenvState as any).sessionUuid ?? crypto.randomUUID();
-    const billingSeq = (this.devenvState as any).billingSeq ?? 1;
-
-    // 1. In-Worker D1 direct tally (when CONFIG_DB is available)
-    if ((this.env as any).CONFIG_DB) {
-      const monthStartMs = new Date(billingPeriod + "-01T00:00:00Z").getTime();
-      let attempts = 0;
-      while (attempts < 3) {
-        try {
-          const jitter = Math.floor(Math.random() * 200) + 50;
-          await new Promise((r) => setTimeout(r, jitter));
-          await (this.env as any).CONFIG_DB.prepare(
-            `INSERT INTO devenv_monthly_vcpu (tenant_id, month_at, vcpu_seconds, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (tenant_id, month_at) DO UPDATE SET
-                 vcpu_seconds = vcpu_seconds + excluded.vcpu_seconds,
-                 updated_at   = excluded.updated_at`
-          ).bind(tenantUuid, monthStartMs, vcpuSeconds, Date.now()).run();
-          break;
-        } catch {
-          attempts++;
-          await new Promise((r) => setTimeout(r, attempts * 300));
-        }
+  private async settleUsage(): Promise<DevenvUsageOutcome> {
+    // Persist the terminal timestamp even if writing the pending event fails.
+    // A restarted DO can then retry without charging time after the callback.
+    await this.persistState();
+    const pending = await this.ctx.storage.get(DEVENV_USAGE_PENDING_KEY) as DevenvUsagePending | undefined;
+    if (pending) return this.deliverPendingUsage(pending);
+    const state = this.devenvState;
+    if (state.status !== "stopped" && state.status !== "errored") return { outcome: "pending" };
+    const snapshot = state.terminalUsage;
+    if (!snapshot) {
+      if (state.status === "errored") {
+        const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+        if (settledSession === state.sessionUuid) return { outcome: "no_session" };
       }
+      // Legacy errored sessions have no trustworthy completion time. Keep them
+      // blocked instead of inventing a later timestamp or losing the identity.
+      return { outcome: state.status === "errored" ? "pending" : "no_session" };
     }
+    const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+    if (settledSession === snapshot.sessionId) return { outcome: "no_session" };
+    if (!this.env.BILLING_INGEST_URL) {
+      await this.ctx.storage.put(DEVENV_USAGE_SETTLED_KEY, snapshot.sessionId);
+      console.info(JSON.stringify({ event: "devenv_billing_disabled", reason: "BILLING_INGEST_URL_unset" }));
+      return { outcome: "disabled" };
+    }
+    const result = await buildDevenvUsageEvent(snapshot);
+    if (!result.ok) {
+      console.error(JSON.stringify({ event: "devenv_billing_invalid", code: result.error.code, field: result.error.field }));
+      return { outcome: "invalid", code: result.error.code };
+    }
+    const frozen = freezeDevenvUsage(result.event, snapshot.sessionId, snapshot.completedAtMs);
+    await this.ctx.storage.put(DEVENV_USAGE_PENDING_KEY, frozen);
+    return this.deliverPendingUsage(frozen);
+  }
 
-    // 2. Canonical HTTP usage push (when BILLING_INGEST_URL is configured)
-    if ((this.env as any).BILLING_INGEST_URL) {
-      try {
-        await pushUsageEvent(this.env as any, {
-          tenant_id: tenantUuid,
-          event_kind: "runner_vcpu_seconds",
-          qty: vcpuSeconds,
-          billing_period: billingPeriod,
-          region: "wnam",
-          source: "corelink/devenv",
-          time_ms: periodEndMs,
-          idem_key: `devenv:${sessionUuid}:${billingSeq}`,
-        });
-      } catch (err) {
-        console.error("devenv_billing_push_failed", err);
-      }
+  private async deliverPendingUsage(pending: DevenvUsagePending): Promise<DevenvUsageOutcome> {
+    const settledSession = await this.ctx.storage.get(DEVENV_USAGE_SETTLED_KEY) as string | undefined;
+    if (settledSession === pending.sessionUuid) {
+      await this.ctx.storage.delete(DEVENV_USAGE_PENDING_KEY);
+      return { outcome: "sent" };
+    }
+    // Disabling delivery must not discard an event that was already queued.
+    if (!this.env.BILLING_INGEST_URL) return { outcome: "pending" };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      await pushUsageEvent(this.env as any, pending.event, controller.signal);
+      await this.ctx.storage.put(DEVENV_USAGE_SETTLED_KEY, pending.sessionUuid);
+      await this.ctx.storage.delete(DEVENV_USAGE_PENDING_KEY);
+      return { outcome: "sent" };
+    } catch {
+      await this.ctx.storage.put(DEVENV_USAGE_PENDING_KEY, nextDevenvUsageAttempt(pending));
+      console.error(JSON.stringify({ event: "devenv_billing_delivery_failed", attempt: pending.attempts + 1 }));
+      return { outcome: "pending" };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
   // ── HTTP→RPC Router & WebSocket Proxy ──────────────────────────────
   //
   // The corelink-server worker forwards requests via the cross-worker
-  // RUNNER_DEVENV_DO binding using `devStub.fetch()`.  This override
-  // maps API paths to the internal RPC methods so the control-plane
-  // endpoints work end-to-end.
-  //
+  // RUNNER_DEVENV_DO binding using RPC for authorized start and fetch for controls. This override
   // Path matrix (all under /v1/customer/devenv):
   //   GET  /                     → list / getStatus
-  //   POST /                     → startDevenv
+  //   POST /                     → denied; trusted start uses typed RPC
   //   GET  /status               → getStatus
   //   POST /stop                 → requestStop
   //   DELETE /  or DELETE /:id   → requestStop
@@ -414,25 +524,9 @@ export class RunnerDevEnvDO extends Container<any> {
     const normSub = subPath.replace(/\/+$/, "");
 
     try {
-      // POST /v1/customer/devenv → startDevenv
+      // Grant-shaped JSON or forged tenant headers never authorize a start.
       if (method === "POST" && (normSub === "" || normSub === "/")) {
-        const body = await request.json() as any;
-        const tenantId = request.headers.get("x-corelink-tenant-id") ?? "";
-        const clwToken = body.clw_token ?? "";
-        const result = await this.startDevenv({
-          config: {
-            workspaceName: body.workspace_name ?? "",
-            profileName: body.profile_name ?? "default",
-            tier: body.tier ?? "standard-4",
-            clwEndpoint: "https://corelink-api.humangr.com",
-            clwTenant: tenantId,
-            clwToken,
-          },
-        });
-        return new Response(JSON.stringify(result), {
-          status: 201,
-          headers: { "Content-Type": "application/json" },
-        });
+        return Response.json({ error: "DEVENV_AUTHORIZED_RPC_REQUIRED" }, { status: 403 });
       }
 
       // GET /v1/customer/devenv → list (wraps getStatus in devenvs array)

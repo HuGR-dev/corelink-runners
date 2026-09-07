@@ -1,4 +1,5 @@
 // deploy/cloudflare/src/types/devenv.ts
+import type { DevenvUsageInput } from "../lib/devenv_usage.js";
 
 // ─── Constants ────────────────────────────────────────────────────────
 export const DevenvStatus = {
@@ -13,7 +14,7 @@ export type DevenvStatus = (typeof DevenvStatus)[keyof typeof DevenvStatus];
 
 export const VALID_TRANSITIONS: Record<DevenvStatus, readonly DevenvStatus[]> = {
   stopped: ["starting"],
-  starting: ["running", "errored", "stopped"],
+  starting: ["running", "stopping", "errored", "stopped"],
   running: ["stopping", "errored"],
   stopping: ["stopped", "errored"],
   errored: ["starting", "stopped"],
@@ -77,6 +78,7 @@ export function validateTenantId(id: string): string {
 export type DevenvState =
   | {
       readonly status: "stopped";
+      readonly terminalUsage?: DevenvUsageInput;
       readonly createdAt: number;
       readonly generationId?: number;
     }
@@ -85,22 +87,24 @@ export type DevenvState =
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
     }
   | {
       readonly status: "running";
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
       readonly containerHandle: string;
       readonly lastHealthCheckAt: number;
       readonly healthCheckFailures: number;
@@ -110,22 +114,29 @@ export type DevenvState =
       readonly createdAt: number;
       readonly startedAt: number;
       readonly sessionUuid: string;
+      readonly tenantId: string;
       readonly billingSeq: number;
       readonly generationId: number;
       readonly workspaceName: string;
       readonly profileName: string;
-      readonly tier?: DevenvTier;
+      readonly tier: DevenvTier;
     }
   | {
       readonly status: "errored";
+      readonly terminalUsage?: DevenvUsageInput;
       readonly createdAt: number;
+      readonly startedAt: number;
+      readonly sessionUuid: string;
+      readonly billingSeq: number;
+      readonly tenantId: string;
       readonly lastError: string;
       readonly lastWorkspaceName: string;
-      readonly generationId?: number;
-      readonly tier?: DevenvTier;
+      readonly generationId: number;
+      readonly tier: DevenvTier;
     };
 
 // ─── RPC Payloads ────────────────────────────────────────────────────
+/** @deprecated Legacy payload accepted only by the explicit-denial startDevenv RPC. */
 export interface StartPayload {
   readonly config: {
     readonly workspaceName: string;
@@ -135,6 +146,28 @@ export interface StartPayload {
     readonly clwTenant: string;
     readonly clwToken: string;
   };
+}
+
+/** Trusted cross-worker RPC input; never accepted from HTTP request bodies. */
+export interface AuthorizedDevenvStart {
+  readonly config: {
+    readonly workspaceName: string;
+    readonly profileName: string;
+    readonly tier?: DevenvTier;
+  };
+  readonly grant: {
+    readonly tenantId: string;
+    readonly sessionUuid: string;
+    readonly casPat: string;
+    readonly patId: string;
+    readonly expiresAtMs: number;
+    readonly computeReservationId?: string;
+  };
+}
+
+export interface AuthorizedDevenvAck {
+  readonly sessionUuid: string;
+  readonly status: "starting" | "running";
 }
 
 export interface StatusResponse {
@@ -191,4 +224,3 @@ export interface SnapshotMetadata {
   readonly unchanged: boolean;
   readonly timestamp: number;
 }
-

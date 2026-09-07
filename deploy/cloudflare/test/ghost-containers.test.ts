@@ -21,6 +21,7 @@
 // NEW FILE. Touches no other test file.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors journey-sj2) with per-test
 // hooks for start / teardown / isAlive, so we can fail an attempt, observe what
@@ -146,7 +147,7 @@ async function ghSign(secret: string, body: string): Promise<string> {
 // ── fetch router: the GitHub JIT mint + the registration DELETE ──────────────
 // Each mint returns a DISTINCT config and runner id, so a test can tell whether
 // two boxes booted with the same single-use registration.
-let fetchCalls: { method: string; url: string }[] = [];
+let fetchCalls: { method: string; url: string; body?: unknown }[] = [];
 let jitStatus = 200;
 let deleteStatus = 204;
 let jitMinted = 0;
@@ -157,7 +158,24 @@ function installFetchRouter() {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : ((input as Request).url ?? String(input));
       const method = (init?.method ?? "GET").toUpperCase();
-      fetchCalls.push({ method, url });
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      fetchCalls.push({ method, url, body });
+      if (url.endsWith("/internal/v1/runner/adopt")) {
+        const operationId = (body as { operation_id?: unknown } | undefined)?.operation_id;
+        const patId = (body as { pat_id?: unknown } | undefined)?.pat_id;
+        const mint = fetchCalls.findLast((call) => call.url.endsWith("/internal/v1/runner/mint"));
+        const mintBody = mint?.body as { operation_id?: unknown } | undefined;
+        return operationId === mintBody?.operation_id && patId === "ghost-pat-id"
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
+      }
+      if (url.endsWith("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "ghost-tenant", max_concurrency: 20 }), { status: 200 });
+      }
+      if (url.endsWith("/internal/v1/runner/mint")) {
+        return new Response(JSON.stringify({ token_plaintext: "ghost-pat", pat_id: "ghost-pat-id", tenant: "ghost-tenant", lifecycle_generation: "1", max_concurrency: 20 }), { status: 200 });
+      }
+      if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: 204 });
       if (url.includes("generate-jitconfig")) {
         if (jitStatus !== 200) return new Response("jit boom", { status: jitStatus });
         jitMinted++;
@@ -187,17 +205,31 @@ function installLogCapture() {
 }
 
 function baseEnv(kv: ReturnType<typeof fakeKv>, metrics: ReturnType<typeof fakeMetrics>, over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
+    CORELINK_RUNNER_MINT_AUTH_KEY: "ghost-mint-key",
+    CORELINK_MINT_URL: "https://mint.test",
+    REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
+    SPAWN_WORKER_PUBLIC_URL: "https://worker.test",
+    CRED_STASH: {
+      idFromName: vi.fn((name: string) => name),
+      get: vi.fn(() => ({ stash: vi.fn(async () => "ghost-ticket") })),
+    } as never,
     PINNED_IMAGE_DIGEST: "",
     RUNNER_JOB_PATS: kv as never,
     METRICS: metrics as never,
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 async function queuedWebhook(
@@ -395,7 +427,10 @@ describe("ghost containers · cell 2 — one JIT registration per ATTEMPT, never
     expect(jitCalls()).toHaveLength(1); // attempted once…
     expect(startedRunnerBoxes()).toHaveLength(0); // …never spawned
     expect(runnerDeletes()).toHaveLength(0); // nothing to revoke
-    expect(metrics.counts.spawn_failed).toBe(1);
+    // The canonical route already marked DRIVING before the provider's JIT
+    // response, so this remains durable UNKNOWN rather than a retryable spawn
+    // failure metric.
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
   });
 
   it("the teardown bindings point at the SURVIVING attempt's handle and runner name", async () => {

@@ -16,6 +16,10 @@
 //! - `clw_drive::{ClwBoxDrive, MockBoxExec}` (A8 — exit transparency, WP-6).
 //! - `ac_pre_lease::{AcPreLeaseHook, MockAcHook}` (A3b, A4 — AC lookup stub).
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -73,6 +77,7 @@ impl CapturingProvisioner {
 }
 
 impl BoxProvisioner for CapturingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         self.specs
             .lock()

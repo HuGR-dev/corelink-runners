@@ -119,11 +119,222 @@
 //! After teardown the ledger lock is re-acquired (briefly) to write the
 //! `Expired` transition.  No other lock is held at that point.
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
-use corelink_fabric::SlotEventKind;
+use corelink_fabric::{SlotEventKind, TenantSuspensionEvent};
 use corelink_runner::envelope::{AbnormalKind, CloseReason};
 use corelink_runners_contracts::RunnerState;
+
+/// Compose the consumer envelope from the generation captured by this exact
+/// immutable outbox event. The consumer contract carries the generation as a
+/// decimal string; reject values outside the checked PostgreSQL boundary.
+fn suspension_envelope_body(
+    event: &TenantSuspensionEvent,
+    generation: anyhow::Result<u64>,
+) -> anyhow::Result<String> {
+    let generation = generation?;
+    if generation > i64::MAX as u64 {
+        anyhow::bail!("lifecycle generation exceeds i64::MAX");
+    }
+    Ok(serde_json::to_string(&serde_json::json!({
+        "event_id": event.event_id,
+        "tenant_id": event.tenant_id,
+        "action": "suspended",
+        "lifecycle_generation": generation.to_string(),
+    }))?)
+}
+
+const MAX_SUSPENSION_RECEIPT_BYTES: usize = 4 * 1024;
+
+/// The reaper reads this binding directly, so it must apply the same security
+/// boundary that the normal Cloudflare composition applies to outbound URLs.
+/// Only an HTTPS origin is accepted: no credentials, query/fragment, path, or
+/// ambiguous authority may be combined with the bearer token.
+fn secure_worker_origin(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed != raw || !trimmed.starts_with("https://") {
+        return None;
+    }
+    let rest = &trimmed["https://".len()..];
+    if rest.is_empty() || rest.contains(['?', '#', '\\']) {
+        return None;
+    }
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('%')
+        || authority
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    if authority_end < rest.len() && &rest[authority_end..] != "/" {
+        return None;
+    }
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let port = authority.get(close + 1..).unwrap_or_default();
+        if !port.is_empty() && !port.starts_with(':') {
+            return None;
+        }
+        (&authority[..=close], port.strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty() || port.is_some_and(|p| p.is_empty() || p.parse::<u16>().is_err()) {
+        return None;
+    }
+    Some(trimmed.trim_end_matches('/'))
+}
+
+fn suspension_receipt_is_ack(
+    status: u16,
+    body: &[u8],
+    event_id: &str,
+    tenant_id: &str,
+    lifecycle_generation: &str,
+) -> bool {
+    if status != 200 || body.len() > MAX_SUSPENSION_RECEIPT_BYTES {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    object.len() == 4
+        && object.get("event_id").and_then(serde_json::Value::as_str) == Some(event_id)
+        && object.get("tenant_id").and_then(serde_json::Value::as_str) == Some(tenant_id)
+        && object
+            .get("lifecycle_generation")
+            .and_then(serde_json::Value::as_str)
+            == Some(lifecycle_generation)
+        && object.get("complete").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+/// Deliver the durable suspension outbox to the authenticated runner Worker.
+/// The URL and scoped lifecycle token are Cloudflare bindings forwarded into the
+/// fabric container; absent configuration leaves the outbox pending.
+pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
+    let Some(base) = std::env::var("CLOUDFLARE_SPAWN_WORKER_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| secure_worker_origin(&v).map(str::to_owned))
+    else {
+        return;
+    };
+    let Some(token) = std::env::var("CLOUDFLARE_LIFECYCLE_AUTH_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        return;
+    };
+    let events = match state.ledger.pending_tenant_suspension_events(32) {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("suspension-outbox: read failed: {e:#}");
+            return;
+        }
+    };
+    let url = format!(
+        "{}/internal/v1/tenant-suspension",
+        base.trim_end_matches('/')
+    );
+    for event in events {
+        let generation = match state.ledger.tenant_suspension_generation(&event.event_id) {
+            Ok(generation) => generation,
+            Err(e) => {
+                eprintln!(
+                    "suspension-outbox: generation lookup/encode failed event={}: {e:#}",
+                    event.event_id
+                );
+                continue;
+            }
+        };
+        let body = match suspension_envelope_body(&event, Ok(generation)) {
+            Ok(body) => body,
+            Err(e) => {
+                eprintln!(
+                    "suspension-outbox: generation lookup/encode failed event={}: {e:#}",
+                    event.event_id
+                );
+                continue;
+            }
+        };
+        if let Err(e) = state
+            .ledger
+            .mark_tenant_suspension_event_attempt(&event.event_id)
+        {
+            eprintln!(
+                "suspension-outbox: attempt stamp failed event={}: {e:#}",
+                event.event_id
+            );
+            continue;
+        }
+        let url = url.clone();
+        let token = token.clone();
+        let expected_event_id = event.event_id.clone();
+        let expected_tenant_id = event.tenant_id.clone();
+        let expected_generation = generation.to_string();
+        let delivered = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let response = agent
+                .post(&url)
+                .header("Authorization", &format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .send(&body);
+            response
+                .map(|mut r| {
+                    let status = r.status().as_u16();
+                    let mut reader = r
+                        .body_mut()
+                        .as_reader()
+                        .take((MAX_SUSPENSION_RECEIPT_BYTES + 1) as u64);
+                    let mut body = Vec::with_capacity(MAX_SUSPENSION_RECEIPT_BYTES + 1);
+                    if reader.read_to_end(&mut body).is_err() {
+                        return false;
+                    }
+                    suspension_receipt_is_ack(
+                        status,
+                        &body,
+                        &expected_event_id,
+                        &expected_tenant_id,
+                        &expected_generation,
+                    )
+                })
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        if delivered {
+            if let Err(e) = state
+                .ledger
+                .mark_tenant_suspension_event_delivered(&event.event_id)
+            {
+                eprintln!(
+                    "suspension-outbox: ack failed event={}: {e:#}",
+                    event.event_id
+                );
+            }
+        } else {
+            eprintln!(
+                "suspension-outbox: delivery failed event={} tenant={} attempt={}",
+                event.event_id, event.tenant_id, event.attempts
+            );
+        }
+    }
+}
 
 /// §13.5 best-effort partial-envelope flush on an ABNORMAL lease termination
 /// (Expired / Crashed), fire-and-forget.
@@ -601,13 +812,19 @@ pub fn spawn_reaper_with_pending_age(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            // Suspension delivery is independent of lease cleanup. A slow or
+            // unavailable Worker must never hold up expiry/teardown work.
+            let dispatch_state = state.clone();
+            tokio::spawn(async move {
+                dispatch_tenant_suspension_events(&dispatch_state).await;
+            });
             let n = reap_once(&state).await;
             if n > 0 {
                 eprintln!("reaper: expired+reclaimed {n} overdue lease(s)");
             }
             // Stale-Pending sweep: reclaim cap slots leaked by a Pending whose
             // instance died between reserve and the Held transition / rollback.
-            let p = sweep_stale_pending(&state, pending_max_age).await;
+            let p = crate::pending_cleanup::sweep_stale_pending(&state, pending_max_age).await;
             if p > 0 {
                 eprintln!("reaper: reclaimed {p} stale Pending lease(s) (leaked cap slot)");
             }
@@ -801,170 +1018,19 @@ pub fn spawn_crash_sweep(
 }
 
 // ── Stale-Pending sweep (WP-PENDING-SWEEP) ───────────────────────────────────
-//
-// `try_admit` reserves a `Pending` lease BEFORE provisioning, and that Pending
-// counts against the tenant concurrency cap (the §1 active set is Pending+Held).
-// The normal path moves Pending→Held (acquire success) or `remove`s it (provision
-// failure rollback). But if the instance dies BETWEEN the reserve and either of
-// those — e.g. it crashes mid-provision — the Pending row sits forever counting
-// against the cap. The deadline reaper only sweeps `Held` (a Pending has no
-// `deadline_ms` and is never in `held()`), so nothing reclaims it.
-//
-// This sweep reclaims a GENUINELY-stale Pending: one whose `created_at_ms` is
-// older than a bound well past any legitimate provision window. It tears down
-// any box the dead instance may have half-provisioned (best-effort, mirroring
-// the Held reaper's teardown-first posture) and then `remove`s the Pending row —
-// the §1-honest rollback (a Pending has no legal terminal transition), freeing
-// the leaked cap slot. NO slot-meter event is emitted: the `Acquired` event
-// fires only at Pending→Held (see the acquire handler), so a never-Held Pending
-// never recorded one — there is nothing to balance.
+// The confirmed claim/teardown/finish implementation lives in
+// [`crate::pending_cleanup`]. This module retains only the historical public
+// entry point and configuration re-exports.
 
 /// Default staleness bound for the [`sweep_stale_pending`] reclaim: a `Pending`
 /// older than this is considered leaked (well past any legitimate provision
 /// window — provisioning a box is an O(seconds) operation, so 5 minutes is a
 /// very conservative floor that can never catch a mid-provision Pending).
-pub const DEFAULT_PENDING_MAX_AGE: Duration = Duration::from_secs(300);
+pub use crate::pending_cleanup::{DEFAULT_PENDING_MAX_AGE, pending_max_age_from_env};
 
-/// Resolve the stale-Pending staleness bound from an environment-variable
-/// accessor.
-///
-/// Reads `FABRIC_PENDING_MAX_AGE_SECS`.
-/// - Absent or empty → [`DEFAULT_PENDING_MAX_AGE`] (300 s).
-/// - Present → parse as `u32`; value `0` or an unparseable string → `Err`
-///   (a zero bound would reap a just-reserved Pending mid-provision — a
-///   deployer mistake, fail-closed rather than silently disable).
-///
-/// `get` is `|k| std::env::var(k).ok()` in production; a map lookup in tests.
-pub fn pending_max_age_from_env(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Duration> {
-    match get("FABRIC_PENDING_MAX_AGE_SECS").filter(|s| !s.is_empty()) {
-        None => Ok(DEFAULT_PENDING_MAX_AGE),
-        Some(val) => {
-            let parsed = val.trim().parse::<u32>().map_err(|_| {
-                anyhow::anyhow!(
-                    "FABRIC_PENDING_MAX_AGE_SECS must be a valid u32 (got {:?})",
-                    val.trim()
-                )
-            })?;
-            if parsed == 0 {
-                anyhow::bail!(
-                    "FABRIC_PENDING_MAX_AGE_SECS must be >= 1 \
-                     (0 would reap a Pending mid-provision)"
-                );
-            }
-            Ok(Duration::from_secs(parsed as u64))
-        }
-    }
-}
-
-/// Run one stale-Pending sweep: reclaim every `Pending` lease older than
-/// `max_age` by tearing down any half-provisioned box (best-effort) and
-/// removing the Pending row, freeing the leaked concurrency slot.
-///
-/// Returns the number of stale Pending leases reclaimed this tick.
-///
-/// # Fail-safe
-///
-/// ONLY a Pending strictly older than `max_age` (per its durable
-/// `created_at_ms`) is touched — a fresh Pending that is legitimately
-/// mid-provision is NEVER reclaimed. The bound is set well past any legitimate
-/// provision window ([`DEFAULT_PENDING_MAX_AGE`]).
-///
-/// # Posture (GUARDED-delete-first, won-the-race CAS like [`reap_once`])
-///
-/// The reclaim is a CAS on the lease still being `Pending`: between the
-/// snapshot above and this point, the sweep `await`s — and a concurrent acquire
-/// can complete provisioning and transition the SAME lease `Pending → Held`.
-/// So the row is removed via the GUARDED [`LeaseLedger::remove_if_pending`]
-/// (delete iff `state = Pending`, atomic under the ledger lock) — NOT the
-/// state-blind `remove`, which would delete the now-live `Held` lease out from
-/// under its running box (over-admit + a leaked box with no ledger record).
-///
-/// Because the box of a lease that won the race to `Held` MUST survive, the
-/// guarded delete is the GATE: teardown runs only AFTER we win the delete (the
-/// row was genuinely still Pending and is now gone, so any box it
-/// half-provisioned is orphaned and ours to reclaim). A lost CAS
-/// (`Ok(false)` — raced to Held, already rolled back, or already gone) tears
-/// down NOTHING and counts NOTHING. Teardown is still best-effort: a stale
-/// Pending has no deadline to retry on, so a teardown failure is logged (the
-/// box may leak) but the cap slot is already reclaimed by the delete.
-///
-/// # Lock-ordering note
-///
-/// No `MutexGuard` is held across any `await`: the stale-Pending snapshot is
-/// taken in a scoped block (guard dropped before any await), the guarded
-/// `remove_if_pending` re-acquires the ledger lock briefly (dropped before the
-/// teardown await), and teardown holds no lock. The compile-time
-/// [`_ASSERT_SWEEP_STALE_PENDING_IS_SEND`] assertion enforces this.
+/// Run one confirmed stale-Pending cleanup sweep.
 pub async fn sweep_stale_pending(state: &crate::AppState, max_age: Duration) -> usize {
-    let now = state.clock.now_ms();
-    let max_age_ms = max_age.as_millis() as u64;
-
-    // ── 1. Snapshot stale Pending leases — guard dropped before any await.
-    let stale = {
-        let ledger = &*state.ledger;
-        match ledger.pending_older_than(now, max_age_ms) {
-            Ok(records) => records,
-            Err(e) => {
-                eprintln!(
-                    "pending-sweep: ledger pending_older_than() read failed this tick \
-                     (skipping, will retry next tick): {e:#}"
-                );
-                Vec::new()
-            }
-        }
-        // `ledger` (MutexGuard) dropped here — before any await below.
-    };
-
-    let mut reclaimed = 0usize;
-
-    for rec in stale {
-        // ── 2. GUARDED reclaim FIRST — win the CAS atomically under the ledger
-        // lock: remove the row IFF it is STILL `Pending`. In the await window
-        // since the snapshot, a concurrent acquire may have transitioned this
-        // very lease `Pending → Held` (the provision completed). The guarded
-        // delete makes that case a no-op (`Ok(false)`), so we never delete a
-        // live `Held` lease — the W2-B regression. The §1-honest rollback
-        // (Pending has no legal terminal transition) frees the leaked cap slot.
-        let removed = {
-            let ledger = &*state.ledger;
-            ledger.remove_if_pending(&rec.lease_id).unwrap_or(false)
-            // guard dropped here at end of block
-        };
-
-        if !removed {
-            // Lost the CAS: the lease raced to `Held` (a LIVE lease — leave its
-            // box ALONE), was already rolled back, or is already gone. Tear down
-            // nothing, count nothing.
-            continue;
-        }
-
-        // ── 3. TEARDOWN (best-effort) — no lock held. We won the delete, so the
-        // lease was genuinely still Pending: any box the dead instance
-        // half-provisioned is now orphaned and ours to reclaim. A failure is
-        // logged but does NOT un-reclaim the cap slot (a Pending has no deadline
-        // to retry on); the box may leak but the slot is already freed.
-        let torn = state.teardown_lease(&rec.lease_id).await;
-        if !torn {
-            eprintln!(
-                "pending-sweep: teardown of reclaimed stale Pending {} failed — box may be \
-                 LEAKED (the cap slot is already freed; a Pending has no deadline to retry on)",
-                rec.lease_id
-            );
-        }
-
-        // A7b (audit r4): a stale Pending may carry a minted CAS PAT (the mint
-        // happens WHILE the lease is Pending, before provision). Revoke it BEFORE
-        // forget_lease (which drops the pat_ids entry), mirroring reap_once /
-        // surface_crashes — else the PAT lives to D-9 self-expiry with no lease.
-        state.revoke_pat_for(&rec.lease_id).await;
-        // GC any image side-table entry the half-acquire recorded (the slot
-        // meter never got an Acquired event for a never-Held Pending, so there
-        // is nothing to free there).
-        state.forget_lease(&rec.lease_id);
-        reclaimed += 1;
-    }
-
-    reclaimed
+    crate::pending_cleanup::sweep_stale_pending(state, max_age).await
 }
 
 // ── Compile-time Send guard ────────────────────────────────────────────────
@@ -1074,6 +1140,10 @@ mod tests {
                 .push(lease_id.to_string());
             Ok(())
         }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            let _ = self.teardown(lease_id);
+            crate::CleanupTeardown::ConfirmedDestroyed
+        }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
             Ok(ProbeStatus::Unbound)
         }
@@ -1121,6 +1191,15 @@ mod tests {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("teardown intentionally failed"))
+            }
+        }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            if self.should_succeed.load(Ordering::SeqCst) {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::ConfirmedDestroyed
+            } else {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::Retryable
             }
         }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
@@ -1178,6 +1257,15 @@ mod tests {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("teardown intentionally failed"))
+            }
+        }
+        fn teardown_pending(&self, lease_id: &str) -> crate::CleanupTeardown {
+            if self.teardown_succeed.load(Ordering::SeqCst) {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::ConfirmedDestroyed
+            } else {
+                let _ = self.teardown(lease_id);
+                crate::CleanupTeardown::Retryable
             }
         }
         fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
@@ -1380,24 +1468,17 @@ mod tests {
     // ── W2-B regression: the sweep must NOT delete a Pending that raced to
     // Held in the sweep window ──────────────────────────────────────────────
 
-    /// Ledger decorator that models a CONCURRENT ACQUIRE winning the race: on the
-    /// FIRST `pending_older_than` call (the sweep's snapshot) it returns the real
-    /// stale set AND THEN transitions the named lease `Pending → Held` — exactly
-    /// the window in which a provision completes after the sweep snapshotted the
-    /// lease as Pending. Every other method delegates to the inner
-    /// [`InMemoryLedger`]; the inner is held in a `RefCell` so the `&self`
-    /// `pending_older_than` can perform the in-window flip (modeling a concurrent
-    /// writer). The sweep's later `remove_if_pending` then sees the lease as
-    /// `Held` and MUST no-op (the W2-B fix); a state-blind `remove` would instead
-    /// delete the live `Held` lease.
+    /// Ledger decorator that models a concurrent acquire winning immediately
+    /// BEFORE the new atomic cleanup-claim seam. The claim must observe `Held`
+    /// and return no work; it may neither claim nor tear down the live box.
     struct RaceToHeldLedger {
         // W-LEDGER-A2: the trait is `&self` + the ledger Arc is `Send + Sync`, so the
         // interior mutability lives in `InMemoryLedger` (its own `Arc<Mutex<..>>`),
         // not a `!Sync` `RefCell`.
         inner: InMemoryLedger,
-        /// The lease to flip to `Held` right after the first snapshot.
+        /// The lease to flip to `Held` immediately before the first cleanup claim.
         race_lease: String,
-        /// Flips false after the first `pending_older_than` so the race fires once.
+        /// Flips false after the first cleanup-claim attempt so the race fires once.
         armed: std::sync::atomic::AtomicBool,
     }
 
@@ -1428,16 +1509,29 @@ mod tests {
             self.inner.held()
         }
         fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> Result<Vec<LeaseRecord>> {
-            // The snapshot the sweep will iterate (the lease is still Pending here).
-            let snapshot = self.inner.pending_older_than(now_ms, max_age_ms)?;
-            // …then the concurrent acquire wins: flip the raced lease to Held,
-            // ONCE, modeling the provision completing in the sweep window.
+            self.inner.pending_older_than(now_ms, max_age_ms)
+        }
+        fn claim_stale_pending_cleanup(
+            &self,
+            now_ms: u64,
+            max_age_ms: u64,
+        ) -> Result<Vec<LeaseRecord>> {
+            // The old snapshot/delete race is now one atomic ledger claim. Make
+            // Held win immediately before that claim, so the claim cannot turn a
+            // live lease into cleanup work.
             if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 self.inner
                     .transition(&self.race_lease, RunnerState::Held, now_ms)
                     .expect("race-flip Pending→Held must be a legal transition");
             }
-            Ok(snapshot)
+            self.inner.claim_stale_pending_cleanup(now_ms, max_age_ms)
+        }
+        fn claim_pending_cleanup(
+            &self,
+            lease_id: &str,
+            now_ms: u64,
+        ) -> Result<Option<LeaseRecord>> {
+            self.inner.claim_pending_cleanup(lease_id, now_ms)
         }
         fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> Result<bool> {
             self.inner.try_admit(rec, max_concurrency)
@@ -1457,6 +1551,9 @@ mod tests {
             // (delete iff still Pending). By now the lease is Held → no-op.
             self.inner.remove_if_pending(lease_id)
         }
+        fn finish_pending_cleanup(&self, lease_id: &str) -> Result<bool> {
+            self.inner.finish_pending_cleanup(lease_id)
+        }
     }
 
     /// A genuinely-stale `Pending` that races to `Held` in the sweep window is
@@ -1466,7 +1563,7 @@ mod tests {
     #[tokio::test]
     async fn sweep_does_not_reclaim_pending_that_raced_to_held() {
         // Build state on a race-injecting ledger that flips the lease to Held
-        // right after the sweep snapshots it as Pending.
+        // immediately before the atomic cleanup claim.
         let ledger: Arc<dyn LeaseLedger + Send + Sync> =
             Arc::new(RaceToHeldLedger::new("pending-raced"));
         let clock = FixedClock::new(1_000_000);
@@ -1479,14 +1576,14 @@ mod tests {
         state.provisioner = Arc::clone(&prov) as Arc<dyn BoxProvisioner>;
 
         // A genuinely-stale Pending (created at 100_000 ≪ cutoff 700_000) that
-        // appears in the sweep's snapshot — then races to Held in the window.
+        // races to Held before the cleanup claim can fence it.
         insert_pending(&state, "pending-raced", 100_000);
 
         let reclaimed = sweep_stale_pending(&state, Duration::from_secs(300)).await;
 
         assert_eq!(
             reclaimed, 0,
-            "a lease that raced Pending→Held must NOT be reclaimed (guarded delete no-ops)"
+            "a lease that won Pending→Held before cleanup claim must not be reclaimed"
         );
         // The live lease must still exist AND still be Held — never deleted.
         let rec = state
@@ -1498,7 +1595,7 @@ mod tests {
             rec.state.is_held(),
             "the raced lease must remain Held (a live lease), not deleted"
         );
-        // And its box must NOT be torn down (delete-first gate: lost CAS → no teardown).
+        // And its box must NOT be torn down (Held won before claim → no teardown).
         assert!(
             prov.teardown_calls().is_empty(),
             "the live Held lease's box must NOT be torn down by the stale-Pending sweep"
@@ -3075,5 +3172,140 @@ mod tests {
             2,
             "D3-B: two teardown calls recorded (close path + reaper)"
         );
+    }
+
+    #[test]
+    fn suspension_envelope_uses_immutable_old_event_generation_after_resume() {
+        let old_event = TenantSuspensionEvent {
+            event_id: "suspend-old".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        // A later resume has generation 2, but the old event remains generation 1.
+        let body = suspension_envelope_body(&old_event, Ok(1)).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(payload["event_id"], "suspend-old");
+        assert_eq!(payload["lifecycle_generation"], "1");
+    }
+
+    #[test]
+    fn suspension_envelope_refuses_missing_event_generation() {
+        let event = TenantSuspensionEvent {
+            event_id: "missing".to_string(),
+            tenant_id: "tenant-2".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        assert!(suspension_envelope_body(&event, Err(anyhow::anyhow!("unknown event"))).is_err());
+    }
+
+    #[test]
+    fn suspension_envelope_refuses_generation_overflow() {
+        let event = TenantSuspensionEvent {
+            event_id: "overflow".to_string(),
+            tenant_id: "tenant-3".to_string(),
+            created_at_ms: 10,
+            attempts: 0,
+        };
+        assert!(suspension_envelope_body(&event, Ok(i64::MAX as u64 + 1)).is_err());
+    }
+
+    #[test]
+    fn suspension_receipt_requires_exact_triple_and_complete() {
+        let body = serde_json::json!({
+            "event_id": "event-1",
+            "tenant_id": "tenant-1",
+            "lifecycle_generation": "7",
+            "complete": true,
+        })
+        .to_string();
+        assert!(suspension_receipt_is_ack(
+            200,
+            body.as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+        assert!(!suspension_receipt_is_ack(
+            202,
+            body.as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+
+        for (field, value) in [
+            ("event_id", serde_json::json!("other-event")),
+            ("tenant_id", serde_json::json!("other-tenant")),
+            ("lifecycle_generation", serde_json::json!(7)),
+            ("complete", serde_json::json!(false)),
+        ] {
+            let mut receipt = serde_json::json!({
+                "event_id": "event-1",
+                "tenant_id": "tenant-1",
+                "lifecycle_generation": "7",
+                "complete": true,
+            });
+            receipt[field] = value;
+            assert!(!suspension_receipt_is_ack(
+                200,
+                receipt.to_string().as_bytes(),
+                "event-1",
+                "tenant-1",
+                "7"
+            ));
+        }
+    }
+
+    #[test]
+    fn suspension_receipt_rejects_unknown_keys_and_oversize_body() {
+        let receipt = serde_json::json!({
+            "event_id": "event-1",
+            "tenant_id": "tenant-1",
+            "lifecycle_generation": "7",
+            "complete": true,
+            "extra": "refuse",
+        });
+        assert!(!suspension_receipt_is_ack(
+            200,
+            receipt.to_string().as_bytes(),
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+        assert!(!suspension_receipt_is_ack(
+            200,
+            &vec![b'x'; MAX_SUSPENSION_RECEIPT_BYTES + 1],
+            "event-1",
+            "tenant-1",
+            "7"
+        ));
+    }
+
+    #[test]
+    fn suspension_dispatch_accepts_only_bare_https_origin() {
+        assert_eq!(
+            secure_worker_origin("https://worker.example"),
+            Some("https://worker.example")
+        );
+        assert_eq!(
+            secure_worker_origin("https://worker.example/"),
+            Some("https://worker.example")
+        );
+        for invalid in [
+            "http://worker.example",
+            "https://user:secret@worker.example",
+            "https://worker.example/path",
+            "https://worker.example?token=secret",
+            "https://worker.example#fragment",
+            "https://:443",
+            "https://worker.example:bad",
+        ] {
+            assert!(
+                secure_worker_origin(invalid).is_none(),
+                "accepted {invalid}"
+            );
+        }
     }
 }

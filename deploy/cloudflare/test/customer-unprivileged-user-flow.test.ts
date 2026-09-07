@@ -1,6 +1,6 @@
 // deploy/cloudflare/test/customer-unprivileged-user-flow.test.ts
 // Rigorous End-to-End Test from the perspective of an Unprivileged Customer User
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Mock Cloudflare Containers ─────────────────────────────────────────
 vi.mock("@cloudflare/containers", () => {
@@ -21,6 +21,7 @@ vi.mock("@cloudflare/containers", () => {
         this.env = env;
       }
       async start() { this.alive = true; }
+      async schedule() {}
       async stop() { this.alive = false; }
       async destroy() { this.alive = false; }
       async containerFetch(req: Request | string, port?: number): Promise<Response> {
@@ -37,7 +38,7 @@ vi.mock("@cloudflare/containers", () => {
 });
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
-import { type StartPayload } from "../src/types/devenv";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
 
 // ── Ingress Header Sanitizer (Edge Security Gateway) ───────────────────
 function edgeIngressFilter(rawHeaders: Record<string, string>): Headers {
@@ -59,7 +60,8 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
   // ── Database State Simulation ────────────────────────────────────────
   let mockTenantsTable: Map<string, { id: string; name: string; tier: string; status: string }>;
   let mockPatTable: Map<string, { token_id: string; tenant_id: string; user_id: string; role: string; revoked: boolean }>;
-  let mockD1Billing: Array<{ tenant_id: string; vcpu_seconds: number; timestamp: number }>;
+  let billingEvents: Array<Record<string, unknown>>;
+  let revokeRequests: string[];
   let mockDoStorage: Map<string, any>;
   let mockCtx: any;
   let mockEnv: any;
@@ -94,13 +96,15 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
         },
       ],
     ]);
-    mockD1Billing = [];
+    billingEvents = [];
+    revokeRequests = [];
     mockDoStorage = new Map();
 
     mockCtx = {
       storage: {
-        get: vi.fn(async (k: string) => mockDoStorage.get(k)),
-        put: vi.fn(async (k: string, v: any) => mockDoStorage.set(k, v)),
+        get: vi.fn(async (k: string) => { const v = mockDoStorage.get(k); return v === undefined ? undefined : structuredClone(v); }),
+        put: vi.fn(async (k: string, v: any) => mockDoStorage.set(k, structuredClone(v))),
+        delete: vi.fn(async (k: string) => mockDoStorage.delete(k)),
       },
       blockConcurrencyWhile: vi.fn(async (fn: () => Promise<any>) => fn()),
       id: { toString: () => `session-${TEST_TENANT.id}` },
@@ -108,18 +112,46 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
     };
 
     mockEnv = {
-      CONFIG_DB: {
-        prepare: vi.fn(() => ({
-          bind: vi.fn((tenantId: string, _month: number, vcpuSec: number, ts: number) => ({
-            run: vi.fn(async () => {
-              mockD1Billing.push({ tenant_id: tenantId, vcpu_seconds: vcpuSec, timestamp: ts });
-              return { success: true };
-            }),
-          })),
+      CRED_STASH: {
+        idFromName: vi.fn((name: string) => name),
+        get: vi.fn(() => ({
+          stash: vi.fn(async () => "a".repeat(64)),
+          wipe: vi.fn(async () => undefined),
         })),
       },
+      CORELINK_RUNNER_MINT_AUTH_KEY: "dispatcher-key",
+      SPAWN_WORKER_PUBLIC_URL: "https://spawn-worker.example/",
+      BILLING_INGEST_URL: "https://billing.example/internal/v1/billing/usage",
+      BILLING_INGEST_AUTH_KEY: "billing-ingest-key",
+      BILLING_REGION: "gru",
     };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-05T12:00:00.000Z"));
+    vi.stubGlobal("fetch", vi.fn(async (input: any, init: any = {}) => {
+      const url = String(input);
+      if (url === "https://billing.example/internal/v1/billing/usage") {
+        billingEvents.push(...JSON.parse(String(init.body)));
+      } else {
+        revokeRequests.push(url);
+      }
+      return new Response("{}", { status: 200 });
+    }));
   });
+
+  afterEach(() => vi.useRealTimers());
+
+  function authorizedStart(config: { workspaceName: string; profileName: string; tier: "standard-2" | "standard-4" }) {
+    return {
+      config,
+      grant: {
+        tenantId: "00000000-0000-4000-8000-000000000042",
+        sessionUuid: crypto.randomUUID(),
+        casPat: TEST_PAT_SECRET,
+        patId: crypto.randomUUID(),
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    } as const;
+  }
 
   // Simulated Edge Authentication Middleware
   function authenticateCustomerRequest(headers: Headers) {
@@ -158,6 +190,11 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
     expect(res2.status).toBe(401);
   });
 
+  it("rejects the legacy raw-PAT start RPC", async () => {
+    const sandbox = new RunnerDevEnvDO(mockCtx, mockEnv);
+    await expect(sandbox.startDevenv({})).rejects.toThrow("DEVENV_AUTHORIZED_RPC_REQUIRED");
+  });
+
   it("2. Strips spoofed admin privilege headers and enforces tenant identity from PAT", () => {
     const spoofedHeaders = edgeIngressFilter({
       Authorization: `Bearer ${TEST_PAT_SECRET}`,
@@ -190,19 +227,15 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
     const sandbox = new RunnerDevEnvDO(mockCtx, mockEnv);
     await new Promise((r) => setTimeout(r, 10));
 
-    const payload: StartPayload = {
-      config: {
-        workspaceName: "jane-microservice",
-        profileName: "jane-browser-profile",
-        tier: "standard-2",
-        clwEndpoint: "https://corelink-api.humangr.com",
-        clwTenant: auth.tenant!.id,
-        clwToken: TEST_PAT_SECRET,
-      },
-    };
-
-    const startResp = await sandbox.startDevenv(payload);
+    const startResp = await sandbox.startAuthorizedDevenv(authorizedStart({
+      workspaceName: "jane-microservice",
+      profileName: "jane-browser-profile",
+      tier: "standard-2",
+    }));
     expect(startResp.status).toBe("starting");
+    expect((sandbox as any).envVars.EXEC_SERVER_AUTH_TOKEN_FILE).toBe(
+      EXEC_SERVER_AUTH_TOKEN_FILE,
+    );
 
     await sandbox.onStart();
     const liveStatus = await sandbox.getStatus();
@@ -218,14 +251,18 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
     const stopResp = await sandbox.requestStop();
     expect(stopResp.ok).toBe(true);
 
+    vi.setSystemTime(new Date("2026-09-05T12:00:31.000Z"));
     await sandbox.onStop();
     const finalStatus = await sandbox.getStatus();
     expect(finalStatus.status).toBe("stopped");
 
-    // Step E: Verify D1 billing was recorded for Jane's tenant
-    expect(mockD1Billing.length).toBe(1);
-    expect(mockD1Billing[0].tenant_id).toBe("tenant-cust-alpha-42");
-    expect(mockD1Billing[0].vcpu_seconds).toBe(60); // 30s floor * 2 vCPU = 60 vCPU-seconds
+    // Step E: Verify canonical billing ingest recorded Jane's tenant usage
+    expect(billingEvents).toHaveLength(1);
+    expect(billingEvents[0].tenant_id).toBe("00000000-0000-4000-8000-000000000042");
+    expect(billingEvents[0].event_kind).toBe("runner_vcpu_seconds");
+    expect(billingEvents[0].qty).toBe(62); // 31s elapsed * 2 vCPU
+    expect(billingEvents[0].idem_key).toMatch(/^[0-9a-f]{64}$/);
+    expect(revokeRequests).toHaveLength(1);
   });
 
   it("4. Rejects launch when Jane's tenant is suspended by finance/compliance", async () => {

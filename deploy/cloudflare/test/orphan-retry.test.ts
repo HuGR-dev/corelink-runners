@@ -31,6 +31,7 @@ import {
   MAX_ORPHAN_ATTEMPTS,
   type OrphanRecord,
 } from "../src/lib";
+import { makeDO, providerReceipt } from "./containment-redrive-test-helpers";
 
 // ── An in-memory KV mock mirroring the KVNamespace subset the reconciler uses
 // (get/put/delete/list). Prefix-aware list, like the real binding.
@@ -54,7 +55,8 @@ function fakeKv(seed: Record<string, string> = {}) {
 // Build an Env carrying only the RUNNER_JOB_PATS the reconciler reads (METRICS
 // absent ⇒ bumpMetrics is a no-op).
 function envWith(kv: ReturnType<typeof fakeKv> | undefined): Env {
-  return { RUNNER_JOB_PATS: kv } as unknown as Env;
+  const authorities = makeDO({ RUNNER_JOB_PATS: kv });
+  return { RUNNER_JOB_PATS: kv, CONTAINMENT: authorities.binding, CONCURRENCY_SLOTS: authorities.slotsBinding } as unknown as Env;
 }
 const CTX = {} as unknown as ExecutionContext;
 
@@ -103,7 +105,7 @@ describe("orphanRetryStep (pure dead-letter decision)", () => {
 
 describe("recordOrphan (dead-letter record on spawn failure)", () => {
   const OPTS = {
-    jobId: "job-1",
+    jobId: "1",
     repo: "octo/external-repo",
     installationId: "44556677",
     labels: ["corelink"],
@@ -112,7 +114,7 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
   it("records {repo, installationId, labels, attempts:1} under the orphan: prefix", async () => {
     const kv = fakeKv();
     await recordOrphan(envWith(kv), OPTS);
-    const raw = kv.store.get("orphan:job-1");
+    const raw = kv.store.get("orphan:1");
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw!)).toEqual({
       repo: "octo/external-repo",
@@ -129,7 +131,7 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
     expect(stamped).toBeGreaterThan(Date.now() - 60_000);
     expect(stamped).toBeLessThanOrEqual(Date.now());
     // The FIRST-failure record uses the self-healing 30-min TTL.
-    expect(kv.put).toHaveBeenCalledWith("orphan:job-1", expect.any(String), {
+    expect(kv.put).toHaveBeenCalledWith("orphan:1", expect.any(String), {
       expirationTtl: ORPHAN_TTL_S,
     });
   });
@@ -137,15 +139,15 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
   it("does NOT record a COLD spawn (no installation_id ⇒ not warm-recoverable)", async () => {
     const kv = fakeKv();
     await recordOrphan(envWith(kv), { ...OPTS, installationId: "" });
-    expect(kv.store.has("orphan:job-1")).toBe(false);
+    expect(kv.store.has("orphan:1")).toBe(false);
     expect(kv.put).not.toHaveBeenCalled();
   });
 
   it("IDEMPOTENT: an existing dead-letter is NOT overwritten (attempts not bumped)", async () => {
     // Simulate the reconciler having already bumped attempts to 2.
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 2 })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 2 })) });
     await recordOrphan(envWith(kv), OPTS);
-    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(2); // untouched
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2); // untouched
     expect(kv.put).not.toHaveBeenCalled(); // no clobber
   });
 
@@ -164,44 +166,44 @@ describe("recordOrphan (dead-letter record on spawn failure)", () => {
 
 describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
   it("bump → claim → drive → record stays PROVISIONAL on success, WARM", async () => {
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1 })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1 })) });
     // The real `driveSpawn` writes a provisional placement record on success (see
     // recordPlacement) — the mock does the same so the tick is faithful.
-    const drive = vi.fn(async (e: Env, o: { jobId: string }) => {
-      await recordPlacement(e, { ...REC(), jobId: o.jobId } as never);
+    const drive = vi.fn(async (e: Env, o: { jobId: string; repo: string; installationId: string; labels: string[]; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+      await recordPlacement(e, { ...o } as never);
+      return providerReceipt(o);
     });
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
 
     // Drove WARM with the recorded installation_id + labels + repo.
     expect(drive).toHaveBeenCalledTimes(1);
-    expect(drive).toHaveBeenCalledWith(
-      expect.anything(),
-      { jobId: "job-1", repo: "octo/external-repo", installationId: "44556677", labels: ["corelink"] },
-    );
+    expect(drive.mock.calls[0]?.[1]).toMatchObject({
+      jobId: "1", repo: "octo/external-repo", installationId: "44556677", labels: ["corelink"],
+    });
     // Claimed the spawn (dedup vs the live path).
-    expect(Number(kv.store.get("spawn:job-1"))).toBeGreaterThan(0);
+    expect(Number(kv.store.get("spawn:1"))).toBeGreaterThan(0);
     // The reconciler no longer DELETES on a successful drive. A returned drive means
     // "a container started", not "the job is placed" — deleting here would discard
     // the provisional record and re-open the exact hole this class of bug lives in.
-    const raw = kv.store.get("orphan:job-1");
+    const raw = kv.store.get("orphan:1");
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw!).placedMs).toEqual(expect.any(Number));
   });
 
   it("bumps the attempt count BEFORE driving (so a killed tick still advances)", async () => {
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1 })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1 })) });
     // Capture the persisted record at the moment of the put, before the delete.
     let bumpedAtPut: OrphanRecord | undefined;
     kv.put.mockImplementation(async (k: string, v: string) => {
-      if (k === "orphan:job-1") bumpedAtPut = JSON.parse(v) as OrphanRecord;
+      if (k === "orphan:1") bumpedAtPut = JSON.parse(v) as OrphanRecord;
       kv.store.set(k, v);
     });
-    await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async () => {}));
+    await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o)));
     expect(bumpedAtPut?.attempts).toBe(2); // 1 → 2 before the drive
   });
 
-  it("LEAVE-on-fail: a drive throw releases the claim + leaves the (bumped) record", async () => {
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1 })) });
+  it("a provider failure after effect start leaves the claim + bumped record for safe reconciliation", async () => {
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1 })) });
     const drive = vi.fn(async () => {
       throw new Error("spawn still failing");
     });
@@ -209,36 +211,37 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
 
     expect(drive).toHaveBeenCalledTimes(1);
     // The record survives for the next tick, with attempts bumped to 2.
-    const raw = kv.store.get("orphan:job-1");
+    const raw = kv.store.get("orphan:1");
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw!).attempts).toBe(2);
-    // The claim was RELEASED so a later tick / the live path can re-drive.
-    expect(kv.store.has("spawn:job-1")).toBe(false);
+    // DRIVING has crossed the provider uncertainty boundary. The claim remains
+    // durable so a later reconciler cannot issue a duplicate external effect.
+    expect(kv.store.has("spawn:1")).toBe(true);
   });
 
   it("GIVEUP at max: deletes the dead-letter and does NOT drive", async () => {
     const kv = fakeKv({
-      "orphan:job-1": JSON.stringify(REC({ attempts: MAX_ORPHAN_ATTEMPTS })),
+      "orphan:1": JSON.stringify(REC({ attempts: MAX_ORPHAN_ATTEMPTS })),
     });
-    const drive = vi.fn(async () => {});
+    const drive = vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o));
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
 
     expect(drive).not.toHaveBeenCalled();
-    expect(kv.store.has("orphan:job-1")).toBe(false); // given up ⇒ deleted
-    expect(kv.store.has("spawn:job-1")).toBe(false); // never claimed
+    expect(kv.store.has("orphan:1")).toBe(false); // given up ⇒ deleted
+    expect(kv.store.has("spawn:1")).toBe(false); // never claimed
   });
 
   it("already-claimed (live path won it): bumps but SKIPS the drive, LEAVES the record", async () => {
     const kv = fakeKv({
-      "orphan:job-1": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:job-1": "1", // a live path / another tick already holds the claim
+      "orphan:1": JSON.stringify(REC({ attempts: 1 })),
+      "spawn:1": "1", // a live path / another tick already holds the claim
     });
-    const drive = vi.fn(async () => {});
+    const drive = vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o));
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
 
     expect(drive).not.toHaveBeenCalled(); // claimSpawn returned false ⇒ skip
     // Attempt was bumped (1 → 2) but the record is LEFT for a later tick.
-    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(2);
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2);
   });
 
   it("missing record (key listed but value gone by get) ⇒ skip, no drive, no throw", async () => {
@@ -252,7 +255,7 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     };
     const drive = vi.fn(async () => {});
     await expect(
-      retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive),
+      retryOrphanedSpawns({ ...envWith(kv), RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive),
     ).resolves.toBeUndefined();
     expect(drive).not.toHaveBeenCalled();
     expect(kv.delete).not.toHaveBeenCalled(); // missing ≠ giveup: nothing to delete
@@ -268,31 +271,31 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
 
   it("only scans the orphan: prefix (never touches spawn:/done:/bare-jobId keys)", async () => {
     const kv = fakeKv({
-      "orphan:job-1": JSON.stringify(REC({ attempts: 1 })),
+      "orphan:1": JSON.stringify(REC({ attempts: 1 })),
       "spawn:other": "1",
       "done:other": "1",
-      "job-1": "pat-id",
+      "1": "pat-id",
     });
-    await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async () => {}));
+    await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o)));
     expect(kv.list).toHaveBeenCalledWith({ prefix: "orphan:" });
     // The unrelated namespaces are untouched.
     expect(Number(kv.store.get("spawn:other"))).toBeGreaterThan(0);
     expect(kv.store.get("done:other")).toBe("1");
-    expect(kv.store.get("job-1")).toBe("pat-id");
+    expect(kv.store.get("1")).toBe("pat-id");
   });
 
   it("processes MULTIPLE dead-letters in one tick", async () => {
     const kv = fakeKv({
-      "orphan:job-1": JSON.stringify(REC({ attempts: 1 })),
-      "orphan:job-2": JSON.stringify(REC({ attempts: 1, repo: "octo/repo-2" })),
+      "orphan:1": JSON.stringify(REC({ attempts: 1 })),
+      "orphan:2": JSON.stringify(REC({ attempts: 1, repo: "octo/repo-2" })),
     });
-    const drive = vi.fn(async () => {});
+    const drive = vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o));
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
     expect(drive).toHaveBeenCalledTimes(2);
     // Both were driven and both records survive the tick (the drive, not the
     // reconciler, now owns clearing/marking them — see the DELETE-on-success test).
-    expect(kv.store.has("orphan:job-1")).toBe(true);
-    expect(kv.store.has("orphan:job-2")).toBe(true);
+    expect(kv.store.has("orphan:1")).toBe(true);
+    expect(kv.store.has("orphan:2")).toBe(true);
   });
 });
 
@@ -361,75 +364,72 @@ describe("orphanRefusalStep (PURE — the absolute-window bound on a refusal wai
   });
 });
 
-describe("retryOrphanedSpawns — a REFUSED retry is backpressure, not a failed attempt", () => {
+describe("retryOrphanedSpawns — canonical provider outcomes stay under durable authority", () => {
   const refuse = () => {
     throw new SpawnRefusedError("over_fleet_cap");
   };
 
   it("a refusal LEAVES the dead-letter in place for the next tick", async () => {
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: Date.now() })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: Date.now() })) });
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(refuse));
-    expect(kv.store.has("orphan:job-1")).toBe(true);
+    expect(kv.store.has("orphan:1")).toBe(true);
   });
-  // NOTE — deliberately NOT called a regression pin. This seam injects `drive`,
-  // so it cannot distinguish the pre-fix ceiling RETURN from a throw; written
-  // against the buggy code it passes (verified). The honest pin for that defect
-  // drives the real webhook path: see `cell12-deadletter` in
-  // test/journey-sj5-concurrency-slot.test.ts. What the two tests BELOW pin is
-  // the second defect — refusals spending the attempt budget — and those do go
-  // red against the pre-fix code.
+  // A provider refusal is injected at the provider seam, after the canonical
+  // effect has entered DRIVING. The route therefore cannot safely classify it as
+  // retryable backpressure: it must preserve durable ownership and avoid a second
+  // external invocation until the outcome is reconciled.
 
-  it("does NOT spend the attempt budget — 5 refused ticks leave attempts at 1", async () => {
+  it("persists provider refusal as terminal uncertainty under the durable epoch", async () => {
     const now = Date.now();
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    const env = envWith(kv);
     for (let i = 0; i < 5; i++) {
-      await retryOrphanedSpawns(envWith(kv), CTX, now + i * 60_000, vi.fn(refuse));
+      await retryOrphanedSpawns(env, CTX, now + i * 60_000, vi.fn(refuse));
       // The live path releases the claim on refusal; clear it so the next tick can
       // re-claim, exactly as the 60 s gap between real cron ticks does.
-      kv.store.delete("spawn:job-1");
+      kv.store.delete("spawn:1");
     }
-    // MAX_ORPHAN_ATTEMPTS is 3 — under the old accounting this job would have been
-    // given up on tick 3 and never placed, purely because the fleet was busy.
-    expect(kv.store.has("orphan:job-1")).toBe(true);
-    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(1);
-    expect(MAX_ORPHAN_ATTEMPTS).toBeLessThan(5); // the bound this test outlives
+    // A refusal thrown after DRIVING is indistinguishable from an unknown provider
+    // outcome. The canonical ledger keeps the claim and durable epoch at 2 until
+    // an operator/provider reconciliation resolves it.
+    expect(kv.store.has("orphan:1")).toBe(true);
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2);
+    expect(kv.store.has("spawn:1")).toBe(false);
   });
 
-  it("recovers on a later tick once capacity frees up", async () => {
+  it("does not invoke a second provider effect after an uncertain refusal", async () => {
     const now = Date.now();
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
-    await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(refuse));
-    kv.store.delete("spawn:job-1");
-    expect(kv.store.has("orphan:job-1")).toBe(true);
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    const env = envWith(kv);
+    await retryOrphanedSpawns(env, CTX, now, vi.fn(refuse));
+    expect(kv.store.has("orphan:1")).toBe(true);
 
-    const drive = vi.fn(async (e: Env, o: { jobId: string }) => {
-      await recordPlacement(e, { ...REC(), jobId: o.jobId } as never);
+    const drive = vi.fn(async (e: Env, o: { jobId: string; repo: string; installationId: string; labels: string[]; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+      await recordPlacement(e, { ...o } as never);
+      return providerReceipt(o);
     });
-    await retryOrphanedSpawns(envWith(kv), CTX, now + 60_000, drive);
-    expect(drive).toHaveBeenCalledTimes(1);
-    // Placed ⇒ the record becomes PROVISIONAL (placedMs set), not deleted: the box
-    // has started but has not yet been confirmed to have claimed the job.
-    const raw = kv.store.get("orphan:job-1");
-    expect(raw).toBeTruthy();
-    expect(JSON.parse(raw!).placedMs).toEqual(expect.any(Number));
+    await retryOrphanedSpawns(env, CTX, now + 60_000, drive);
+    expect(drive).not.toHaveBeenCalled();
+    expect(kv.store.has("orphan:1")).toBe(true);
   });
 
-  it("gives up LOUDLY once the absolute window closes (a capacity fault, not routine)", async () => {
+  it("keeps an old orphan visible when the provider outcome is uncertain", async () => {
     const now = Date.now();
     const kv = fakeKv({
-      "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now - ORPHAN_TTL_S * 1000 })),
+      "orphan:1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now - ORPHAN_TTL_S * 1000 })),
     });
     await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(refuse));
-    expect(kv.store.has("orphan:job-1")).toBe(false);
+    expect(kv.store.has("orphan:1")).toBe(true);
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2);
   });
 
   it("a GENUINE failure still bumps the attempt count (the 3-strike bound is intact)", async () => {
     const now = Date.now();
-    const kv = fakeKv({ "orphan:job-1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
+    const kv = fakeKv({ "orphan:1": JSON.stringify(REC({ attempts: 1, firstRecordedMs: now })) });
     await retryOrphanedSpawns(envWith(kv), CTX, now, vi.fn(async () => {
       throw new Error("JIT mint 500");
     }));
     // Refusals are free; real errors are not. Both bounds must coexist.
-    expect(JSON.parse(kv.store.get("orphan:job-1")!).attempts).toBe(2);
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2);
   });
 });

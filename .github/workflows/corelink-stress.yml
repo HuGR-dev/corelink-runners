@@ -20,17 +20,22 @@ permissions:
   contents: read
 
 jobs:
-  # Generate a [1..count] matrix on a GH-hosted runner (no corelink slot used).
+  # Generate a [1..count] matrix on the CoreLink fleet.
   setup:
-    runs-on: ubuntu-latest
+    runs-on: corelink
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
       - id: gen
+        env:
+          COUNT: ${{ inputs.count }}
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
         run: |
           set -euo pipefail
-          n="${{ github.event.inputs.count }}"
-          echo "matrix=$(seq 1 "$n" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+          bash scripts/ci/stress-inputs.sh validate
+          bash scripts/ci/stress-inputs.sh matrix >> "$GITHUB_OUTPUT"
 
   # The concurrent corelink jobs — each spawns an ephemeral runner + holds its slot.
   stress:
@@ -43,8 +48,38 @@ jobs:
     runs-on: corelink
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+      - name: validate stress inputs
+        env:
+          COUNT: ${{ inputs.count }}
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+        run: bash scripts/ci/stress-inputs.sh validate
       - name: hold the slot
+        env:
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+        shell: bash
         run: |
+          set -euo pipefail
           echo "stress job ${{ matrix.n }} on $(hostname) at $(date -u +%FT%TZ)"
-          sleep "${{ github.event.inputs.hold_seconds }}"
+          sleep "$HOLD_SECONDS"
           echo "stress job ${{ matrix.n }} done"
+
+  # A skipped, cancelled, or failed prerequisite must make this workflow fail.
+  # Cancelled or zero-job runs remain non-passing evidence; sprint acceptance
+  # checks the actual run conclusion, not the presence of this result job.
+  result-assertion:
+    if: always()
+    needs: [setup, stress]
+    runs-on: corelink
+    timeout-minutes: 5
+    steps:
+      - name: require setup and stress success
+        env:
+          SETUP_RESULT: ${{ needs.setup.result }}
+          STRESS_RESULT: ${{ needs.stress.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$SETUP_RESULT" != success || "$STRESS_RESULT" != success ]]; then
+            printf 'corelink-stress failed: setup=%s stress=%s\n' "$SETUP_RESULT" "$STRESS_RESULT" >&2
+            exit 1
+          fi

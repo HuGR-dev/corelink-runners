@@ -15,11 +15,11 @@
 //   • add a key to the vector that TS doesn't model ⇒ the key-set assertion breaks.
 //
 // NEW FILE. Does NOT touch any existing test.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { buildUsageEvent, RUNNER_BOX_VCPU, type UsageEvent } from "../src/lib";
+import { buildUsageEvent, pushUsageEvent, type UsageEvent } from "../src/lib";
 
 // The committed cross-repo vector (repo root: conformance/UsageEvent.json).
 const VECTOR_PATH = fileURLToPath(
@@ -94,39 +94,25 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
     //   • `source`   — differs by front door (fabricd vs spawn-worker).
     //   • `idem_key` — digest differs by side (Rust BLAKE3 vs TS SHA-256); the
     //                  contract pins that it is SOME stable 64-hex.
-    //   • `event_kind` and `qty` — added to this list 2026-08-02. The vector is
-    //                  FABRICD's golden and fabricd emits the CAPACITY kind
-    //                  (`runner_slot_seconds`, slot-seconds). The spawn-worker
-    //                  now emits the BILLABLE kind (`runner_vcpu_seconds`,
-    //                  slot-seconds × vCPU). They are different quantities in
-    //                  different units by design — see RUNNER_VCPU_SECONDS_KIND.
+    //   • `event_kind` and `qty` — the Worker uses the frozen canonical
+    //                  per-job slot-seconds event, byte-compatible with the vector.
     //
-    // Moving those two off equality is NOT a weakening: the assertions below
-    // replace a coincidental "== 3" with the billing ARITHMETIC itself, which is
-    // the thing that actually must not drift. An equality against one frozen
-    // example would have passed just as happily with the multiplier missing.
+    // These assertions bind the canonical per-job quantity directly.
     expect(ev.tenant_id).toBe(vector.tenant_id);
     expect(ev.billing_period).toBe(vector.billing_period);
     expect(ev.region).toBe(vector.region);
     expect(ev.time_ms).toBe(vector.time_ms);
     expect(ev.idem_key).toMatch(/^[0-9a-f]{64}$/);
 
-    // The billable kind + the exact billing math: 3 allocated seconds on a
-    // 4-vCPU box is 12 vCPU-seconds. If the multiplier is ever dropped this
-    // reads 3 (the vector's value) and fails LOUDLY — which is precisely the
-    // 4×-under-bill this whole change exists to prevent.
-    expect(ev.event_kind).toBe("runner_vcpu_seconds");
+    // The canonical kind + exact billing math: 3 allocated seconds per job.
+    expect(ev.event_kind).toBe("runner_slot_seconds");
     const allocatedSeconds = (1_781_524_800_000 - 1_781_524_797_000) / 1000;
-    expect(ev.qty).toBe(allocatedSeconds * RUNNER_BOX_VCPU);
-    expect(ev.qty).toBe(12);
-    // And it is a strict MULTIPLE of the vector's slot-second quantity, so the
-    // two kinds stay reconcilable against each other.
-    expect(ev.qty).toBe(vector.qty * RUNNER_BOX_VCPU);
+    expect(ev.qty).toBe(allocatedSeconds);
+    expect(ev.qty).toBe(3);
+    expect(ev.qty).toBe(vector.qty);
   });
 
-  it("an explicit vcpu overrides the fleet default — a mixed-size fleet bills each box correctly", async () => {
-    // The guard against the failure mode the constant's comment warns about: a
-    // bigger SKU must bill MORE, not silently bill as if it were standard-4.
+  it("an explicit vcpu hint cannot change the canonical slot-second quantity", async () => {
     const big = await buildUsageEvent({
       tenantId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       jobId: "lease-0002-big",
@@ -135,12 +121,9 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
       region: "iad",
       vcpu: 16,
     });
-    expect(big.qty).toBe(3 * 16);
-    expect(big.qty).toBeGreaterThan(3 * RUNNER_BOX_VCPU);
+    expect(big.qty).toBe(3);
 
-    // A nonsense vCPU count must NOT zero the bill — a zeroed bill is
-    // indistinguishable from a job that never ran, so it falls back to the
-    // fleet default rather than silently billing nothing.
+    // Legacy callers may still pass a vCPU hint; it cannot alter the wire unit.
     for (const bad of [0, -4, Number.NaN, undefined]) {
       const ev = await buildUsageEvent({
         tenantId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -150,7 +133,33 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
         region: "iad",
         vcpu: bad as number | undefined,
       });
-      expect(ev.qty).toBe(3 * RUNNER_BOX_VCPU);
+      expect(ev.qty).toBe(3);
+    }
+  });
+
+  it("pushUsageEvent emits the committed spawn-worker billing wire byte-for-byte", async () => {
+    const fixture = readFileSync(
+      fileURLToPath(new URL("../../../conformance/spawn-worker-billing-wire.json", import.meta.url)),
+      "utf8",
+    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const event = await buildUsageEvent({
+        tenantId: "3560e213-1e23-4fd0-8871-7033c6052ebd",
+        jobId: "82597479935",
+        startedMs: Date.parse("2026-06-23T11:00:00Z"),
+        completedMs: Date.parse("2026-06-23T11:00:03Z"),
+        region: "iad",
+      });
+      await pushUsageEvent({
+        BILLING_INGEST_URL: "https://billing.example/internal/v1/usage",
+        BILLING_INGEST_AUTH_KEY: "billing-test-key",
+      }, event);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.body).toBe(fixture);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

@@ -22,6 +22,10 @@
 //! All tests are hermetic: no network, no process-environment mutation.
 //! Tick is driven directly via `run_admission_tick` (no `spawn_admission_loop`).
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -32,8 +36,8 @@ use axum::http::{Request, StatusCode, header};
 use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseRecord, LeaseState, TenantId, TenantPlan};
 use corelink_fabric_api::{AcquireRequest, paths};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, ProbeStatus, ProviderCapacityError, StaticPlans, StaticTokenStore,
-    SystemClock, app, run_admission_tick,
+    AppState, BoxProvisioner, CleanupTeardown, ProbeStatus, ProviderCapacityError, StaticPlans,
+    StaticTokenStore, SystemClock, app, run_admission_tick,
 };
 use corelink_runner::lease::ContainerSpec;
 use corelink_runners_contracts::RunnerState;
@@ -131,6 +135,11 @@ impl BoxProvisioner for CapacityFailingProvisioner {
         Ok(())
     }
 
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // This scripted quota rejection happens before a box is created.
+        CleanupTeardown::ConfirmedDestroyed
+    }
+
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
         Ok(ProbeStatus::Unbound)
     }
@@ -157,6 +166,7 @@ impl TransientCapacityProvisioner {
 }
 
 impl BoxProvisioner for TransientCapacityProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         let n = self.attempts.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_count {
@@ -173,6 +183,11 @@ impl BoxProvisioner for TransientCapacityProvisioner {
 
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // The scripted failed attempts are explicit known-no-box outcomes.
+        CleanupTeardown::ConfirmedDestroyed
     }
 
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
@@ -192,6 +207,11 @@ impl BoxProvisioner for FatalProvisioner {
 
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        // This fixture fails before returning any provider handle.
+        CleanupTeardown::ConfirmedDestroyed
     }
 
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {

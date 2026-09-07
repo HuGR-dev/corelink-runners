@@ -40,8 +40,10 @@ execution backend (default-off).
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLOUDFLARE_SPAWN_WORKER_URL` | — | The spawn-Worker base URL. When this **and** the token are present, the box engine is the all-Cloudflare spawn-Worker (co-located with R2). Absent ⇒ Northflank (if its vars are set) ⇒ else `NoBox` (lease lifecycle works, exec 503). |
-| `CLOUDFLARE_SPAWN_AUTH_TOKEN` | — | Bearer token the fabric presents to the spawn-Worker (must match the Worker's `CLOUDFLARE_SPAWN_AUTH_TOKEN`). |
+| `CLOUDFLARE_SPAWN_WORKER_URL` | — | The spawn-Worker base URL. Cloudflare requires this URL and all three distinct control tokens below. Partial configuration is rejected. With Cloudflare configuration absent, Northflank is selected if configured; otherwise `NoBox` serves the lease lifecycle and exec returns 503. |
+| `CLOUDFLARE_SPAWN_AUTH_TOKEN` | — | Bearer token for `POST /v1/spawn` (must match the Worker's spawn token). |
+| `CLOUDFLARE_EXEC_AUTH_TOKEN` | — | Bearer token for `POST /v1/exec`; required with the other two tokens for a valid Cloudflare engine configuration. |
+| `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | — | Bearer token for status, teardown, egress cutoff, and suspension control; required with the other two tokens. |
 
 ### Billing usage-push (corelink-billing ingest — off the admission path)
 
@@ -53,15 +55,15 @@ execution backend (default-off).
 | `FABRIC_BILLING_PUSH_INTERVAL_SECS` | `30` | Flush-driver interval for the buffered usage-push. |
 
 > NOTE (topology): on the all-Cloudflare runner path, the per-completed-job
-> `runner_slot_seconds` event is ALSO emitted by the CF spawn-Worker itself
-> (`deploy/cloudflare`), so billing is captured even when fabricd is not the
-> direct runner path. The fabricd push above is the lease-API path's billing.
+> `runner_slot_seconds` event also originates in the CF spawn-Worker itself
+> (`deploy/cloudflare`), so billing remains captured even when fabricd is not the
+> direct runner path. The fabricd push above covers the lease-API path's billing.
 
 ## Fail-closed notes
 
 - **No `FABRIC_SIGNING_KEY` and no `FABRIC_DEV_UNSAFE=1`** → the process refuses to start.
 - **`FABRIC_DEV_UNSAFE=1` with a non-loopback bind** → the process refuses to start.  The dev key is forgeable and must never serve external traffic.
-- **No `NORTHFLANK_*` vars** → exec and provision stay on `NoBoxExec` / `NoBoxProvisioner`; every exec call returns 503.  The lease lifecycle still works; execution does not.
+- **No `NORTHFLANK_*` vars** → exec and provision stay on `NoBoxExec` / `NoBoxProvisioner`; every exec call returns 503. The lease lifecycle remains available; execution does not.
 - **Ledger backend selection** — the default `memory` ledger does not persist leases across restarts and is single-instance only.  For production restart-survival + multi-instance cap-safety, set `FABRIC_LEDGER_BACKEND=pg` and provide `DATABASE_URL`.  Selecting `pg` with an absent/empty/unreachable `DATABASE_URL` is a hard boot error — the server NEVER silently falls back to memory (that would re-introduce split-brain / restart-loss invisibly).
 
 ## Scope / status
@@ -70,7 +72,7 @@ execution backend (default-off).
   layers ONE shared `HookRegistry` onto the HTTP handlers (`app_full`) and the returned
   `state`; the acquire success path registers a per-lease `CaptureHook`, so the envelope
   poll/ingest endpoints (`/v1/leases/{id}/envelope/{events,meta,ingest}` + the close
-  terminal-observe) are live for every acquired lease — integration-contract v1.2.0 §13.
+  terminal-observe) expose the §13 surface for every acquired lease — integration-contract v1.2.0 §13.
 
 ## Generating a signing key
 
@@ -124,11 +126,12 @@ curl http://localhost:8080/v1/health
 
 ## Production deploy — option (b): fabricd as the prod control plane
 
-Owner decision 2026-06-25 (gap #1 → b): deploy `corelink-fabricd` as the prod
-control plane. This is what lights up the killer (githugr/hugit per-PR attested
-cost) AND the M1 self-serve direct front door — the CF spawn-Worker stays as the
-GitHub-Actions autoscaler; fabricd is the `RunnerLease` + §13 + attestation front
-door. Engineering is done + tested; this is a deploy + secret-provisioning task.
+Owner decision 2026-06-25 (gap #1 → b): the planned deployment places
+`corelink-fabricd` in the prod control-plane role. That plan would light up the
+killer (githugr/hugit per-PR attested cost) AND the M1 self-serve direct front door;
+the CF spawn-Worker remains the GitHub-Actions autoscaler, while fabricd supplies
+the `RunnerLease` + §13 + attestation front door. Engineering work was completed
+and tested; the remaining work is deployment and secret provisioning.
 
 ### Prod env profile (self-serve + CF boxes + billing + attestation)
 
@@ -138,7 +141,9 @@ CORELINK_INTROSPECT_URL=https://corelink-api.humangr.com/internal/v1/auth/intros
 FABRIC_INTROSPECT_AUTH_KEY=<dedicated introspect key>          # secret
 FABRIC_SIGNING_KEY=<base64 32-byte ed25519 seed>              # secret — prod attestation key
 CLOUDFLARE_SPAWN_WORKER_URL=<spawn-worker base url>
-CLOUDFLARE_SPAWN_AUTH_TOKEN=<matches the Worker secret>       # secret
+CLOUDFLARE_SPAWN_AUTH_TOKEN=<matches the Worker spawn secret>  # secret
+CLOUDFLARE_EXEC_AUTH_TOKEN=<dedicated Worker exec secret>     # secret
+CLOUDFLARE_LIFECYCLE_AUTH_TOKEN=<dedicated Worker lifecycle secret> # secret
 BILLING_INGEST_URL=https://corelink-api.humangr.com/internal/v1/billing/usage
 BILLING_INGEST_AUTH_KEY=<dedicated ingest key>               # secret
 BILLING_REGION=<3-char colo, e.g. iad>
@@ -147,11 +152,11 @@ FABRIC_BIND_ADDR=0.0.0.0:8080
 # FABRIC_LEDGER_BACKEND=pg + DATABASE_URL for restart-survival / multi-instance.
 ```
 
-### ⚠️ OPEN sub-decision (owner) — where does fabricd-the-container run?
+### ⚠️ OPEN sub-decision (owner) — deployment host for fabricd-the-container
 
-The Dockerfile is host-agnostic (any container platform). The runner BOXES spawn
-on Cloudflare (ADR-0008) via the spawn-Worker; that is settled. But fabricd
-itself — a long-lived HTTP control plane — needs a host. Options:
+The Dockerfile remains host-agnostic (any container platform). The runner BOXES
+are planned for Cloudflare (ADR-0008) via the spawn-Worker; that decision stands.
+But fabricd itself — a long-lived HTTP control plane — requires a host. Options:
 
 - **CF Container (long-lived) fronted by a Worker** — keeps everything on
   Cloudflare; needs an external Postgres (Hyperdrive/managed) if you want the
@@ -165,18 +170,18 @@ hardening, not a checkpoint-A blocker. **This host choice is the owner's call.**
 
 ### Checkpoints (each unblocks the killer's render path independently)
 
-- **(A) reachable + `HUGIT_RUNNER_HOST` set** — fabricd deployed with the env
+- **(A) reachable + `HUGIT_RUNNER_HOST` set** — after fabricd deployment with the env
   above; `curl $HUGIT_RUNNER_HOST/v1/health → ok`; a lease acquire with a real
   tenant PAT returns `200 Held`. Hand githugr/hugit `HUGIT_RUNNER_HOST` + the
   spawn/lease PAT.
-- **(B) §13 ingest live** — acquire a lease, confirm
-  `GET /v1/leases/{id}/envelope/meta` is 200 (not 404) and the box can ingest;
-  per-job metrics auto-stamp each land. (Code already wired — this is a live
-  confirmation, not new work.)
+- **(B) §13 ingest available** — acquire a lease, confirm
+  `GET /v1/leases/{id}/envelope/meta` returns 200 (not 404) and the box can ingest;
+  per-job metrics auto-stamp each land. (Code already wired — this confirms the
+  deployed path, with no additional implementation.)
 - **(C) attestation key published + enforcement on** — `GET /v1/attestation/key`
   returns the prod pubkey; githugr's v2 verifier flips to enforce (closes the P0
   verdict-forgery window).
-- **(D) real-land smoke** — a fleet land on the live forge renders TRUE attested
+- **(D) real-land smoke** — a fleet land on the named forge renders TRUE attested
   per-PR cost on `/r/hugit/insights` and lights the `✓ cas:…` `spend_proof`.
 
 (A)+(B) alone make per-PR cost real. Owner-gated steps: the host bring-up, the

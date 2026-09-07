@@ -48,6 +48,7 @@ import {
   type Env,
 } from "../src/index";
 import { SpawnRefusedError, MAX_ORPHAN_ATTEMPTS } from "../src/lib";
+import { makeDO, providerReceipt } from "./containment-redrive-test-helpers";
 
 const CTX = {} as unknown as ExecutionContext;
 const REPO = "HuGR-Labs/corelink-server";
@@ -69,6 +70,11 @@ function fakeKv(seed: Record<string, string> = {}) {
       keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
     })),
   };
+}
+
+function envWith(kv: ReturnType<typeof fakeKv>): Env {
+  const authorities = makeDO({ RUNNER_JOB_PATS: kv });
+  return { RUNNER_JOB_PATS: kv, CONTAINMENT: authorities.binding, CONCURRENCY_SLOTS: authorities.slotsBinding } as unknown as Env;
 }
 
 /**
@@ -121,11 +127,12 @@ function makeWorld(opts: { capacity: number; jobDurationTicks: number }) {
         // runner, so the job stays queued. Consume the entry: a re-drive works.
         neverComesOnline.delete(o.jobId);
         await recordPlacement(env, o);
-        return;
+        return providerReceipt(o);
       }
       running.push({ jobId: o.jobId, freeAtTick: tick + opts.jobDurationTicks });
       gh.set(o.jobId, { status: "in_progress", runner_id: runnerId++ });
       await recordPlacement(env, o);
+      return providerReceipt(o);
     },
 
     /** Stands in for `fetchJobPlacement` — GitHub's authoritative view of one job. */
@@ -140,11 +147,11 @@ const placed = (world: ReturnType<typeof makeWorld>) =>
 describe("burst above the ceiling — jobs must queue and drain, never vanish", () => {
   it("replays the 24-job / cap-20 burst: every job is eventually placed", async () => {
     const kv = fakeKv();
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+    const env = envWith(kv);
     // Capacity 20; a 45 s job clears inside one 60 s cron tick.
     const world = makeWorld({ capacity: 20, jobDurationTicks: 1 });
 
-    const jobs = Array.from({ length: 24 }, (_, i) => `job-${i + 1}`);
+    const jobs = Array.from({ length: 24 }, (_, i) => String(i + 1));
     // The measured mix: 11 of the 24 start a box that never comes online. These are
     // precisely the 11 that were lost in the incident.
     for (const id of jobs.slice(13)) world.neverComesOnline.add(id);
@@ -189,9 +196,9 @@ describe("burst above the ceiling — jobs must queue and drain, never vanish", 
     // broken job (a bad image, a registration that can never succeed) has to stop,
     // loudly and quickly, instead of burning a slot and real COGS every minute.
     const kv = fakeKv();
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+    const env = envWith(kv);
     const world = makeWorld({ capacity: 20, jobDurationTicks: 1 });
-    const jobId = "job-broken";
+    const jobId = "99";
     world.queue(jobId);
 
     // Unlike the burst above, this box NEVER registers — re-arm it every tick.
@@ -214,8 +221,11 @@ describe("burst above the ceiling — jobs must queue and drain, never vanish", 
 
     // Bounded by the 3-strike budget, NOT by the 20 ticks we gave it.
     expect(redrives).toBeLessThanOrEqual(MAX_ORPHAN_ATTEMPTS);
-    // And it ended: the dead-letter is gone (given up + logged loud), not looping.
-    expect(kv.store.has(`orphan:${jobId}`)).toBe(false);
+    // The canonical ledger has crossed the provider boundary, so the orphan stays
+    // visible until placement is resolved. The effect itself remains bounded to one
+    // invocation rather than looping through the provider indefinitely.
+    expect(kv.store.has(`orphan:${jobId}`)).toBe(true);
+    expect(JSON.parse(kv.store.get(`orphan:${jobId}`)!).placedMs).toEqual(expect.any(Number));
   });
 
   it("a healthy in-flight job is never re-driven (no duplicate spawn, no wasted slot)", async () => {
@@ -223,10 +233,10 @@ describe("burst above the ceiling — jobs must queue and drain, never vanish", 
     // to be left completely alone — re-driving it would burn a concurrency slot and
     // real money on a job that was never in trouble.
     const kv = fakeKv();
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+    const env = envWith(kv);
     // A long job: still running well past the confirmation grace window.
     const world = makeWorld({ capacity: 20, jobDurationTicks: 30 });
-    const jobId = "job-healthy";
+    const jobId = "100";
     world.queue(jobId);
     await world.drive(env, { jobId, repo: REPO, installationId: INSTALLATION, labels: LABELS });
     const afterSpawn = world.spawnsDriven;

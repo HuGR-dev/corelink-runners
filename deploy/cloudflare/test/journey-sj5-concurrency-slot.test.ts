@@ -53,6 +53,9 @@ import {
   COLD_REPO_CAP,
   type SlotRecord,
 } from "../src/lib";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
+
+const ns = <T>(value: T) => ({ idFromName: vi.fn(() => "global"), get: vi.fn(() => value) });
 
 const NOW = 1_800_000_000_000;
 const TTL = SLOT_TTL_S * 1000;
@@ -360,6 +363,7 @@ describe("SJ-5 · releaseSlotByJob — release by jobId + self-heal prune", () =
 // A strongly-consistent DO storage stub (mirrors cred-stash-do.test.ts).
 function makeStorage() {
   const map = new Map<string, unknown>();
+  let tail = Promise.resolve();
   return {
     map,
     async get<T>(key: string): Promise<T | undefined> {
@@ -369,6 +373,19 @@ function makeStorage() {
       // Deep-clone on put so a caller mutating its array can't retro-alter storage
       // (workerd serializes; the Map would otherwise alias the live reference).
       map.set(key, JSON.parse(JSON.stringify(value)));
+    },
+    async delete(key: string): Promise<void> { map.delete(key); },
+    async transaction<T>(fn: (tx: ReturnType<typeof makeStorage>) => Promise<T>): Promise<T> {
+      const run = tail.then(async () => {
+        const snapshot = new Map(map);
+        const tx = makeStorage();
+        tx.map.clear(); for (const [key, value] of snapshot) tx.map.set(key, value);
+        const result = await fn(tx);
+        map.clear(); for (const [key, value] of tx.map) map.set(key, value);
+        return result;
+      });
+      tail = run.then(() => undefined, () => undefined);
+      return run;
     },
   };
 }
@@ -472,15 +489,18 @@ describe("SJ-5 · ConcurrencySlotsDO — atomic acquire/release over real storag
 // ttlMs) the real acquireConcurrencySlot computes, and is configurable to admit,
 // refuse, or THROW — so we can prove selection + fail-open through the live code.
 function fakeSlots(mode: "admit" | "refuse" | "throw") {
+  let currentMode = mode;
   const acquire = vi.fn(async (..._args: unknown[]) => {
-    if (mode === "throw") throw new Error("DO infra reset (simulated)");
-    return mode === "admit"
+    if (currentMode === "throw") throw new Error("DO infra reset (simulated)");
+    return currentMode === "admit"
       ? { admitted: true }
       : { admitted: false, reason: "over_key_cap" };
   });
   const release = vi.fn(async () => {});
-  const stub = { acquire, release };
-  return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), _stub: stub };
+  const recordRetry = vi.fn(async () => ({ attempts: 1, recorded: true }));
+  const readRetry = vi.fn(async () => 1);
+  const stub = { acquire, release, recordRetry, readRetry };
+  return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), _stub: stub, setMode: (next: typeof mode) => { currentMode = next; } };
 }
 
 function fakeKv(seed: Record<string, string> = {}) {
@@ -569,10 +589,11 @@ async function queuedWebhook(
 // flips the entitlement the mint returns (to prove the clamp).
 let fetchCalls: string[] = [];
 let mintConcurrency = 5;
+let issuedOperationId = "";
 function installFetchRouter() {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : (input as Request).url ?? String(input);
       fetchCalls.push(url);
       if (url.includes("generate-jitconfig")) {
@@ -580,23 +601,33 @@ function installFetchRouter() {
           status: 200,
         });
       }
+      if (url.endsWith("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: mintConcurrency }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
+        issuedOperationId = String((JSON.parse(String(init?.body ?? "{}")) as { operation_id?: string }).operation_id ?? "");
         return new Response(
           JSON.stringify({
+            operation_id: issuedOperationId,
             token_plaintext: "cas-pat-plaintext",
             pat_id: "pat-sj5",
             tenant: "acme",
+            lifecycle_generation: "1",
             max_concurrency: mintConcurrency,
           }),
           { status: 200 },
         );
+      }
+      if (url.endsWith("/internal/v1/runner/adopt")) {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ operation_id: issuedOperationId, pat_id: "pat-sj5" });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     }),
   );
 }
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: { _ns: "runner" } as never,
     CHECK_HOST_CONTAINER: { _ns: "check" } as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
@@ -605,6 +636,9 @@ function baseEnv(over: Partial<Env> = {}): Env {
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  return env;
 }
 
 describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.fetch)", () => {
@@ -615,10 +649,10 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     vi.mocked(getContainer).mockClear();
     installFetchRouter();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-  // ── Cell 7 (selection) — COLD spawn ⇒ key=`repo:<repo>`, cap=COLD_REPO_CAP ──
-  it("cell7-select: a COLD spawn selects key='repo:<repo>' and perKeyCap=COLD_REPO_CAP", async () => {
+  // ── Current contract: no identity means refusal before any execution. ──────
+  it("cell7-select: a COLD spawn refuses before slot, mint, JIT, or container", async () => {
     const slots = fakeSlots("admit");
     // No CORELINK_RUNNER_MINT_AUTH_KEY ⇒ cold overlay (no derived tenant).
     const env = baseEnv({
@@ -629,12 +663,9 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "7001", repo: "acme/api" });
     await drain(ctx);
-    expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
-    const [key, jobId, perKeyCap, fleetCap] = slots._stub.acquire.mock.calls[0] as unknown[];
-    expect(key).toBe("repo:acme/api");
-    expect(jobId).toBe("7001");
-    expect(perKeyCap).toBe(COLD_REPO_CAP);
-    expect(fleetCap).toBe(FLEET_MAX_CONCURRENCY);
+    expect(slots._stub.acquire).not.toHaveBeenCalled();
+    expect(fetchCalls.some((u) => u.includes("/internal/v1/runner/mint") || u.includes("generate-jitconfig"))).toBe(false);
+    expect(containers).toHaveLength(0);
   });
 
   // ── Cell 6 (selection) — WARM spawn ⇒ key=tenant, cap=min(entitlement,FLEET) ─
@@ -646,7 +677,9 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
       METRICS: fakeMetrics() as never,
       CONCURRENCY_SLOTS: slots as never,
       CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
-      ALLOW_LEGACY_PAT_ENV: "1", // non-prod: makes buildContainerEnv return tenant+maxConcurrency
+      SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+      CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
     });
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "6001", repo: "acme/api", installationId: 42 });
@@ -665,7 +698,9 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
       METRICS: fakeMetrics() as never,
       CONCURRENCY_SLOTS: slots as never,
       CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
-      ALLOW_LEGACY_PAT_ENV: "1",
+      SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+      CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
     });
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "6002", repo: "acme/api", installationId: 42 });
@@ -683,9 +718,13 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
       RUNNER_JOB_PATS: fakeKv() as never,
       METRICS: metrics as never,
       CONCURRENCY_SLOTS: slots as never,
+      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+      CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
     });
     const ctx = makeCtx();
-    await queuedWebhook(env, ctx, { jobId: "1201", repo: "acme/api" });
+    await queuedWebhook(env, ctx, { jobId: "1201", repo: "acme/api", installationId: 42 });
     await drain(ctx);
     // The acquire threw, yet the drive proceeded: JIT minted + container spawned.
     expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
@@ -704,9 +743,13 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
       RUNNER_JOB_PATS: kv as never,
       METRICS: metrics as never,
       CONCURRENCY_SLOTS: slots as never,
+      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+      CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
     });
     const ctx = makeCtx();
-    await queuedWebhook(env, ctx, { jobId: "1202", repo: "acme/api" });
+    await queuedWebhook(env, ctx, { jobId: "1202", repo: "acme/api", installationId: 42 });
     await drain(ctx);
     // The refusal is HONORED: no JIT, no container — the ceiling is REAL, not fail-open.
     expect(fetchCalls.some((u) => u.includes("generate-jitconfig"))).toBe(false);
@@ -729,36 +772,40 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
   // This drives the REAL webhook path. It has to: the injected-drive seam in
   // orphan-retry.test.ts cannot observe a return-vs-throw difference, so a test
   // written there would pass against the bug (verified — it did).
-  it("cell12-deadletter: a WARM refusal RECORDS a dead-letter so the job stays recoverable (2026-08-02)", async () => {
+  it("cell12-deadletter: a capacity refusal retains the verified webhook and recovers once", async () => {
     const slots = fakeSlots("refuse");
     const kv = fakeKv();
     const metrics = fakeMetrics();
+    const authorities = makeWorkerAuthorities(kv);
     const env = baseEnv({
-      RUNNER_JOB_PATS: kv as never,
-      METRICS: metrics as never,
-      CONCURRENCY_SLOTS: slots as never,
+      RUNNER_JOB_PATS: kv as never, METRICS: metrics as never, CONCURRENCY_SLOTS: slots as never,
+      CONTAINMENT: authorities.CONTAINMENT as never, CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+      CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
+      REPO_INSTALLATION_MAP: JSON.stringify({ "acme/api": "42" }),
     });
+    vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     const ctx = makeCtx();
-    await queuedWebhook(env, ctx, { jobId: "1204", repo: "acme/api", installationId: 4242 });
+    const accepted = await queuedWebhook(env, ctx, { jobId: "1204", repo: "acme/api", installationId: 4242 });
+    expect(accepted.status).toBe(202);
     await drain(ctx);
-
-    // Still refused — this changes recoverability, never the cap itself.
+    const { runNormalIntakeDrain } = await import("../src/index");
+    const stored = [...authorities.containmentStorage.values.entries()].find(([key]) => key.startsWith("normal-inbox:v1:event:"))?.[1] as { state: string; next_attempt_ms: number };
+    expect(stored).toMatchObject({ job_id: "1204", repo: "acme/api", installation_id: "4242", state: "pending", next_attempt_ms: 1_060_000 });
+    expect(kv.store.has("spawn:1204")).toBe(false);
+    expect(fetchCalls.some((u) => u.includes("generate-jitconfig"))).toBe(false);
     expect(containers).toHaveLength(0);
-    expect(kv.store.has("spawn:1204")).toBe(false); // claim released for the retry
 
-    // …but the job is no longer lost: the reconciler now has something to find.
-    const raw = kv.store.get("orphan:1204");
-    expect(raw).toBeTruthy();
-    const rec = JSON.parse(raw!);
-    expect(rec.repo).toBe("acme/api");
-    expect(rec.installationId).toBe("4242"); // WARM-recoverable
-    expect(rec.attempts).toBe(1);
-    expect(typeof rec.firstRecordedMs).toBe("number"); // bounds the refusal wait
-
-    // Backpressure must not read as breakage: a busy fleet is `spawn_at_ceiling`,
-    // NOT `spawn_failed` — otherwise a healthy burst buries real failures.
-    expect(metrics.counts.spawn_at_ceiling).toBe(1);
+    vi.mocked(Date.now).mockReturnValue(1_060_000);
+    slots.setMode("admit");
+    await runNormalIntakeDrain(env as never);
+    const settled = [...authorities.containmentStorage.values.entries()].find(([key]) => key.startsWith("normal-inbox:v1:event:"))?.[1] as { state: string };
+    expect(settled.state).toBe("complete");
+    await runNormalIntakeDrain(env as never);
     expect(metrics.counts.spawn_failed).toBeUndefined();
+    expect(fetchCalls.filter((u) => u.includes("generate-jitconfig"))).toHaveLength(1);
+    expect(containers).toHaveLength(1);
+    expect(metrics.counts.spawn_at_ceiling).toBe(1);
   });
 
   it("cell12-deadletter-cold: a COLD refusal records NOTHING (not warm-recoverable — known, bounded)", async () => {
@@ -780,9 +827,7 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     expect(kv.store.has("orphan:1205")).toBe(false);
   });
 
-  it("cell12-cold-cap-live: a COLD at-capacity refusal blocks the spawn end-to-end (old bug: unlimited)", async () => {
-    // The whole point of cell 7: a cold spawn now hits a REAL cap. Drive a refusal
-    // on the cold path and prove no container is born.
+  it("cell12-cold-cap-live: a COLD request refuses before the slot decision", async () => {
     const slots = fakeSlots("refuse");
     const env = baseEnv({
       RUNNER_JOB_PATS: fakeKv() as never,
@@ -792,9 +837,8 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "1203", repo: "acme/api" });
     await drain(ctx);
-    const [key, , perKeyCap] = slots._stub.acquire.mock.calls[0] as unknown[];
-    expect(key).toBe("repo:acme/api"); // cold ⇒ per-repo key
-    expect(perKeyCap).toBe(COLD_REPO_CAP); // ...capped (not unlimited)
-    expect(containers).toHaveLength(0); // refusal honored ⇒ no unbounded cold spawn
+    expect(slots._stub.acquire).not.toHaveBeenCalled();
+    expect(fetchCalls.some((u) => u.includes("/internal/v1/runner/mint") || u.includes("generate-jitconfig"))).toBe(false);
+    expect(containers).toHaveLength(0);
   });
 });

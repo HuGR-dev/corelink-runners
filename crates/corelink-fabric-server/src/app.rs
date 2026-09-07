@@ -591,6 +591,8 @@ pub struct AppState {
     /// DISABLED (404) — no un-authed suspend is ever possible. Wired from
     /// `FABRIC_ADMIN_KEY` (the same operator secret as the tenant-plan admin).
     pub(crate) admin_key: Option<Arc<str>>,
+    pub(crate) compute_grant_public_keys: HashMap<String, Vec<u8>>,
+    pub(crate) credential_issuer_key: Option<String>,
     /// Lease ids provisioned as CHECK-HOST leases (CF-native check-host, C1/C6),
     /// mapped to their `toolchain_digest` (the clw snapshot manifest digest the
     /// box hydrated at spawn). A fabric-internal marker table — mirrors
@@ -724,6 +726,11 @@ pub struct AppState {
     /// minted PAT when a mint client is configured.
     /// Wired by the production composition root via [`with_cas_pat_mint`](Self::with_cas_pat_mint).
     pub(crate) cas_pat_mint: Option<Arc<dyn crate::runner_cas_mint::CasPatMint>>,
+
+    /// Readiness gate for an armed runner mint. `None` preserves the historical
+    /// default-off cold path; `Some` must pass the dispatcher self-check before
+    /// acquire can reserve or provision anything.
+    pub(crate) mint_readiness: Option<Arc<crate::mint_readiness::MintReadiness>>,
 
     /// WP-7: AC pre-lease lookup hook (memoized-exec short-circuit).
     ///
@@ -885,7 +892,7 @@ impl AppState {
             queue_wait_timeout: std::time::Duration::from_millis(DEFAULT_QUEUE_WAIT_MS),
             rate_windows: Arc::new(Mutex::new(HashMap::new())),
             exec: Arc::new(NoBoxExec),
-            provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner),
+            provisioner: Arc::new(crate::cloud_exec::NoBoxProvisioner::default()),
             trigger_dedup: Arc::new(Mutex::new(HashMap::new())),
             signer: Arc::new(FabricSigner::new_from_bytes(&DEV_FABRIC_KEY_SEED)),
             ingest_signer: Arc::new(IngestSigner::new(DEV_INGEST_SECRET.to_vec())),
@@ -898,6 +905,8 @@ impl AppState {
             agent_steps: Arc::new(Mutex::new(std::collections::HashMap::new())),
             suspended_tenants: Arc::new(Mutex::new(std::collections::HashSet::new())),
             admin_key: None,
+            compute_grant_public_keys: HashMap::new(),
+            credential_issuer_key: None,
             // Check-host mode DEFAULT-OFF: empty marker map. Populated only when
             // an acquire carries `toolchain_digest` (C1/C6).
             toolchain_digests: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -941,6 +950,7 @@ impl AppState {
             // `with_cas_pat_mint` / `with_ac_pre_lease_hook` / `with_clw_endpoint`
             // builders.
             cas_pat_mint: None,
+            mint_readiness: None,
             ac_pre_lease_hook: Arc::new(crate::ac_pre_lease::NoOpAcHook),
             pat_ids: Arc::new(Mutex::new(HashMap::new())),
             clw_endpoint: None,
@@ -1055,6 +1065,16 @@ impl AppState {
     #[must_use]
     pub fn with_runner_vcpu(mut self, runner_vcpu: Option<u32>) -> Self {
         self.runner_vcpu = runner_vcpu.filter(|&v| v > 0);
+        self
+    }
+
+    /// Install the armed mint readiness gate.
+    #[must_use]
+    pub fn with_mint_readiness(
+        mut self,
+        readiness: Option<Arc<crate::mint_readiness::MintReadiness>>,
+    ) -> Self {
+        self.mint_readiness = readiness;
         self
     }
 
@@ -1428,6 +1448,20 @@ impl AppState {
         self
     }
 
+    /// Issuer public keys only; private compute signing keys stay on corelink-server.
+    #[must_use]
+    pub fn with_compute_grant_public_keys(mut self, keys: HashMap<String, Vec<u8>>) -> Self {
+        self.compute_grant_public_keys = keys;
+        self
+    }
+
+    /// Dedicated credential-issuer key for the tenant lifecycle snapshot.
+    #[must_use]
+    pub fn with_credential_issuer_key(mut self, key: Option<String>) -> Self {
+        self.credential_issuer_key = key;
+        self
+    }
+
     /// Track-C AUP1: kill every currently-held lease of `tenant` — teardown the
     /// box + transition the ledger to `Crashed` (the abnormal-terminal state; a
     /// suspended tenant's live work is forcibly ended, not gracefully closed).
@@ -1451,8 +1485,13 @@ impl AppState {
         for lease_id in held {
             // Teardown first (reclaim the box), then terminalize — the reaper's
             // proven order. Revoke the CAS PAT on the way out (A7b).
-            let _ = self.teardown_lease(&lease_id).await;
+            let torn = self.teardown_lease(&lease_id).await;
             self.revoke_pat_for(&lease_id).await;
+            if !torn {
+                // Suspension revokes credentials, but an unconfirmed live box
+                // must retain its lease and reservation for the reaper's retry.
+                continue;
+            }
             let transitioned = self
                 .ledger
                 .transition(
@@ -1608,41 +1647,45 @@ impl AppState {
             .cloned()
     }
 
-    /// Track-C AUP1: mark a tenant SUSPENDED (idempotent). A suspended tenant is
-    /// rejected at `acquire` (fail-closed) and its held leases are killed by the
-    /// suspend action. `true` iff the tenant was NOT already suspended (a real
-    /// state change — used to make the forensic line + the lease-kill fire once).
-    pub(crate) fn suspend_tenant(&self, tenant: &TenantId) -> bool {
-        let changed = self
+    /// Record a newly observed suspension and its durable Worker-delivery
+    /// event. The PgLedger implementation commits both rows atomically.
+    pub(crate) fn record_tenant_suspension_event(
+        &self,
+        tenant: &TenantId,
+        now_ms: u64,
+    ) -> anyhow::Result<()> {
+        self.ledger
+            .record_tenant_suspension(corelink_fabric::TenantSuspensionEvent {
+                event_id: format!("tenant-suspended:{}:{}", tenant.as_str(), now_ms),
+                tenant_id: tenant.as_str().to_string(),
+                created_at_ms: now_ms,
+                attempts: 0,
+            })
+    }
+
+    pub(crate) fn suspend_tenant_with_event(
+        &self,
+        tenant: &TenantId,
+        now_ms: u64,
+    ) -> anyhow::Result<bool> {
+        let mut suspended = self
             .suspended_tenants
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(tenant.as_str().to_string());
-        // Durable write-through (multi-instance): a suspend issued on one shard
-        // must reach EVERY shard + survive a restart. No-op on a non-pg ledger
-        // (in-memory is authoritative at N=1). A failure is logged, not fatal —
-        // this instance's cache already blocks the tenant immediately.
-        if let Err(e) = self.ledger.set_tenant_suspended(tenant.as_str(), true) {
-            eprintln!(
-                "suspend_tenant({tenant}): durable write FAILED: {e:#} \
-                 — suspension is in-memory-only on this instance until it succeeds"
-            );
-        }
-        changed
+            .unwrap_or_else(|p| p.into_inner());
+        self.record_tenant_suspension_event(tenant, now_ms)?;
+        let changed = suspended.insert(tenant.as_str().to_string());
+        Ok(changed)
     }
 
     /// Track-C AUP1: lift a tenant's suspension (idempotent). `true` iff the
     /// tenant WAS suspended (a real state change).
-    pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> bool {
-        let changed = self
+    pub(crate) fn unsuspend_tenant(&self, tenant: &TenantId) -> anyhow::Result<bool> {
+        let mut suspended = self
             .suspended_tenants
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(tenant.as_str());
-        if let Err(e) = self.ledger.set_tenant_suspended(tenant.as_str(), false) {
-            eprintln!("unsuspend_tenant({tenant}): durable delete FAILED: {e:#}");
-        }
-        changed
+            .unwrap_or_else(|p| p.into_inner());
+        self.ledger.set_tenant_suspended(tenant.as_str(), false)?;
+        Ok(suspended.remove(tenant.as_str()))
     }
 
     /// Track-C AUP1: whether `tenant` is currently suspended. Read at the TOP of
@@ -1919,11 +1962,19 @@ impl AppState {
             .await
             .map_err(|_| anyhow::anyhow!("provision gate closed"))?;
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
         let s = spec.clone();
-        tokio::task::spawn_blocking(move || prov.provision(&lid, &s))
-            .await
-            .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
+        tokio::task::spawn_blocking(move || {
+            prov.provision(&lid, &s)?;
+            // Provider creation and ledger persistence cannot be atomic. If this
+            // write fails, retain the live local handle and fail closed; a later
+            // retry/recovery must not invent a handle from the lease id.
+            let provider_ref = prov.provider_ref(&lid)?;
+            ledger.bind_provider_ref(&lid, &provider_ref).map(|_| ())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("provisioner task panicked"))?
     }
 
     /// Run teardown for `lease_id` on a blocking thread.
@@ -1937,8 +1988,14 @@ impl AppState {
     /// [`provision_lease`]: AppState::provision_lease
     pub(crate) async fn teardown_lease(&self, lease_id: &str) -> bool {
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
-        match tokio::task::spawn_blocking(move || prov.teardown(&lid)).await {
+        match tokio::task::spawn_blocking(move || {
+            crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)?;
+            prov.teardown(&lid)
+        })
+        .await
+        {
             Ok(Ok(())) => true,
             // Provider error or task panic — caller retries. OPS (observability):
             // a persistently-failing teardown is a SILENT live-box leak (billed
@@ -1959,6 +2016,39 @@ impl AppState {
         }
     }
 
+    /// Cleanup-specific provider call. It runs on the blocking executor and
+    /// carries explicit confirmation semantics; unknown local state remains
+    /// unconfirmed rather than being treated as cloud absence.
+    pub(crate) async fn teardown_pending_lease(
+        &self,
+        lease_id: &str,
+    ) -> crate::pending_cleanup::CleanupTeardown {
+        let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
+        let lid = lease_id.to_string();
+        match tokio::task::spawn_blocking(move || {
+            if crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)
+                .is_err()
+            {
+                return crate::pending_cleanup::CleanupTeardown::Unconfirmed;
+            }
+            prov.teardown_pending(&lid)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = e;
+                eprintln!("pending-cleanup: teardown task panicked for lease {lease_id}");
+                crate::pending_cleanup::CleanupTeardown::Retryable
+            }
+        }
+    }
+
+    pub(crate) fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.provisioner.forget_pending_cleanup(lease_id);
+    }
+
     /// Probe the liveness of the box bound to `lease_id` on a blocking thread
     /// and await the result (WP-CRASH-SWEEP).
     ///
@@ -1977,10 +2067,14 @@ impl AppState {
         lease_id: &str,
     ) -> anyhow::Result<crate::cloud_exec::ProbeStatus> {
         let prov = Arc::clone(&self.provisioner);
+        let ledger = Arc::clone(&self.ledger);
         let lid = lease_id.to_string();
-        tokio::task::spawn_blocking(move || prov.probe(&lid))
-            .await
-            .map_err(|_| anyhow::anyhow!("probe task panicked"))?
+        tokio::task::spawn_blocking(move || {
+            crate::provider_binding::restore_for_operation(ledger.as_ref(), prov.as_ref(), &lid)?;
+            prov.probe(&lid)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("probe task panicked"))?
     }
 
     /// Remove `lease_id` from the `images` side-table and from the hook
@@ -1994,6 +2088,10 @@ impl AppState {
     /// there is nothing to clear there — the terminal `transition` already
     /// removes the lease from the `held()` reap set.
     pub(crate) fn forget_lease(&self, lease_id: &str) {
+        // All production callers reach this only after the terminal transition
+        // (or confirmed Pending cleanup) wins. Failed ledger writes keep the
+        // exact provider handle available for an authoritative retry.
+        self.provisioner.forget_pending_cleanup(lease_id);
         self.images
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -2194,6 +2292,15 @@ pub fn app_full(
         .route(paths::ATTESTATION_KEY, get(crate::attestation::key))
         .with_state(state.clone());
 
+    // Always mounted: an unarmed process is ready immediately; an armed
+    // process starts the bounded mint self-check lazily.
+    let readiness_route = Router::new()
+        .route(
+            "/readyz",
+            get(crate::mint_readiness::MintReadiness::endpoint),
+        )
+        .with_state(state.clone());
+
     // Internal/ops route (WP-OCCUPANCY-API): the slot-occupancy snapshot.
     // Mounted OUTSIDE the Bearer-PAT layer below — it is gated by its own
     // observability secret (the `X-Corelink-Internal-Auth` header), NOT a tenant
@@ -2252,6 +2359,16 @@ pub fn app_full(
         // is bounded; 1 MiB is generous and bounds an oversized/abusive submission
         // (the per-lease collector cardinality cap is the other half of the bound).
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
+
+    let compute_budget = crate::compute_budget_api::router(
+        state.ledger.clone(),
+        state.compute_grant_public_keys.clone(),
+        state.admin_key.as_deref().map(str::to_owned),
+    );
+    let credential_lifecycle = crate::credential_lifecycle_api::router(
+        state.ledger.clone(),
+        state.credential_issuer_key.clone(),
+    );
 
     let authenticated = Router::new()
         .route(paths::USAGE, get(handlers::usage::usage))
@@ -2320,6 +2437,8 @@ pub fn app_full(
     let max_inflight = max_inflight.max(1);
     let work = Router::new()
         .merge(internal)
+        .merge(compute_budget)
+        .merge(credential_lifecycle)
         .merge(ingest)
         .merge(authenticated)
         .layer(
@@ -2368,6 +2487,7 @@ pub fn app_full(
         // ATT-KEY-ROTATION: the attestation key-set is UNAUTHENTICATED (module
         // docs); mirrors health: fixed-cost, no tenant data, no auth gate.
         .merge(key_route)
+        .merge(readiness_route)
         .merge(work)
 }
 
@@ -2481,6 +2601,19 @@ mod tests {
             path_set: vec![],
             env: vec![],
         };
+        state
+            .ledger
+            .put(corelink_fabric::LeaseRecord {
+                lease_id: "lease-p".into(),
+                tenant: TenantId::new("acme").unwrap(),
+                state: corelink_fabric::LeaseState::Pending,
+                box_ref: "box:lease-p".into(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                deadline_ms: None,
+                billing_acquired_at_ms: None,
+            })
+            .unwrap();
         state
             .provision_lease("lease-p", &spec)
             .await

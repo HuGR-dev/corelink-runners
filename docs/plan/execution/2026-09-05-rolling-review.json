@@ -1,0 +1,60 @@
+{
+  "at": "2026-09-06T02:49:11.246367+00:00",
+  "reviews": [
+    {
+      "wp": "T3-W3",
+      "commit": "77cb30f6c5627c56d582d9d3c65f2d76295e9474",
+      "status": "component_source_reviewed",
+      "root_validation": [
+        "Focused reconciler-discovery.test.ts7/7passed, exit0,3.20s.",
+        "git apply --check relay patch against fresh archive of serverc0a4466/tree79b51bfd passedexit0."
+      ],
+      "limitations": [
+        "Server route/producer5tests are separate author evidence. Actual sibling patch not applied.",
+        "Existing containment canonical owner reservation remains authority; KV-only test fixture does not certify provider cancellation.",
+        "No wholeWP/CI/deploy/livecredit."
+      ]
+    },
+    {
+      "wp": "T3-W2",
+      "commit": "6496cb3578be0b5c127d248b5341aaa4146699f5",
+      "status": "safe_mitigation_reviewed",
+      "root_validation": [
+        "Source now emits boundeddiagnostics with zero claim deletes/slot releases."
+      ],
+      "limitations": [
+        "Author3focusedlifecycle tests; no rootrerun after small diagnostic correction.",
+        "F007 fullA3.12 cleanup remains open."
+      ]
+    },
+    {
+      "wp": "T8-W1",
+      "commit": "2053a7221e3a1fdabdbb3c53113d3a6741acfe0f",
+      "status": "A3.16_component_source_approved",
+      "root_validation": [
+        "admission-budget-authority.test.ts11/11passed, exit0,4.25s.",
+        "100concurrent calls through production acquireConcurrencySlot and ContainmentDO with serialized storage:5admitted95refused; restart andexactrollingboundary checked.",
+        "Missing/read/write authority refuses; explicitnormalcapacityrefusal doesnotspend."
+      ],
+      "limitations": [
+        "Models DO transactional storage, not deployed Cloudflare runtime. Counts are admission verdicts, not real container starts.",
+        "A3.14/A3.15 remain incomplete; no wholeWP/CI/livecredit."
+      ]
+    },
+    {
+      "wp": "T8-W5",
+      "commit": "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
+      "status": "credential_components_reviewed",
+      "root_validation": [
+        "suspension-revocation.test.ts9/9passed, exit0,4.27s before type-only mock parameter annotations.",
+        "Root added3tests using production authority and real revocation helpers: healthy cron isolation, remint during revoke preserving new projection, emptylegacyrefusal.",
+        "Author added production DO recreation state test; other5tests use injected authorities."
+      ],
+      "limitations": [
+        "F008 epochs/migration/terminal cleanup remains open.",
+        "No CI/fulltype/Rustcompile/livecredit."
+      ]
+    }
+  ],
+  "policy": "FullCI/heavychecks atcomplete sprint only; authorreturn is notseal."
+}

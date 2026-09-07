@@ -19,7 +19,14 @@ Each tick: fetch all three, store the snapshot in KV, diff vs the previous
 snapshot, evaluate the **pure** rules in `src/rules.ts`, apply a per-alert
 cooldown, and send at most one summary email.
 
-`FABRIC_PROBES_ENABLED=0` is the explicit containment mode for a fabricd that
+When the optional T6-W15 page configuration is complete, a successfully
+delivered alert includes an HTTPS `PAGE_URL` and its incident/page/delivery
+correlation. The human opens that link and authenticates the exact AWS_IAM
+route with SigV4. The canary never POSTs the ACK route, carries a bearer, or
+writes `humanAcknowledgedAt`; it only records a token-free delivery marker in
+KV and suppresses duplicate link delivery.
+
+`FABRIC_PROBES_ENABLED=0` denotes the explicit containment mode for a fabricd that
 must scale to zero. It skips both fabricd requests and records health as
 `SKIPPED` (never as a synthetic 200), while spawn-worker metrics and email
 delivery continue. A five-minute fabricd probe must not be re-enabled while the
@@ -73,7 +80,12 @@ npx tsc --noEmit                                          # clean
    then set `ALERT_EMAIL_TO` and `ALERT_EMAIL_FROM` (vars in `wrangler.jsonc`).
    `ALERT_EMAIL_FROM` **must** be a Resend-verified `humangr.com` sender
    (e.g. `alerts@humangr.com`) — verify the domain in Resend first.
-4. `npm run deploy`.
+4. If the owner has provisioned a monitor page delivery, configure the exact
+   HTTPS AWS_IAM route and its correlation: `PAGE_URL`,
+   `PAGE_INCIDENT_ID`, `PAGE_ID`, `PAGE_DELIVERY_ID`, `PAGE_DESTINATION`,
+   `PAGE_PAYLOAD`. The canary has no human credential and performs no ACK
+   request; incomplete config is fail-closed.
+5. `npm run deploy`.
 
 Tunables (vars): `ALERT_COOLDOWN_MINUTES` (default 30), `STALENESS_HOURS`
 (default 0 = off), `BUSINESS_HOURS_UTC` (e.g. `13-23`).

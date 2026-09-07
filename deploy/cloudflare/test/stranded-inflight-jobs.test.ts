@@ -52,7 +52,7 @@ vi.mock("@cloudflare/containers", () => ({
   })),
 }));
 
-import { detectStrandedInFlightJobs, retryOrphanedSpawns } from "../src/index";
+import { ContainmentDO, detectStrandedInFlightJobs, retryOrphanedSpawns } from "../src/index";
 import {
   runnerGoneVerdict,
   strandedJobVerdict,
@@ -95,6 +95,72 @@ function kvWith(raw: Record<string, string>) {
   };
 }
 
+// Credential revocation is owned by ContainmentDO. The stranded sweep fixture
+// must bind that authority so its four side-effect assertions exercise the same
+// registration -> request -> revoke -> confirm contract as production.
+class ContainmentFixtureStorage {
+  private readonly map = new Map<string, unknown>();
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return this.map.get(key) as T | undefined;
+  }
+
+  async put(key: string, value: unknown): Promise<void> {
+    this.map.set(key, value);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.map.delete(key);
+  }
+
+  async list<T>(
+    opts: { prefix?: string; startAfter?: string; limit?: number } = {},
+  ): Promise<Map<string, T>> {
+    const entries = [...this.map.entries()]
+      .filter(([key]) => key.startsWith(opts.prefix ?? ""))
+      .filter(([key]) => !opts.startAfter || key > opts.startAfter)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(0, opts.limit ?? Number.POSITIVE_INFINITY);
+    return new Map(entries) as Map<string, T>;
+  }
+
+  async transaction<T>(fn: (storage: this) => Promise<T>): Promise<T> {
+    return fn(this);
+  }
+}
+
+function containmentFixture(kv: ReturnType<typeof kvWith>) {
+  const storage = new ContainmentFixtureStorage();
+  const instance = new ContainmentDO({ storage } as never, {} as never);
+  const patId = kv.store.get(JOB);
+  const tenant = kv.store.get(`jtenant:${JOB}`) ?? "fallback-tenant";
+  const registered = patId
+    ? instance.registerCredential({ jobId: JOB, tenant, patId })
+    : Promise.resolve();
+  const authority = {
+    async closeJobCredentials(jobId: string) {
+      await registered;
+      return instance.closeJobCredentials(jobId);
+    },
+    async pendingCredentials(selection: { kind: "job"; jobId: string }, cursor?: string) {
+      await registered;
+      return instance.pendingCredentials(selection, cursor);
+    },
+    async requestCredentialRevocation(identity: { jobId: string; tenant: string; patId: string }) {
+      await registered;
+      return instance.requestCredentialRevocation(identity);
+    },
+    async confirmCredentialRevoked(identity: { jobId: string; tenant: string; patId: string }) {
+      await registered;
+      return instance.confirmCredentialRevoked(identity);
+    },
+  };
+  return {
+    idFromName: vi.fn(() => "global"),
+    get: vi.fn(() => authority),
+  };
+}
+
 const released: string[] = [];
 const revokes: { url: string; body: unknown }[] = [];
 
@@ -102,6 +168,11 @@ function envWith(kv: ReturnType<typeof kvWith>) {
   return {
     RUNNER_JOB_PATS: kv,
     RUNNER_CONTAINER: {},
+    CONTAINMENT: containmentFixture(kv),
+    CRED_STASH: {
+      idFromName: (_name: string) => "runner-credential",
+      get: () => ({ wipe: async () => {} }),
+    },
     // METRICS absent ⇒ bumpMetrics is a documented no-op.
     CONCURRENCY_SLOTS: {
       idFromName: (n: string) => n,
@@ -231,11 +302,13 @@ describe("detectStrandedInFlightJobs", () => {
     // (b) the concurrency slot came back, by jobId
     expect(released).toEqual([JOB]);
     // (c) the per-job cas:rw PAT was revoked through the `completed` path, by
-    //     pat_id, against the DERIVED tenant — and its KV key is gone.
+    //     pat_id, against the DERIVED tenant. The legacy KV projection remains
+    //     present; ContainmentDO is the revocation authority and confirmation,
+    //     rather than deleting mutable KV, is the terminal proof.
     expect(revokes).toHaveLength(1);
     expect(revokes[0].url).toBe("https://mint.test/internal/v1/runner/revoke");
     expect(revokes[0].body).toEqual({ pat_id: "pat-abc", owner_tenant: "tenant-real" });
-    expect(kv.store.has(JOB)).toBe(false);
+    expect(kv.store.has(JOB)).toBe(true);
     // (d) the dead-letter, in the ONE existing OrphanRecord format, marked terminal
     const rec = JSON.parse(kv.store.get(`orphan:${JOB}`)!) as OrphanRecord;
     expect(rec.repo).toBe(REPO);
@@ -250,7 +323,11 @@ describe("detectStrandedInFlightJobs", () => {
 
   it("cell 1b — a stranded job's LOUD console.error names job, repo, runner and age", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    const kv = kvWith({ "rhandle:runner-1": BINDING });
+    const kv = kvWith({
+      "rhandle:runner-1": BINDING,
+      [JOB]: "pat-abc",
+      [`jtenant:${JOB}`]: "tenant-real",
+    });
     await detectStrandedInFlightJobs(envWith(kv), NOW, runnerGone, jobInProgressOnOurRunner);
     const line = err.mock.calls.map((c) => String(c[0])).find((l) => l.includes("job_stranded"));
     expect(line).toBeDefined();

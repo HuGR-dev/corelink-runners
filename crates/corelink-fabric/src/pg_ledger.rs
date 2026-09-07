@@ -62,6 +62,20 @@ use crate::compute_meter;
 use crate::ledger::{AdmitLedger, AdmitOutcome, ComputeGate, LeaseLedger, LeaseRecord, LeaseState};
 use crate::tenant::TenantId;
 
+mod external_compute;
+#[cfg(test)]
+#[path = "pg_ledger/external_compute_tests.rs"]
+mod external_compute_tests;
+#[cfg(test)]
+#[path = "pg_ledger/lifecycle_tests.rs"]
+mod lifecycle_tests;
+mod suspension;
+
+#[path = "pg_ledger/pending_cleanup_pg.rs"]
+mod pending_cleanup_pg;
+#[path = "pg_ledger/provider_binding.rs"]
+mod provider_binding_pg;
+
 /// Transport-security mode for the Postgres ledger connection (WP-B).
 ///
 /// Opt-in via the `FABRIC_PG_TLS` env var; **default [`PgTlsMode::Disable`]**.
@@ -182,12 +196,65 @@ CREATE INDEX IF NOT EXISTS leases_held_idx ON leases (lease_id) WHERE state = 'h
 CREATE TABLE IF NOT EXISTS compute_accrual (
   tenant text NOT NULL, period_key int NOT NULL, accrued_vcpu_ms bigint NOT NULL,
   PRIMARY KEY (tenant, period_key));
+CREATE TABLE IF NOT EXISTS external_compute_periods (
+  tenant text NOT NULL, period_key int NOT NULL,
+  external_vcpu_ms bigint NOT NULL, evidence_digest text NOT NULL,
+  PRIMARY KEY (tenant, period_key),
+  CHECK (external_vcpu_ms >= 0),
+  CHECK (length(evidence_digest) = 64));
+CREATE TABLE IF NOT EXISTS external_compute_reservations (
+  reservation_id uuid PRIMARY KEY, tenant text NOT NULL,
+  workload_kind text NOT NULL, workload_id text NOT NULL,
+  period_key int NOT NULL, ceiling_vcpu_ms bigint NOT NULL,
+  vcpu_count int NOT NULL, maximum_wall_ms bigint NOT NULL,
+  grant_expires_at_ms bigint NOT NULL, grant_digest text NOT NULL,
+  state text NOT NULL, reserved_vcpu_ms bigint NOT NULL,
+  actual_vcpu_ms bigint, terminal_evidence_digest text,
+  CHECK (ceiling_vcpu_ms > 0), CHECK (vcpu_count BETWEEN 1 AND 16),
+  CHECK (maximum_wall_ms BETWEEN 1 AND 28800000),
+  CHECK (grant_expires_at_ms > 0), CHECK (reserved_vcpu_ms > 0),
+  CHECK (state IN ('prepared','active','cancelled','settled')),
+  CHECK (actual_vcpu_ms IS NULL OR actual_vcpu_ms >= 0),
+  CHECK (workload_kind IN ('spawn_worker_runner','devenv')),
+  CHECK (grant_digest ~ '^[0-9a-fA-F]{64}$'),
+  CHECK ((state = 'settled') = (actual_vcpu_ms IS NOT NULL)),
+  CHECK ((state = 'settled') = (terminal_evidence_digest IS NOT NULL)),
+  CHECK (terminal_evidence_digest IS NULL OR terminal_evidence_digest ~ '^[0-9a-fA-F]{64}$'));
+CREATE INDEX IF NOT EXISTS external_compute_active_tenant_idx
+  ON external_compute_reservations (tenant, period_key)
+  WHERE state IN ('prepared','active');
 -- AUP1 durable suspension (multi-instance): a suspended tenant is blocked on
 -- EVERY shard, not just the one that received the suspend, and the block survives
 -- a shard restart. The fabricd keeps a fast in-memory cache; this is the
 -- cross-instance source of truth read on a cache miss at N>1.
 CREATE TABLE IF NOT EXISTS fabric_suspended_tenants (
-  tenant_id text PRIMARY KEY);
+  tenant_id text PRIMARY KEY,
+  suspension_event_id text);
+ALTER TABLE fabric_suspended_tenants
+  ADD COLUMN IF NOT EXISTS suspension_event_id text;
+CREATE SEQUENCE IF NOT EXISTS fabric_tenant_suspension_event_seq AS bigint;
+-- Durable suspension delivery outbox. The suspension row and this event are
+-- written in one transaction; delivery is retried until the Worker ACKs.
+CREATE TABLE IF NOT EXISTS tenant_suspension_events (
+  event_id text PRIMARY KEY,
+  tenant_id text NOT NULL,
+  created_at_ms bigint NOT NULL,
+  attempts int NOT NULL DEFAULT 0,
+  delivered_at_ms bigint,
+  generation bigint NOT NULL DEFAULT 0,
+  CHECK (generation >= 0));
+ALTER TABLE tenant_suspension_events ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS tenant_lifecycle_generations (
+  tenant_id text PRIMARY KEY,
+  generation bigint NOT NULL CHECK (generation >= 0));
+CREATE INDEX IF NOT EXISTS tenant_suspension_events_pending_idx
+  ON tenant_suspension_events (created_at_ms) WHERE delivered_at_ms IS NULL;
+-- Pending-cleanup ownership is ledger-internal: a cleanup claim never changes
+-- the public lifecycle state.  The FK makes final lease deletion clear the
+-- claim exactly once, including old rollback paths.
+CREATE TABLE IF NOT EXISTS pending_cleanup_claims (
+  lease_id text PRIMARY KEY REFERENCES leases(lease_id) ON DELETE CASCADE,
+  claimed_at_ms bigint NOT NULL);
 ";
 
 // -- M1 WAVE-0 frozen anchor (tenant_plans) ---------------------------------
@@ -483,7 +550,7 @@ impl PgLedger {
         self.block_on(async {
             let client = self.pool.get().await?;
             client
-                .batch_execute("TRUNCATE TABLE leases, compute_accrual")
+                .batch_execute("TRUNCATE TABLE leases, pending_cleanup_claims, compute_accrual")
                 .await?;
             Ok::<_, anyhow::Error>(())
         })
@@ -491,6 +558,49 @@ impl PgLedger {
 }
 
 impl LeaseLedger for PgLedger {
+    fn tenant_lifecycle(&self, tenant: &str) -> anyhow::Result<crate::ledger::TenantLifecycle> {
+        self.tenant_lifecycle_pg(tenant)
+    }
+
+    fn tenant_suspension_generation(&self, event_id: &str) -> anyhow::Result<u64> {
+        self.tenant_suspension_generation_pg(event_id)
+    }
+    fn initialize_external_compute_period(
+        &self,
+        baseline: crate::compute_budget::ExternalComputeBaseline,
+    ) -> anyhow::Result<()> {
+        external_compute::initialize(self, baseline)
+    }
+
+    fn reserve_external_compute(
+        &self,
+        reservation: crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
+        external_compute::reserve(self, reservation)
+    }
+
+    fn activate_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::activate(self, reservation)
+    }
+
+    fn cancel_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::cancel(self, reservation)
+    }
+
+    fn settle_external_compute(
+        &self,
+        reservation: &crate::compute_budget::ExternalComputeReservation,
+        settlement: crate::compute_budget::ExternalComputeSettlement,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        external_compute::settle(self, reservation, settlement)
+    }
+
     /// The pg backend serializes admission across ALL instances via
     /// `pg_advisory_xact_lock` + atomic count-and-insert, so the concurrency/vCPU
     /// cap is exact at `instances > 1` — the property that makes N-shard fabricd
@@ -500,26 +610,26 @@ impl LeaseLedger for PgLedger {
     }
 
     fn set_tenant_suspended(&self, tenant: &str, suspended: bool) -> anyhow::Result<()> {
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            if suspended {
-                client
-                    .execute(
-                        "INSERT INTO fabric_suspended_tenants (tenant_id) VALUES ($1) \
-                         ON CONFLICT DO NOTHING",
-                        &[&tenant],
-                    )
-                    .await?;
-            } else {
-                client
-                    .execute(
-                        "DELETE FROM fabric_suspended_tenants WHERE tenant_id = $1",
-                        &[&tenant],
-                    )
-                    .await?;
-            }
-            Ok(())
-        })
+        self.set_tenant_suspended_pg(tenant, suspended)
+    }
+
+    fn record_tenant_suspension(&self, event: crate::TenantSuspensionEvent) -> anyhow::Result<()> {
+        self.record_tenant_suspension_pg(event)
+    }
+
+    fn pending_tenant_suspension_events(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::TenantSuspensionEvent>> {
+        self.pending_tenant_suspension_events_pg(limit)
+    }
+
+    fn mark_tenant_suspension_event_delivered(&self, event_id: &str) -> anyhow::Result<()> {
+        self.mark_tenant_suspension_event_delivered_pg(event_id)
+    }
+
+    fn mark_tenant_suspension_event_attempt(&self, event_id: &str) -> anyhow::Result<()> {
+        self.mark_tenant_suspension_event_attempt_pg(event_id)
     }
 
     fn is_tenant_suspended_durable(&self, tenant: &str) -> anyhow::Result<bool> {
@@ -598,6 +708,10 @@ impl LeaseLedger for PgLedger {
         })
     }
 
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        provider_binding_pg::bind_provider_ref(self, lease_id, provider_ref)
+    }
+
     fn transition(
         &self,
         lease_id: &str,
@@ -610,11 +724,10 @@ impl LeaseLedger for PgLedger {
         // reaper relies on this Err.
         //
         // COMPUTE-CEILING (wave plan §10 P0-E / §11.5 / P1-K, P1-I):
-        // `transition` is respecified as an advisory-locked txn ONLY when the
-        // lease is accounting-ON (`box_vcpu_count IS NOT NULL`). The default-OFF
-        // path keeps the cheap AUTOCOMMIT `UPDATE` — byte-identical to today,
-        // ZERO new pool pressure (no advisory wait on the close/cancel/reap hot
-        // path → no deadpool starvation under a same-tenant burst).
+        // Accounting-on transitions retain their tenant-advisory transaction.
+        // Accounting-off transitions now use a short lease-row transaction too:
+        // the cleanup claim must fence Pending→Held after the row lock, which a
+        // default-autocommit snapshot predicate cannot do safely.
         //
         // The branch is decided by a cheap pre-read of `box_vcpu_count` (+
         // `tenant`, needed for the lock key). `box_vcpu_count` is IMMUTABLE
@@ -651,9 +764,18 @@ impl LeaseLedger for PgLedger {
                 .unwrap_or(false);
 
             if !accounting_on {
-                // DEFAULT-OFF: today's path EXACTLY — bare autocommit UPDATE, no
-                // lock, no txn. (Also covers an unknown lease → 0 rows → Err.)
-                let row = client
+                // The cleanup claim fences Pending→Held with the lease row lock.
+                // A snapshot-only `NOT EXISTS` would let a claim commit while an
+                // already-started UPDATE still sees the old snapshot.
+                let txn = client.transaction().await?;
+                if !pending_cleanup_pg::lock_unclaimed_lease(&txn, lease_id).await? {
+                    txn.rollback().await.ok();
+                    anyhow::bail!(
+                        "illegal/lost lease transition for {lease_id}: -> {to_label} \
+                         (cleanup-claimed or no row; contract §1 fail-closed)"
+                    );
+                }
+                let row = txn
                     .query_opt(
                         // ADR-0004: the SET clause must NOT touch deadline_ms — a
                         // state change never alters the durable deadline; it is
@@ -678,13 +800,18 @@ impl LeaseLedger for PgLedger {
                         ],
                     )
                     .await?;
-                return match row {
+                let record = match row {
                     Some(r) => record_from_row(&r),
-                    None => anyhow::bail!(
+                    None => {
+                        txn.rollback().await.ok();
+                        anyhow::bail!(
                         "illegal/lost lease transition for {lease_id}: -> {to_label} \
                          (no row in the required source state; contract §1 fail-closed)"
-                    ),
+                        )
+                    }
                 };
+                txn.commit().await?;
+                return record;
             }
 
             // ACCOUNTING-ON: advisory-locked txn. The lock is keyed on the SAME
@@ -702,6 +829,16 @@ impl LeaseLedger for PgLedger {
             let txn = client.transaction().await?;
             txn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&tenant])
                 .await?;
+            // Advisory lock precedes the row lock, matching the accounting-on
+            // admit/terminal ordering. The claim check happens *after* the row
+            // lock, so it cannot race an INSERT into the claim table.
+            if !pending_cleanup_pg::lock_unclaimed_lease(&txn, lease_id).await? {
+                txn.rollback().await.ok();
+                anyhow::bail!(
+                    "illegal/lost lease transition for {lease_id}: -> {to_label} \
+                     (cleanup-claimed or no row; contract §1 fail-closed)"
+                );
+            }
 
             // The winning terminal UPDATE, via a CTE so RETURNING can expose the
             // PRE-update `accrued_at_ms` (plain RETURNING reflects the NEW value).
@@ -888,42 +1025,7 @@ impl LeaseLedger for PgLedger {
         // untouched (rowcount 0) and reported as a violation, so the consumed
         // vCPU·ms is never silently dropped. Accounting-OFF leases keep today's
         // exact unconditional-delete behavior (byte-identical).
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            let row = client
-                .query_opt(
-                    "DELETE FROM leases \
-                     WHERE lease_id = $1 \
-                       AND (state = 'pending' OR box_vcpu_count IS NULL) \
-                     RETURNING (box_vcpu_count IS NOT NULL) AS was_accounting_on",
-                    &[&lease_id],
-                )
-                .await?;
-            if row.is_some() {
-                return Ok(true);
-            }
-            // Nothing deleted: either the lease is absent/already-gone (today's
-            // Ok(false)), OR it is an accounting-on, non-Pending lease we
-            // REFUSED to drop. Distinguish so the latter is a loud violation.
-            let still = client
-                .query_opt(
-                    "SELECT state::text AS state FROM leases \
-                     WHERE lease_id = $1 AND box_vcpu_count IS NOT NULL \
-                       AND state <> 'pending'",
-                    &[&lease_id],
-                )
-                .await?;
-            if let Some(r) = still {
-                let state: String = r.get("state");
-                anyhow::bail!(
-                    "remove({lease_id}): refusing to drop an accounting-on lease in \
-                     state {state:?} — `remove` is Pending-only under accounting-on \
-                     (wave plan §13 F5; use `transition` to a terminal state so the \
-                     consumed vCPU·ms accrues)"
-                );
-            }
-            Ok(false)
-        })
+        pending_cleanup_pg::remove(self, lease_id, false)
     }
 
     fn remove_if_pending(&self, lease_id: &str) -> anyhow::Result<bool> {
@@ -935,17 +1037,8 @@ impl LeaseLedger for PgLedger {
         // iff a still-`Pending` row was removed; `Ok(false)` if absent OR no
         // longer Pending. This is the DB-atomic counterpart of the default
         // check-then-remove (the InMemory/File guard holds the same lock the
-        // sweep does; the DB holds it in the single statement).
-        self.block_on(async {
-            let client = self.pool.get().await?;
-            let n = client
-                .execute(
-                    "DELETE FROM leases WHERE lease_id = $1 AND state = 'pending'",
-                    &[&lease_id],
-                )
-                .await?;
-            Ok(n == 1)
-        })
+        // sweep does; the Pg cleanup fence holds it in one short transaction).
+        pending_cleanup_pg::remove(self, lease_id, true)
     }
 
     fn by_tenant(&self, t: &TenantId) -> anyhow::Result<Vec<LeaseRecord>> {
@@ -988,7 +1081,7 @@ impl LeaseLedger for PgLedger {
         // bound has not yet sat LONGER than max_age, so it is not reclaimed
         // (consistent with InMemory / File). The filter is server-side so an
         // instance never pulls fresh, mid-provision Pendings.
-        let cutoff = now_ms.saturating_sub(max_age_ms);
+        let cutoff = pending_cleanup_pg::strict_cutoff_ms(now_ms, max_age_ms)?;
         self.block_on(async {
             let client = self.pool.get().await?;
             let rows = client
@@ -999,11 +1092,31 @@ impl LeaseLedger for PgLedger {
                      FROM leases \
                      WHERE state = 'pending' AND created_at_ms < $1 \
                      ORDER BY lease_id",
-                    &[&(cutoff as i64)],
+                    &[&cutoff],
                 )
                 .await?;
             rows.iter().map(record_from_row).collect()
         })
+    }
+
+    fn claim_stale_pending_cleanup(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        pending_cleanup_pg::claim_stale_pending_cleanup(self, now_ms, max_age_ms)
+    }
+
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        pending_cleanup_pg::claim_pending_cleanup(self, lease_id, now_ms)
+    }
+
+    fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+        pending_cleanup_pg::finish_pending_cleanup(self, lease_id)
     }
 
     fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
@@ -1225,7 +1338,11 @@ impl PgLedger {
                        LEAST( \
                          (SELECT COALESCE(SUM(reserved_vcpu_ms), 0) FROM leases \
                             WHERE tenant = $1 AND state IN ('pending','held') \
-                              AND accrual_period_key = $2), \
+                              AND accrual_period_key = $2) + \
+                         (SELECT COALESCE(SUM(reserved_vcpu_ms), 0) \
+                            FROM external_compute_reservations \
+                            WHERE tenant = $1 AND state IN ('prepared','active') \
+                              AND period_key = $2), \
                          $3::bigint)::bigint AS sigma, \
                        COALESCE((SELECT accrued_vcpu_ms FROM compute_accrual \
                                    WHERE tenant = $1 AND period_key = $2), 0) AS accrued",

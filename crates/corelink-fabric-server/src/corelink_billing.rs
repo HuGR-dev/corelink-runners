@@ -230,6 +230,8 @@ pub struct CorelinkBillingTarget<P: BillingPoster> {
     open: Mutex<HashMap<String, u64>>,
     /// Pending events awaiting the next flush.
     buffer: Mutex<Vec<UsageEventData>>,
+    /// Serializes flush snapshots so concurrent ticks cannot acknowledge the same prefix twice.
+    flush_lock: Mutex<()>,
 }
 
 impl<P: BillingPoster> CorelinkBillingTarget<P> {
@@ -261,6 +263,7 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
             region: region.into(),
             open: Mutex::new(HashMap::new()),
             buffer: Mutex::new(Vec::new()),
+            flush_lock: Mutex::new(()),
         }
     }
 
@@ -277,26 +280,29 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
     /// Inherent method; the [`BillingExportTarget::flush`] trait method (driven by
     /// the composition root over `dyn BillingExportTarget`) delegates here.
     pub fn flush_now(&self) -> anyhow::Result<()> {
-        // Snapshot under the lock, but do not hold it across the blocking POST.
-        let batch: Vec<UsageEventData> = {
-            let buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
-            if buf.is_empty() {
-                return Ok(());
+        let _flush = self.flush_lock.lock().unwrap_or_else(|p| p.into_inner());
+        const MAX_BATCH: usize = 1024;
+        loop {
+            let batch = {
+                let buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
+                if buf.is_empty() {
+                    return Ok(());
+                }
+                buf[..buf.len().min(MAX_BATCH)].to_vec()
+            };
+            let body = serde_json::to_string(&batch)?;
+            let status = self.poster.post_batch(&self.url, &self.auth, &body)?;
+            if !(200..300).contains(&status) {
+                anyhow::bail!(
+                    "corelink-billing ingest returned HTTP {status}; retaining batch for retry"
+                );
             }
-            buf.clone()
-        };
-        let body = serde_json::to_string(&batch)?;
-        let status = self.poster.post_batch(&self.url, &self.auth, &body)?;
-        if !(200..300).contains(&status) {
-            anyhow::bail!(
-                "corelink-billing ingest returned HTTP {status}; retaining batch for retry"
-            );
+            let mut buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
+            if buf.len() < batch.len() || buf[..batch.len()] != batch[..] {
+                anyhow::bail!("billing buffer changed while acknowledging batch");
+            }
+            buf.drain(0..batch.len());
         }
-        // Success: drop exactly what we sent (keep anything appended meanwhile).
-        let mut buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
-        let sent = batch.len().min(buf.len());
-        buf.drain(0..sent);
-        Ok(())
     }
 
     /// Buffer a terminal lease as one `RunnerSlotSeconds` event.
@@ -465,13 +471,28 @@ mod tests {
     /// scripted status (200 unless overridden, or a transport error).
     struct RecordingPoster {
         status: u16,
+        statuses: Mutex<Vec<u16>>,
         transport_ok: bool,
         bodies: Mutex<Vec<String>>,
+    }
+    struct BlockingPoster {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+        bodies: Mutex<Vec<String>>,
+    }
+    impl BillingPoster for BlockingPoster {
+        fn post_batch(&self, _url: &str, _auth: &str, body: &str) -> anyhow::Result<u16> {
+            self.bodies.lock().unwrap().push(body.to_string());
+            self.entered.wait();
+            self.release.wait();
+            Ok(200)
+        }
     }
     impl RecordingPoster {
         fn ok() -> Self {
             Self {
                 status: 200,
+                statuses: Mutex::new(Vec::new()),
                 transport_ok: true,
                 bodies: Mutex::new(Vec::new()),
             }
@@ -479,6 +500,7 @@ mod tests {
         fn status(s: u16) -> Self {
             Self {
                 status: s,
+                statuses: Mutex::new(Vec::new()),
                 transport_ok: true,
                 bodies: Mutex::new(Vec::new()),
             }
@@ -486,12 +508,21 @@ mod tests {
         fn transport_error() -> Self {
             Self {
                 status: 0,
+                statuses: Mutex::new(Vec::new()),
                 transport_ok: false,
                 bodies: Mutex::new(Vec::new()),
             }
         }
         fn bodies(&self) -> Vec<String> {
             self.bodies.lock().unwrap().clone()
+        }
+        fn scripted(statuses: Vec<u16>) -> Self {
+            Self {
+                status: 200,
+                statuses: Mutex::new(statuses),
+                transport_ok: true,
+                bodies: Mutex::new(Vec::new()),
+            }
         }
     }
     impl BillingPoster for RecordingPoster {
@@ -500,7 +531,12 @@ mod tests {
             if !self.transport_ok {
                 anyhow::bail!("simulated transport error");
             }
-            Ok(self.status)
+            let mut statuses = self.statuses.lock().unwrap();
+            Ok(if statuses.is_empty() {
+                self.status
+            } else {
+                statuses.remove(0)
+            })
         }
     }
 
@@ -698,6 +734,142 @@ mod tests {
         assert_eq!(t.buffered(), 0, "buffer cleared after a successful flush");
         let arr: Vec<UsageEventData> = serde_json::from_str(&t.poster.bodies()[0]).unwrap();
         assert_eq!(arr.len(), 2, "both events in one batch");
+    }
+
+    #[test]
+    fn flush_chunks_large_buffer_at_server_cap() {
+        let t = target(RecordingPoster::ok());
+        for i in 0..1_025u64 {
+            t.export(&ev("a", &format!("L{i}"), SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("a", &format!("L{i}"), SlotEventKind::Released, 1_000))
+                .unwrap();
+        }
+        t.flush().unwrap();
+        let bodies = t.poster.bodies();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies.iter().all(|body| {
+            serde_json::from_str::<Vec<UsageEventData>>(body)
+                .unwrap()
+                .len()
+                <= 1_024
+        }));
+        assert_eq!(t.buffered(), 0);
+    }
+
+    #[test]
+    fn failed_second_chunk_retries_same_bytes_without_discarding_tail() {
+        let poster = RecordingPoster::scripted(vec![200, 503, 200]);
+        let t = target(poster);
+        for i in 0..1_025u64 {
+            t.export(&ev("a", &format!("L{i}"), SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("a", &format!("L{i}"), SlotEventKind::Released, 1_000))
+                .unwrap();
+        }
+        assert!(t.flush().is_err());
+        let first = t.poster.bodies();
+        assert_eq!(first.len(), 2);
+        assert_eq!(t.buffered(), 1);
+        t.flush().unwrap();
+        let all = t.poster.bodies();
+        assert_eq!(all[1], all[2]);
+        assert_eq!(t.buffered(), 0);
+    }
+
+    #[test]
+    fn concurrent_flush_and_append_preserves_new_unsent_event() {
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let target = std::sync::Arc::new(CorelinkBillingTarget::new(
+            BlockingPoster {
+                entered: entered.clone(),
+                release: release.clone(),
+                bodies: Mutex::new(Vec::new()),
+            },
+            "https://x",
+            "k",
+            "iad",
+        ));
+        target
+            .export(&ev("a", "L1", SlotEventKind::Acquired, 0))
+            .unwrap();
+        target
+            .export(&ev("a", "L1", SlotEventKind::Released, 1_000))
+            .unwrap();
+        let flushing = target.clone();
+        let join = std::thread::spawn(move || flushing.flush().unwrap());
+        entered.wait();
+        target
+            .export(&ev("a", "L2", SlotEventKind::Acquired, 0))
+            .unwrap();
+        target
+            .export(&ev("a", "L2", SlotEventKind::Released, 2_000))
+            .unwrap();
+        release.wait();
+        // The same serialized flush observes the appended tail and posts it as
+        // its next batch before returning, so release that second POST too.
+        entered.wait();
+        release.wait();
+        join.join().unwrap();
+        assert_eq!(target.buffered(), 0);
+    }
+
+    #[test]
+    fn overflow_shift_during_flush_refuses_to_drain_unsent_prefix() {
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let target = std::sync::Arc::new(CorelinkBillingTarget::new(
+            BlockingPoster {
+                entered: entered.clone(),
+                release: release.clone(),
+                bodies: Mutex::new(Vec::new()),
+            },
+            "https://x",
+            "k",
+            "iad",
+        ));
+        for i in 0..100_000u64 {
+            target
+                .export(&ev("a", &format!("L{i}"), SlotEventKind::Acquired, 0))
+                .unwrap();
+            target
+                .export(&ev("a", &format!("L{i}"), SlotEventKind::Released, 1_000))
+                .unwrap();
+        }
+        let flushing = target.clone();
+        let join = std::thread::spawn(move || flushing.flush());
+        entered.wait();
+        target
+            .export(&ev("a", "overflow", SlotEventKind::Acquired, 0))
+            .unwrap();
+        target
+            .export(&ev("a", "overflow", SlotEventKind::Released, 1_000))
+            .unwrap();
+        release.wait();
+        let result = join.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(target.buffered(), 100_000);
+    }
+
+    #[test]
+    fn fabric_billing_wire_fixture_is_byte_identical_and_retries_identically() {
+        let t = target(RecordingPoster::scripted(vec![503, 200]));
+        t.buffer.lock().unwrap().push(UsageEventData {
+            tenant_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+            event_kind: RUNNER_SLOT_SECONDS_KIND.into(),
+            qty: 3,
+            billing_period: "2026-06".into(),
+            region: "iad".into(),
+            source: BILLING_SOURCE.into(),
+            time_ms: 1_781_524_800_000,
+            idem_key: idem_key("lease-fixed", "2026-06"),
+        });
+        let expected = include_str!("../conformance/fabric-billing-wire.json");
+        assert!(t.flush().is_err());
+        t.flush().unwrap();
+        let bodies = t.poster.bodies();
+        assert_eq!(bodies, vec![expected.to_string(), expected.to_string()]);
     }
 
     /// An empty flush is a no-op success (no POST).

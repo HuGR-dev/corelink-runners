@@ -14,12 +14,8 @@
 // The first is a fleet-wide money-attribution outage. The third is Tuesday. Being
 // indistinguishable is the defect: nothing could alert on the one that matters.
 //
-// ⚠️ THE CONTRACT PINNED HERE is that the three stay distinguishable, and that the
-// DEFAULT for an unarmed key stays a cold spawn rather than a refusal. A3.17 asks
-// for a refusal; it is available under REQUIRE_MINT_KEY=1 and is proven below, but
-// defaulting to it would trade silent misattribution for a fleet-wide CI stop on a
-// config slip — the exact shape that cost twelve days on 2026-08-31. If a future
-// change makes the default refuse, cell 1 goes red.
+// A3.17 pins all required authorization failures to a hard deny. The reason is
+// retained for operators, but it can never authorize a cold spawn.
 
 import { describe, it, expect } from "vitest";
 import { buildContainerEnv } from "../src/lib";
@@ -27,14 +23,14 @@ import { buildContainerEnv } from "../src/lib";
 const REPO = "acme/api";
 
 describe("buildContainerEnv — cold attribution", () => {
-  it("cell 1 — an unarmed mint key spawns COLD by DEFAULT (never a silent refusal)", async () => {
+  it("cell 1 — an unarmed mint key is a hard deny", async () => {
     const r = await buildContainerEnv({}, { jobId: "1", repoFullName: REPO, installationId: "555" });
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.containerEnv).toEqual({});
     expect(r.coldReason).toBe("mint_key_unarmed");
   });
 
-  it("cell 2 — REQUIRE_MINT_KEY=1 turns the misconfiguration into a HARD DENY", async () => {
+  it("cell 2 — REQUIRE_MINT_KEY cannot permit the misconfiguration", async () => {
     const r = await buildContainerEnv(
       { REQUIRE_MINT_KEY: "1" },
       { jobId: "1", repoFullName: REPO, installationId: "555" },
@@ -43,13 +39,13 @@ describe("buildContainerEnv — cold attribution", () => {
     expect(r.coldReason).toBe("mint_key_unarmed");
   });
 
-  it("cell 3 — only the exact '1' arms the refusal; anything else stays cold", async () => {
+  it("cell 3 — every REQUIRE_MINT_KEY value remains fail-closed", async () => {
     for (const v of ["0", "true", "yes", "", " 1"]) {
       const r = await buildContainerEnv(
         { REQUIRE_MINT_KEY: v },
         { jobId: "1", repoFullName: REPO, installationId: "555" },
       );
-      expect(r.authz, `REQUIRE_MINT_KEY=${JSON.stringify(v)}`).toBe("ok");
+      expect(r.authz, `REQUIRE_MINT_KEY=${JSON.stringify(v)}`).toBe("forbidden");
     }
   });
 
@@ -58,7 +54,7 @@ describe("buildContainerEnv — cold attribution", () => {
       { CORELINK_RUNNER_MINT_AUTH_KEY: "k" },
       { jobId: "1", repoFullName: REPO },
     );
-    expect(r.authz).toBe("ok");
+    expect(r.authz).toBe("forbidden");
     expect(r.coldReason).toBe("no_installation_or_pat");
     expect(r.coldReason).not.toBe("mint_key_unarmed");
   });
@@ -81,6 +77,7 @@ describe("buildContainerEnv — cold attribution", () => {
       { jobId: "1", repoFullName: REPO },
     );
     expect(bad.coldReason).not.toBe(ordinary.coldReason);
-    expect(bad.authz).toBe(ordinary.authz); // same behaviour, different diagnosis
+    expect(bad.authz).toBe("forbidden");
+    expect(ordinary.authz).toBe("forbidden");
   });
 });

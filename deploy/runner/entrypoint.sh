@@ -73,8 +73,12 @@ if [[ ! -f "$JITCONFIG_SECRET_FILE" || -L "$JITCONFIG_SECRET_FILE" ]]; then
   echo "ERROR: sealed JIT bridge is not a regular file." >&2
   exit 1
 fi
-JITCONFIG_SECRET_MODE="$(stat -f '%Lp' "$JITCONFIG_SECRET_FILE" 2>/dev/null || stat -c '%a' "$JITCONFIG_SECRET_FILE")"
-JITCONFIG_SECRET_OWNER="$(stat -f '%u' "$JITCONFIG_SECRET_FILE" 2>/dev/null || stat -c '%u' "$JITCONFIG_SECRET_FILE")"
+if JITCONFIG_SECRET_MODE="$(stat -c '%a' "$JITCONFIG_SECRET_FILE" 2>/dev/null)"; then :; else
+  JITCONFIG_SECRET_MODE="$(stat -f '%Lp' "$JITCONFIG_SECRET_FILE" 2>/dev/null)"
+fi
+if JITCONFIG_SECRET_OWNER="$(stat -c '%u' "$JITCONFIG_SECRET_FILE" 2>/dev/null)"; then :; else
+  JITCONFIG_SECRET_OWNER="$(stat -f '%u' "$JITCONFIG_SECRET_FILE" 2>/dev/null)"
+fi
 if [[ "$JITCONFIG_SECRET_MODE" != "600" || "$JITCONFIG_SECRET_OWNER" != "$(id -u)" ]]; then
   echo "ERROR: sealed JIT bridge has invalid owner or mode." >&2
   exit 1

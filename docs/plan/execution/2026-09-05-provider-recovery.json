@@ -1,0 +1,39 @@
+{
+  "scope": "T3-W10 source acceptance: AU3.25 confirmed Pending cleanup retry/cap fence, AU7.7 frozen cas_cred errors, Held teardown safety and exact durable binding recovery.",
+  "source_commit": "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
+  "review": "Root reviewed integration and corrective helper source; independent scope assessment confirms AU3.25 does not promise discovery of never-persisted provider identities. New Held cannot transition before durable bind. Invalid/domain-changed references and unknown legacy local state remain fail-closed. Final coupled review pulled forward canonical A3.2: the Worker must return non-2xx when provider teardown throws; otherwise the Rust confirmation would be false.",
+  "checks": [
+    {
+      "command": "cargo check -p corelink-fabric-server --tests --locked",
+      "exit": 0,
+      "elapsed_seconds": 206,
+      "observer": "root",
+      "kind": "Metadata only; no Rust runtime tests, linking, database or CI."
+    },
+    {
+      "command": "vitest run test/check-host.test.ts -t teardown",
+      "exit": 0,
+      "observer": "root",
+      "tests": 13,
+      "skipped": 23,
+      "kind": "Focused Worker route checks; runner/check errors return 503, retry-confirmed deletion returns 204."
+    },
+    {
+      "command": "tsc --noEmit",
+      "exit": 0,
+      "observer": "root after final Worker return-path correction"
+    }
+  ],
+  "authored_oracles": [
+    "FileLedger reopen restores actual CF spawn handle and exact check/runner probe+delete mode.",
+    "Invalid descriptor, changed domain, conflicting local handle/route do not release Held.",
+    "Explicit no-box durable evidence differs from unknown legacy identity.",
+    "Cleanup claim race rejects bind before Held; known local handle remains retryable.",
+    "Northflank project/handle remain exact."
+  ],
+  "limits": [
+    "No sprint runtime or live provider proof; no claim of universal recovery or zero orphans.",
+    "F-20260905-005 explicitly owns post-create/pre-bind crash discovery and historical unknown rows, including separate Northflank reconciliation. T3-W16 Cloudflare tokens do not prove Northflank capabilities."
+  ],
+  "observed_at": "2026-09-06T00:49:13.304626+00:00"
+}

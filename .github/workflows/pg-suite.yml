@@ -80,6 +80,11 @@ jobs:
           cargo test -p corelink-fabric --locked
           --test acceptance_cf0_fabric_core
 
+      - name: PostgreSQL-backed suspension epoch suite
+        run: >-
+          cargo test -p corelink-fabric --locked
+          --test tenant_suspension_epochs -- --test-threads=1
+
       # Every TEST_DATABASE_URL-gated unit group shares the same schema. The
       # established --test-threads=1 convention prevents one group's TRUNCATE
       # from invalidating another group's cross-instance assertions.

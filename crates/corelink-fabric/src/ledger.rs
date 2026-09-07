@@ -13,7 +13,7 @@
 //! errors, a corrupt journal refuses to open, and `put` never silently
 //! overwrites.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,9 @@ use corelink_runners_contracts::RunnerState;
 use serde::{Deserialize, Serialize};
 
 use crate::tenant::TenantId;
+
+mod pending_cleanup;
+pub(crate) mod provider_binding;
 
 /// Ledger-level lifecycle state: the contract §1 five states.
 ///
@@ -92,6 +95,24 @@ pub struct LeaseRecord {
     /// `#[serde(default)]` so older journaled records deserialize as `None`.
     #[serde(default)]
     pub billing_acquired_at_ms: Option<u64>,
+}
+
+/// Durable control-plane signal consumed by the runner Worker. Ledger-internal;
+/// it never changes the frozen lease wire contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantSuspensionEvent {
+    pub event_id: String,
+    pub tenant_id: String,
+    pub created_at_ms: u64,
+    pub attempts: u32,
+}
+
+/// One PostgreSQL-owned lifecycle; generations survive every resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantLifecycle {
+    pub tenant_id: String,
+    pub generation: u64,
+    pub suspended: bool,
 }
 
 /// Legal-transition matrix — contract §1, nothing else:
@@ -225,6 +246,37 @@ struct LeaseReservation {
 }
 
 pub trait LeaseLedger {
+    fn initialize_external_compute_period(
+        &self,
+        _baseline: crate::compute_budget::ExternalComputeBaseline,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn reserve_external_compute(
+        &self,
+        _reservation: crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeAdmission> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn activate_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn cancel_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
+    fn settle_external_compute(
+        &self,
+        _reservation: &crate::compute_budget::ExternalComputeReservation,
+        _settlement: crate::compute_budget::ExternalComputeSettlement,
+    ) -> anyhow::Result<crate::compute_budget::ExternalComputeReceipt> {
+        anyhow::bail!("shared compute authority unavailable")
+    }
     /// Whether this backend enforces the concurrency/vCPU cap SAFELY across
     /// MULTIPLE fabricd instances (shards). Only a shared, atomically-serialized
     /// store qualifies: the [`crate::pg_ledger::PgLedger`] (an advisory-locked
@@ -239,14 +291,60 @@ pub trait LeaseLedger {
     }
 
     /// Durably record a tenant's AUP1 suspension so it survives a shard restart
-    /// AND is visible to OTHER instances. Default: no-op — a single-instance /
-    /// ephemeral backend keeps suspension only in the fabricd's in-memory cache,
-    /// which is correct at N=1. The [`crate::pg_ledger::PgLedger`] overrides it
-    /// with a shared table, which is what makes suspend an effective abuse-control
-    /// at N>1 (a suspended tenant is blocked on EVERY shard, not just the one that
-    /// received the suspend). `&self`: pg writes via its pool; no `&mut` needed.
+    /// AND is visible to OTHER instances. Backends without a durable authority
+    /// must fail closed rather than acknowledge an in-memory-only suspension.
+    /// The [`crate::pg_ledger::PgLedger`] overrides this with a shared table.
     fn set_tenant_suspended(&self, _tenant: &str, _suspended: bool) -> anyhow::Result<()> {
-        Ok(())
+        Err(anyhow::anyhow!(
+            "durable tenant suspension authority unavailable"
+        ))
+    }
+
+    fn tenant_lifecycle(&self, _tenant: &str) -> anyhow::Result<TenantLifecycle> {
+        Err(anyhow::anyhow!(
+            "durable tenant lifecycle authority unavailable"
+        ))
+    }
+
+    /// Read the generation captured in this immutable event, never today's one.
+    fn tenant_suspension_generation(&self, _event_id: &str) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!("durable suspension generation unavailable"))
+    }
+
+    fn enqueue_tenant_suspension_event(&self, _event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        // Never report success without a restart-safe outbox.
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
+    }
+
+    /// Durable suspension state plus its delivery event. PostgreSQL overrides
+    /// this with one transaction so a suspension can never commit without a
+    /// revoke signal.
+    fn record_tenant_suspension(&self, event: TenantSuspensionEvent) -> anyhow::Result<()> {
+        self.set_tenant_suspended(&event.tenant_id, true)?;
+        self.enqueue_tenant_suspension_event(event)
+    }
+
+    fn pending_tenant_suspension_events(
+        &self,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<TenantSuspensionEvent>> {
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
+    }
+
+    fn mark_tenant_suspension_event_delivered(&self, _event_id: &str) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
+    }
+
+    fn mark_tenant_suspension_event_attempt(&self, _event_id: &str) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "tenant suspension event outbox unavailable"
+        ))
     }
 
     /// Whether `tenant` is DURABLY suspended (the cross-instance source of truth).
@@ -269,6 +367,16 @@ pub trait LeaseLedger {
 
     /// Look up a record by lease id (`Ok(None)` when absent).
     fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>>;
+
+    /// Bind the provider's opaque resource reference while a lease is still
+    /// Pending. Backends that cannot durably fence this update fail closed.
+    fn bind_provider_ref(
+        &self,
+        _lease_id: &str,
+        _provider_ref: &str,
+    ) -> anyhow::Result<LeaseRecord> {
+        anyhow::bail!("provider-ref binding unsupported by this ledger")
+    }
 
     /// Transition a lease to `to` at `now_ms`, enforcing the contract §1
     /// matrix (see [`transition_is_legal`]); returns the updated record.
@@ -313,6 +421,34 @@ pub trait LeaseLedger {
     /// fresh `Pending` that is legitimately mid-provision is NEVER included
     /// (the bound must be set well past any legitimate provision window).
     fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>>;
+
+    /// Atomically claim stale Pending rows for cleanup. Backends that do not
+    /// implement durable fencing must fail closed rather than silently
+    /// reclaiming a row.
+    fn claim_stale_pending_cleanup(
+        &self,
+        _now_ms: u64,
+        _max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        anyhow::bail!("pending cleanup claims are unsupported by this ledger")
+    }
+
+    /// Atomically claim exactly one named Pending row for acquisition rollback.
+    /// Age is intentionally irrelevant; absent, Held, and terminal rows return
+    /// `None` without mutating another row.
+    fn claim_pending_cleanup(
+        &self,
+        _lease_id: &str,
+        _now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        anyhow::bail!("pending cleanup claims are unsupported by this ledger")
+    }
+
+    /// Conditionally finish a previously claimed cleanup. The default is
+    /// unsupported (never a success/no-op).
+    fn finish_pending_cleanup(&self, _lease_id: &str) -> anyhow::Result<bool> {
+        anyhow::bail!("pending cleanup finish is unsupported by this ledger")
+    }
 
     /// Atomically admit a `Pending` lease IFF the tenant's active (Pending+Held)
     /// count is strictly under `max_concurrency`. Returns Ok(true) on admit (the
@@ -511,6 +647,8 @@ pub(crate) struct InMemoryInner {
     /// The terminal half of the ceiling invariant; folded once per lease at its
     /// terminal transition and read by [`LeaseLedger::compute_accrued`].
     accruals: HashMap<(TenantId, u32), u64>,
+    /// Internal cleanup fences; deliberately absent from LeaseRecord/wire.
+    pending_cleanup_claims: HashSet<String>,
 }
 
 /// A terminal accrual fold that actually happened — the durable side-effect a
@@ -751,6 +889,9 @@ impl InMemoryInner {
         to: RunnerState,
         now_ms: u64,
     ) -> anyhow::Result<LeaseRecord> {
+        if self.pending_cleanup_claims.contains(lease_id) {
+            anyhow::bail!("lease {lease_id} is fenced by a pending cleanup claim")
+        }
         let (updated, _accrual) = self.transition_capturing(lease_id, to, now_ms)?;
         Ok(updated)
     }
@@ -868,6 +1009,9 @@ impl InMemoryInner {
     }
 
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        if self.pending_cleanup_claims.contains(lease_id) {
+            anyhow::bail!("lease {lease_id} is fenced by a pending cleanup claim")
+        }
         // FIX-B B3 — accounting-on `remove` of a HELD lease is a contract
         // violation: `remove` is the admission-rollback seam for a just-reserved
         // PENDING lease only (see the trait doc). Dropping a Held accounting-on
@@ -900,6 +1044,9 @@ impl InMemoryInner {
     /// The caller holds the inner lock across this whole get+remove, so it is
     /// atomic — exactly the pre-A2 behaviour under the outer lock.
     fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        if self.pending_cleanup_claims.contains(lease_id) {
+            return Ok(false);
+        }
         match self.get(lease_id)? {
             Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
             _ => Ok(false),
@@ -974,6 +1121,10 @@ impl LeaseLedger for InMemoryLedger {
         self.lock()?.get(lease_id)
     }
 
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.bind_provider_ref(lease_id, provider_ref)
+    }
+
     fn transition(
         &self,
         lease_id: &str,
@@ -993,6 +1144,26 @@ impl LeaseLedger for InMemoryLedger {
 
     fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         self.lock()?.pending_older_than(now_ms, max_age_ms)
+    }
+
+    fn claim_stale_pending_cleanup(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.claim_stale_pending_cleanup(now_ms, max_age_ms)
+    }
+
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.claim_pending_cleanup(lease_id, now_ms)
+    }
+
+    fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+        self.lock()?.finish_pending_cleanup(lease_id)
     }
 
     fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
@@ -1109,6 +1280,8 @@ enum JournalLine {
     Record(LeaseRecord),
     /// An admission-rollback tombstone: the lease id is removed on replay.
     Tombstone { lease_id: String },
+    /// Durable cleanup fence; replayed before a retrying sweep publishes rows.
+    PendingCleanupClaim { lease_id: String },
     /// ADR-0004 Decision-2: an envelope-checkpoint write (opaque JSON blob).
     /// Replay overwrites the lease's checkpoint (last write wins); a tombstone
     /// for the same lease erases it.
@@ -1237,10 +1410,21 @@ impl FileLedger {
                     }
                     JournalLine::Tombstone { lease_id } => {
                         index.records.remove(&lease_id);
+                        index.pending_cleanup_claims.remove(&lease_id);
                         index.checkpoints.remove(&lease_id);
                         // A tombstone (admission rollback) also drops the lease's
                         // reservation — a rolled-back Pending releases it.
                         index.reservations.remove(&lease_id);
+                    }
+                    JournalLine::PendingCleanupClaim { lease_id } => {
+                        // Claims survive restart and are intentionally additive;
+                        // only the final tombstone clears the whole side state.
+                        if matches!(
+                            index.records.get(&lease_id).map(|r| &r.state),
+                            Some(LeaseState::Pending)
+                        ) {
+                            index.pending_cleanup_claims.insert(lease_id);
+                        }
                     }
                     JournalLine::Checkpoint {
                         lease_id,
@@ -1396,6 +1580,9 @@ impl FileInner {
         to: RunnerState,
         now_ms: u64,
     ) -> anyhow::Result<LeaseRecord> {
+        if self.index.pending_cleanup_claims.contains(lease_id) {
+            anyhow::bail!("lease {lease_id} is fenced by a pending cleanup claim")
+        }
         // Validate + apply against the in-memory view (folds the terminal accrual
         // there); journal only legal outcomes (the journal never holds an illegal
         // transition). The captured event tells us what compute state to persist.
@@ -1543,6 +1730,9 @@ impl FileInner {
     }
 
     fn remove(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        if self.index.pending_cleanup_claims.contains(lease_id) {
+            anyhow::bail!("lease {lease_id} is fenced by a pending cleanup claim")
+        }
         // Nothing to do (and nothing to journal) if the lease is absent.
         if !self.index.records.contains_key(lease_id) {
             return Ok(false);
@@ -1582,6 +1772,9 @@ impl FileInner {
     /// the pre-A2 trait-default under the outer lock). The `remove` journals a
     /// tombstone, so this must be `FileInner`'s own get+remove (not the index's).
     fn remove_if_pending(&mut self, lease_id: &str) -> anyhow::Result<bool> {
+        if self.index.pending_cleanup_claims.contains(lease_id) {
+            return Ok(false);
+        }
         match self.index.get(lease_id)? {
             Some(rec) if matches!(rec.state, LeaseState::Pending) => self.remove(lease_id),
             _ => Ok(false),
@@ -1596,6 +1789,10 @@ impl LeaseLedger for FileLedger {
 
     fn get(&self, lease_id: &str) -> anyhow::Result<Option<LeaseRecord>> {
         self.lock()?.get(lease_id)
+    }
+
+    fn bind_provider_ref(&self, lease_id: &str, provider_ref: &str) -> anyhow::Result<LeaseRecord> {
+        self.lock()?.bind_provider_ref(lease_id, provider_ref)
     }
 
     fn transition(
@@ -1617,6 +1814,26 @@ impl LeaseLedger for FileLedger {
 
     fn pending_older_than(&self, now_ms: u64, max_age_ms: u64) -> anyhow::Result<Vec<LeaseRecord>> {
         self.lock()?.pending_older_than(now_ms, max_age_ms)
+    }
+
+    fn claim_stale_pending_cleanup(
+        &self,
+        now_ms: u64,
+        max_age_ms: u64,
+    ) -> anyhow::Result<Vec<LeaseRecord>> {
+        self.lock()?.claim_stale_pending_cleanup(now_ms, max_age_ms)
+    }
+
+    fn claim_pending_cleanup(
+        &self,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<LeaseRecord>> {
+        self.lock()?.claim_pending_cleanup(lease_id, now_ms)
+    }
+
+    fn finish_pending_cleanup(&self, lease_id: &str) -> anyhow::Result<bool> {
+        self.lock()?.finish_pending_cleanup(lease_id)
     }
 
     fn try_admit(&self, rec: LeaseRecord, max_concurrency: u32) -> anyhow::Result<bool> {
@@ -2536,6 +2753,38 @@ mod admit_lock_split_tests {
             cold.get("shared-1").unwrap().is_some(),
             "the admit-committed Pending is visible via the cold ledger handle \
              (shared authoritative state)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_unsupported {
+    use super::{InMemoryLedger, LeaseLedger};
+
+    #[test]
+    fn in_memory_backend_refuses_lifecycle_reads_without_fabricating_state() {
+        let ledger = InMemoryLedger::new();
+        assert!(
+            ledger
+                .tenant_lifecycle("11111111-1111-4111-8111-111111111111")
+                .is_err()
+        );
+        assert!(
+            ledger
+                .tenant_suspension_generation("event-never-written")
+                .is_err()
+        );
+        // Repeated reads remain unsupported; no implicit generation or event row
+        // appears merely because a caller asked the public lifecycle seam.
+        assert!(
+            ledger
+                .tenant_lifecycle("11111111-1111-4111-8111-111111111111")
+                .is_err()
+        );
+        assert!(
+            ledger
+                .tenant_suspension_generation("event-never-written")
+                .is_err()
         );
     }
 }

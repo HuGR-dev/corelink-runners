@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
 import worker, { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, containmentEffectPointerKey, redriveOrphanedJobs, retryOrphanedSpawns, type ContainmentRedriveReservation } from "../src/index";
+import { claimSpawn as realClaimSpawn } from "../src/lib";
 import { canonicalSafeJobId, redriveEffectId } from "../src/containment_authority_helpers";
 import { authorityProxy, bootstrap, ctx, env, envWithAuthority, event, makeDO, kv, providerReceipt, reserveKey, settle, T0, webhook, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
@@ -280,7 +281,11 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
       order.push("release");
       expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
     });
-    const claim = vi.fn(async () => { order.push("claim"); return true; });
+    const claim = vi.fn(async () => {
+      const accepted = await realClaimSpawn(store, "123");
+      if (accepted) order.push("claim");
+      return accepted;
+    });
     const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => { order.push("drive"); return providerReceipt(opts); });
     const orphan = vi.fn(async () => { order.push("orphan"); });
     const contexts = [...Array(100)].map(() => ctx());
@@ -300,16 +305,16 @@ describe("T3-W17 deterministic first-party reservation seams", () => {
     await redriveOrphanedJobs(
       env(d, store, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo", REPO_INSTALLATION_MAP: undefined }),
       c as never, undefined, T0,
-      { listOrphanRunnerJobs: async () => [{ jobId: "123", labels: ["corelink"] }], releaseSpawnClaim: async () => {}, claimSpawn: async () => true, driveSpawn: drive, recordOrphan: async () => {} },
+      { listOrphanRunnerJobs: async () => [{ jobId: "123", labels: ["corelink"] }], releaseSpawnClaim: async () => {}, claimSpawn: () => realClaimSpawn(store, "123"), driveSpawn: drive, recordOrphan: async () => {} },
     );
     await settle(c);
     expect(drive).toHaveBeenCalledTimes(1);
-    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ repo: "acme/repo", installationId: "", labels: ["corelink"], credential_source: "installation-only" }));
+    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ repo: "acme/repo", installationId: "", labels: ["corelink"], credential_source: "installation-only" }), undefined);
   });
 
   it("leaves an eligible first-party reservation fail-closed after its waitUntil drive crashes", async () => {
     const d = makeDO(); const store = kv(); const c = ctx(); const drive = vi.fn(async () => { throw new Error("first-party crash"); });
-    const deps = { listOrphanRunnerJobs: async () => [{ jobId: "123", labels: ["corelink"] }], releaseSpawnClaim: async () => {}, claimSpawn: async () => true, driveSpawn: drive, recordOrphan: async () => {} };
+    const deps = { listOrphanRunnerJobs: async () => [{ jobId: "123", labels: ["corelink"] }], releaseSpawnClaim: async () => {}, claimSpawn: () => realClaimSpawn(store, "123"), driveSpawn: drive, recordOrphan: async () => {} };
     await redriveOrphanedJobs(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0", RECONCILER_REPOS: "acme/repo" }), c as never, undefined, T0, deps);
     await settle(c);
     expect(drive).toHaveBeenCalledTimes(1); expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
@@ -384,7 +389,9 @@ describe("T3-W17 retry ordering and independent switches", () => {
     const live = makeDO(); const liveStore = kv(); const liveCtx = ctx();
     const fresh = await worker.fetch(await webhook(123, "redrive-only-pause"), env(live, liveStore, { AUTOSCALER_INTAKE_PAUSED: "0", AUTOSCALER_REDRIVE_PAUSED: "1" }), liveCtx as never);
     await settle(liveCtx);
-    expect(fresh.status).toBe(202); expect(liveStore.put).toHaveBeenCalled(); expect((await live.instance.snapshot()).backlog_count).toBe(0);
+    expect(fresh.status).toBe(202); expect(liveStore.put).not.toHaveBeenCalled();
+    expect((await live.instance.snapshot()).backlog_count).toBe(0);
+    expect(live.storage.map.get("normal-inbox:v1:event:redrive-only-pause")).toMatchObject({ state: "pending", job_id: "123", repo: "acme/repo" });
 
     const both = makeDO(); const bothStore = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 }) });
     const contained = await worker.fetch(await webhook(124, "both-paused"), env(both, bothStore, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: "1" }), ctx() as never);

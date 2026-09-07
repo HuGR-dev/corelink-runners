@@ -6,8 +6,13 @@
 //! `FakeHttp` here is `Send + Sync` (uses `Arc<Mutex<…>>`) so it can be
 //! shared across threads and used with `NorthflankBoxProvisioner`.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use corelink_cloud_engine::{
@@ -15,9 +20,11 @@ use corelink_cloud_engine::{
 };
 use corelink_fabric::{InMemoryLedger, LeaseLedger, TenantId, TenantPlan};
 use corelink_fabric_server::{
-    AppState, BoxProvisioner, BoxRegistry, EngineLeasedExec, LeasedExec, NoBoxProvisioner,
-    NorthflankBoxProvisioner, StaticPlans, StaticTokenStore, SystemClock,
+    AppState, BoxProvisioner, BoxRegistry, CleanupTeardown, EngineLeasedExec, HookRegistry,
+    LeasedExec, NoBoxProvisioner, NorthflankBoxProvisioner, StaticPlans, StaticTokenStore,
+    SystemClock, app_full,
 };
+use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runner::isolation::RunningContainer;
 use corelink_runner::lease::ContainerSpec;
 
@@ -137,7 +144,7 @@ fn registry_unbind_unbound_is_noop() {
 #[test]
 fn noboxprovisioner_is_noop() {
     let reg = BoxRegistry::new();
-    let prov = NoBoxProvisioner;
+    let prov = NoBoxProvisioner::default();
     let spec = pinned_spec("job-noop");
 
     assert!(prov.provision("l", &spec).is_ok(), "provision must be Ok");
@@ -250,10 +257,11 @@ fn provision_fail_closed_leaves_registry_empty() {
     );
 }
 
-/// `teardown` calls delete-job (DELETE 200) and unbinds the entry; after
-/// teardown `resolve` returns None; a DELETE request was recorded.
+/// `teardown` calls delete-job (DELETE 200), while retaining the binding until
+/// the durable cleanup finish is committed. `forget_pending_cleanup` then
+/// releases the local identity; a DELETE request was recorded.
 #[test]
-fn teardown_deletes_and_unbinds() {
+fn teardown_deletes_then_forget_unbinds() {
     let (engine, fake) = make_engine(vec![resp(200, "{}")]); // DELETE 200
     let reg = BoxRegistry::new();
     // Bind a container directly (simulating what provision does).
@@ -268,8 +276,8 @@ fn teardown_deletes_and_unbinds() {
     prov.teardown("lease-1").expect("teardown must succeed");
 
     assert!(
-        reg.resolve("lease-1").is_none(),
-        "teardown must unbind the container"
+        reg.resolve("lease-1").is_some(),
+        "provider success must retain the handle until ledger cleanup finishes"
     );
     let reqs = fake.all_requests();
     assert_eq!(
@@ -282,18 +290,27 @@ fn teardown_deletes_and_unbinds() {
         Method::Delete,
         "teardown must issue a DELETE"
     );
+
+    // This is the post-finish side effect. Keeping it separate from teardown
+    // lets a failed ledger finish retry the same authoritative provider handle.
+    prov.forget_pending_cleanup("lease-1");
+    assert!(
+        reg.resolve("lease-1").is_none(),
+        "cleanup finish must release the retained binding"
+    );
 }
 
-/// `teardown` when the lease is already unbound → `Ok`, zero HTTP requests
-/// (idempotent).
+/// `teardown` without a binding is unconfirmed → `Err`, zero HTTP requests.
 #[test]
-fn teardown_idempotent_when_unbound() {
+fn teardown_unbound_is_unconfirmed() {
     let (engine, fake) = make_engine(vec![]); // empty script — zero requests
     let reg = BoxRegistry::new(); // nothing bound
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
 
-    prov.teardown("lease-unbound")
-        .expect("teardown on unbound lease must be Ok");
+    assert!(
+        prov.teardown("lease-unbound").is_err(),
+        "teardown without a binding must fail closed"
+    );
     assert_eq!(
         fake.request_count(),
         0,
@@ -428,6 +445,11 @@ impl BoxProvisioner for FailingProvisioner {
     fn teardown(&self, _lease_id: &str) -> Result<()> {
         Ok(())
     }
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let _ = self.teardown(lease_id);
+        // Provision fails before this fixture creates a provider object.
+        CleanupTeardown::ConfirmedDestroyed
+    }
 }
 
 /// Provisioner that records which lease ids teardown was called with.
@@ -449,6 +471,7 @@ impl RecordingProvisioner {
 }
 
 impl BoxProvisioner for RecordingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         if self.provision_ok.load(Ordering::SeqCst) {
             Ok(())
@@ -462,6 +485,12 @@ impl BoxProvisioner for RecordingProvisioner {
             .unwrap()
             .push(lease_id.to_string());
         Ok(())
+    }
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let _ = self.teardown(lease_id);
+        // This fake is the test's explicit authoritative known-no-box/cleanup
+        // source; generic teardown success is not used by production code.
+        CleanupTeardown::ConfirmedDestroyed
     }
 }
 
@@ -494,6 +523,31 @@ fn harness_with_provisioner(
     let mut state = AppState::new(ledger.clone(), Arc::new(plans), clock);
     state.provisioner = prov;
     (app(store, state), ledger)
+}
+
+fn harness_with_provisioner_and_registry(
+    prov: Arc<dyn BoxProvisioner>,
+) -> (
+    axum::Router,
+    Arc<dyn LeaseLedger + Send + Sync>,
+    Arc<HookRegistry>,
+) {
+    let store = Arc::new(StaticTokenStore::new([(
+        "pat-acme".to_string(),
+        TenantId::new("acme").unwrap(),
+    )]));
+    let plans = StaticPlans::new([TenantPlan {
+        tenant: TenantId::new("acme").unwrap(),
+        max_concurrency: 4,
+        rate_ceiling_per_min: 100,
+        repo_allowlist: Vec::new(),
+    }]);
+    let ledger: Arc<dyn LeaseLedger + Send + Sync> = Arc::new(InMemoryLedger::new());
+    let clock = Arc::new(FixedClock(Arc::new(AtomicU64::new(1_717_000_000_000))));
+    let mut state = AppState::new(ledger.clone(), Arc::new(plans), clock);
+    state.provisioner = prov;
+    let registry = Arc::new(HookRegistry::default());
+    (app_full(store, state, registry.clone()), ledger, registry)
 }
 
 /// `acquire` with a `FailingProvisioner` → 503, AND the ledger has NO Held
@@ -588,6 +642,7 @@ struct CountingProvisioner {
 }
 
 impl BoxProvisioner for CountingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         self.provision_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -679,7 +734,7 @@ fn teardown_delete_failure_keeps_binding() {
 async fn close_invokes_teardown() {
     let rec = Arc::new(RecordingProvisioner::new());
     let prov = Arc::clone(&rec) as Arc<dyn BoxProvisioner>;
-    let (router, _ledger) = harness_with_provisioner(prov);
+    let (router, _ledger, registry) = harness_with_provisioner_and_registry(prov);
 
     // Acquire a lease.
     let acq_body = AcquireRequest {
@@ -713,6 +768,26 @@ async fn close_invokes_teardown() {
         check_result: None,
         cost_usd_micros: None,
     };
+    let hook = CaptureHook::open(
+        EnvelopeConfig {
+            ack_timeout: Duration::from_secs(30),
+            buffer_capacity: 256,
+        },
+        "pat-acme",
+        MetricsCollector::new(Instant::now()),
+    );
+    registry.register(
+        &lease_id,
+        TenantId::new("acme").unwrap(),
+        hook.clone(),
+        "pat-acme",
+    );
+    let sub = hook.subscribe("pat-acme").expect("fixture subscriber");
+    let acker = std::thread::spawn(move || {
+        sub.wait_close_signal(std::time::Duration::from_secs(10))
+            .expect("close signal published");
+        sub.ack("pat-acme").expect("in-window fixture ack");
+    });
     let close_resp = router
         .oneshot(json_req(
             "POST",
@@ -722,6 +797,7 @@ async fn close_invokes_teardown() {
         ))
         .await
         .unwrap();
+    acker.join().unwrap();
     assert_eq!(close_resp.status(), StatusCode::OK, "close must succeed");
 
     // Give the background spawn_blocking a moment to complete.
@@ -786,11 +862,12 @@ impl Engine for LocalFakeEngine {
 }
 
 /// Provisioner whose `teardown` always returns `Err` — used to prove the
-/// best-effort teardown contract: a teardown failure must NOT affect the close
-/// response status.
+/// teardown-first contract: a failed provider delete leaves the lease Held
+/// and the close response retryable.
 struct FailingTeardownProvisioner;
 
 impl BoxProvisioner for FailingTeardownProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
         Ok(())
     }
@@ -829,7 +906,7 @@ fn exec_request_body() -> Vec<u8> {
 async fn http_default_off_acquire_ok_exec_503() {
     // Build the harness with a plain NoBoxProvisioner (harness_with_provisioner
     // default), which keeps NoBoxExec on state.exec.
-    let prov = Arc::new(NoBoxProvisioner) as Arc<dyn BoxProvisioner>;
+    let prov = Arc::new(NoBoxProvisioner::default()) as Arc<dyn BoxProvisioner>;
     let (router, _ledger) = harness_with_provisioner(prov);
 
     // Acquire — NoBoxProvisioner is a no-op Ok → 200.

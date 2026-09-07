@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── @cloudflare/containers double so the handler's runner spawn is observable ──
 interface FakeContainer {
@@ -77,13 +78,19 @@ const KNOWN_SPAWNBODY_KEYS = new Set([
 const REQUIRED_KEYS = ["image_digest", "jitconfig", "env", "labels", "expiry_ms"];
 
 function envWith(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: { _ns: "check" } as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: AUTH,
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 beforeEach(() => {

@@ -66,7 +66,7 @@
 //! guarantee — the default-off property is enforced by the composition seam
 //! (absent env vars → `None` → defaults), not by conditional compilation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
@@ -78,6 +78,10 @@ use corelink_runner::isolation::{Engine, RunningContainer};
 use corelink_runner::lease::{CmdOutput, ContainerSpec};
 
 use crate::exec::LeasedExec;
+use crate::pending_cleanup::CleanupTeardown;
+use crate::provider_binding::{ProviderBackend, ProviderBinding, ProviderRoute};
+
+mod provider_refs;
 
 // ── Capacity-error classification ─────────────────────────────────────────────
 
@@ -110,61 +114,82 @@ pub(crate) fn is_capacity_error(e: &anyhow::Error) -> bool {
 /// (the codebase idiom from `app.rs`).
 ///
 /// [`bind`]: BoxRegistry::bind
+#[derive(Default)]
+struct RegistryEvidence {
+    boxes: HashMap<String, RunningContainer>,
+    no_box: HashSet<String>,
+    modes: HashMap<String, ProviderRoute>,
+}
+
 #[derive(Clone)]
-pub struct BoxRegistry(Arc<Mutex<HashMap<String, RunningContainer>>>);
+pub struct BoxRegistry(Arc<Mutex<RegistryEvidence>>);
 
 impl BoxRegistry {
-    /// Construct an empty registry.
+    /// Construct an empty registry: missing evidence never proves absence.
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())))
+        Self(Arc::new(Mutex::new(RegistryEvidence::default())))
     }
 
-    /// Bind `container` as the live box for `lease_id`. Called by the spawn
-    /// lifecycle path at spawn time (future work-package).
-    ///
-    /// **Re-binding semantics (last-bind-wins):** re-binding the same
-    /// `lease_id` OVERWRITES the previous entry. A re-spawned container
-    /// replaces a stale handle, matching the dedup/recovery semantics of the
-    /// spawn lifecycle — there is no "already bound" error; the latest bind
-    /// always wins.
+    /// Record a successfully provisioned handle. Real-box evidence replaces
+    /// no-box evidence atomically, so concurrent teardown cannot observe both.
     pub fn bind(&self, lease_id: &str, container: RunningContainer) {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(lease_id.to_string(), container);
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        evidence.no_box.remove(lease_id);
+        if evidence
+            .boxes
+            .get(lease_id)
+            .is_none_or(|old| old.name != container.name)
+        {
+            evidence.modes.remove(lease_id);
+        }
+        evidence.boxes.insert(lease_id.to_string(), container);
     }
 
-    /// Resolve the live container bound to `lease_id`, if any.
-    ///
-    /// Returns `None` when no container has been bound — the caller
-    /// ([ `EngineLeasedExec`]) must fail closed on `None`.
+    /// Resolve the exact provider handle retained until ledger completion.
     pub fn resolve(&self, lease_id: &str) -> Option<RunningContainer> {
         self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .boxes
             .get(lease_id)
             .cloned()
     }
 
-    /// Remove the entry for `lease_id`, if any.
-    ///
-    /// Called by the teardown path ([`NorthflankBoxProvisioner::teardown`])
-    /// after the provider job is deleted, so a stale handle cannot be resolved
-    /// after teardown. Idempotent: a missing entry is silently ignored.
-    /// Poison-safe (mirrors [`bind`]/[`resolve`]).
-    ///
-    /// [`bind`]: BoxRegistry::bind
+    /// Forget a provider handle only after confirmed terminal ledger completion.
     pub fn unbind(&self, lease_id: &str) {
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        evidence.boxes.remove(lease_id);
+        evidence.modes.remove(lease_id);
+    }
+
+    /// Share the same evidence between exec and provisioner owners.
+    pub fn clone_handle(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+
+    fn mark_no_box(&self, lease_id: &str) -> Result<()> {
+        let mut evidence = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if evidence.boxes.contains_key(lease_id) {
+            bail!("cannot record no-box evidence while a real binding exists for {lease_id}");
+        }
+        evidence.no_box.insert(lease_id.to_string());
+        Ok(())
+    }
+
+    fn has_no_box(&self, lease_id: &str) -> bool {
         self.0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(lease_id);
+            .no_box
+            .contains(lease_id)
     }
 
-    /// Clone the inner [`Arc`] so multiple owners share the same registry
-    /// (e.g. the composition root and the spawn-lifecycle path).
-    pub fn clone_handle(&self) -> Self {
-        Self(Arc::clone(&self.0))
+    fn forget_no_box(&self, lease_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .no_box
+            .remove(lease_id);
     }
 }
 
@@ -250,17 +275,48 @@ pub fn cloud_executor_from_env(registry: BoxRegistry) -> Option<Arc<dyn LeasedEx
 ///
 /// The default implementation is [`NoBoxProvisioner`] (no-op, DEFAULT-OFF):
 /// `provision` returns `Ok(())` without binding anything, so an exec on such
-/// a lease still fails closed via the empty registry; `teardown` is a no-op.
+/// a lease still fails closed via the empty registry. Teardown is confirmed
+/// only for a lease successfully provisioned by this process; a fresh
+/// process cannot infer persisted no-box state.
 pub trait BoxProvisioner: Send + Sync {
     /// Spawn a container for `lease_id` / `spec` and bind it into the
     /// registry.  Returns `Err` on any spawn failure (fail-closed; nothing is
     /// bound on error).
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()>;
 
-    /// Delete the container for `lease_id` from the provider and unbind it
-    /// from the registry.  Idempotent: an already-unbound lease returns
-    /// `Ok(())` without calling the provider.
+    /// Return the versioned, non-secret descriptor to persist after provision.
+    fn provider_ref(&self, _lease_id: &str) -> Result<String> {
+        bail!("provider binding descriptor unavailable")
+    }
+
+    /// Restore a process-local handle from a durable descriptor. Validation is
+    /// performed before any provider request; unknown/legacy values stay
+    /// unconfirmed and therefore cannot release capacity.
+    fn restore_provider_ref(&self, _lease_id: &str, _provider_ref: &str) -> Result<()> {
+        bail!("provider binding restore unavailable")
+    }
+
+    /// Delete the provider resource for `lease_id`.
+    ///
+    /// A successful provider call does not release the process-local binding.
+    /// The caller must first conditionally finish the durable ledger cleanup,
+    /// then call [`forget_pending_cleanup`](Self::forget_pending_cleanup) so a
+    /// finish failure can retry the same authoritative handle. An absent
+    /// binding is unconfirmed and must return an error; silently treating it as
+    /// an already-destroyed resource would release capacity without proof.
     fn teardown(&self, lease_id: &str) -> Result<()>;
+
+    /// Cleanup-specific teardown.  Unlike the historical `teardown` method,
+    /// this seam must distinguish an authoritative provider result from an
+    /// absent process-local binding.  The safe default is unconfirmed.
+    fn teardown_pending(&self, _lease_id: &str) -> CleanupTeardown {
+        CleanupTeardown::Unconfirmed
+    }
+
+    /// Drop the process-local identity after the ledger conditionally finished
+    /// cleanup. Kept separate from `teardown_pending` so a finish failure can
+    /// retry the same authoritative handle.
+    fn forget_pending_cleanup(&self, _lease_id: &str) {}
 
     /// Liveness of the box bound to `lease_id`. FAIL-SAFE: only `Ok(Dead)`
     /// authorizes reclamation; `Alive`/`Unbound`/`Err` all leave the lease alone.
@@ -323,21 +379,68 @@ pub enum ProbeStatus {
 /// The DEFAULT no-op provisioner (DEFAULT-OFF).
 ///
 /// `provision` returns `Ok(())` without binding anything into the registry, so
-/// a subsequent exec on the lease still fails closed via the empty registry
-/// (the same failure mode as today — acquire behaviour is unchanged under this
-/// provisioner).  `teardown` is also a no-op.
+/// a subsequent exec on the lease still fails closed via the empty registry.
+/// Teardown is confirmed only for a lease successfully provisioned by this
+/// process; a fresh process cannot infer persisted no-box state.
 ///
 /// This is the value wired by [`AppState::new`]; switching to a cloud backend
 /// requires calling [`AppState::with_cloud_backend_from_env`].
-pub struct NoBoxProvisioner;
+#[derive(Clone, Default)]
+pub struct NoBoxProvisioner {
+    // Process-local positive evidence for successful no-box provisions. The
+    // evidence is instance-scoped: a fresh provisioner after restart cannot
+    // infer that a durable lease was previously no-box.
+    leases: Arc<Mutex<HashSet<String>>>,
+}
 
 impl BoxProvisioner for NoBoxProvisioner {
-    fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+    fn provision(&self, lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(lease_id.to_string());
         Ok(())
     }
 
-    fn teardown(&self, _lease_id: &str) -> Result<()> {
-        Ok(())
+    fn teardown(&self, lease_id: &str) -> Result<()> {
+        if self
+            .leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(lease_id)
+        {
+            Ok(())
+        } else {
+            bail!("no-box teardown is unconfirmed for lease {lease_id}")
+        }
+    }
+
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
+    }
+
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        if self
+            .leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(lease_id)
+        {
+            CleanupTeardown::ConfirmedDestroyed
+        } else {
+            CleanupTeardown::Unconfirmed
+        }
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.leases
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(lease_id);
     }
 
     fn probe(&self, _lease_id: &str) -> Result<ProbeStatus> {
@@ -358,7 +461,8 @@ impl BoxProvisioner for NoBoxProvisioner {
 ///
 /// `provision` calls `engine.spawn(spec)` and binds the returned
 /// [`RunningContainer`] into `registry`; `teardown` calls
-/// `engine.delete_job(c)` and unbinds the entry.
+/// `engine.delete_job(c)`. The binding is retained until the durable ledger
+/// cleanup finishes and the caller invokes `forget_pending_cleanup`.
 ///
 /// Both operations are fail-closed:
 /// - a spawn failure propagates `Err` without binding (registry stays empty).
@@ -385,21 +489,51 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
 {
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         // Fail-closed: if spawn errors, nothing is bound.
+        crate::provider_binding::validate_domain(&self.engine.provider_domain()?)?;
         let container = self.engine.spawn(spec)?;
-        self.registry.bind(lease_id, container);
+        self.registry.bind_with_route(
+            lease_id,
+            container,
+            if spec.allow_egress {
+                ProviderRoute::Runner
+            } else if is_check_host_spec(spec) {
+                ProviderRoute::CheckHost
+            } else {
+                ProviderRoute::Check
+            },
+        )?;
         Ok(())
     }
 
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
+    }
+
     fn teardown(&self, lease_id: &str) -> Result<()> {
-        // Idempotent: if the lease is already unbound, skip the engine call.
-        if let Some(c) = self.registry.resolve(lease_id) {
-            // Delete-first, then unbind. If delete fails we propagate Err and
-            // intentionally do NOT call unbind — the registry entry is kept so
-            // a future reaper (CF-REAP) can retry teardown on the orphaned handle.
-            self.engine.delete_job(&c)?;
-            self.registry.unbind(lease_id);
+        let c = self.registry.resolve(lease_id).ok_or_else(|| {
+            anyhow::anyhow!("provider teardown is unconfirmed: no binding for {lease_id}")
+        })?;
+        // Keep the authoritative handle until the ledger terminal transition
+        // succeeds and AppState calls forget_pending_cleanup/forget_lease.
+        self.engine.delete_job(&c)
+    }
+
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let Some(container) = self.registry.resolve(lease_id) else {
+            return CleanupTeardown::Unconfirmed;
+        };
+        match self.engine.delete_job(&container) {
+            Ok(()) => CleanupTeardown::ConfirmedDestroyed,
+            Err(_) => CleanupTeardown::Retryable,
         }
-        Ok(())
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.registry.unbind(lease_id);
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
@@ -491,10 +625,12 @@ pub fn cloud_backend_from_env(
 ///   [`RunningContainer`] into `registry`; a spawn failure propagates `Err`
 ///   WITHOUT binding (the registry stays empty for that lease, so a later exec
 ///   fails closed via the empty registry — no box from a failed spawn).
-/// - `teardown` resolves the binding, calls `engine.teardown(c)` (delete-first),
-///   then `unbind`s. A delete failure propagates `Err` and KEEPS the registry
-///   entry so the reaper retries — a failed teardown is never silently dropped.
-///   Idempotent: an already-unbound lease returns `Ok(())` without the provider.
+/// - `teardown` resolves the binding and calls `engine.teardown(c)` (delete-first).
+///   A delete failure propagates `Err` and KEEPS the registry entry so the
+///   reaper retries — a failed teardown is never silently dropped. A successful
+///   delete also retains the entry until the ledger finish calls
+///   `forget_pending_cleanup`. An absent binding is unconfirmed and returns an
+///   error without contacting the provider.
 /// - `probe` resolves the binding (no binding → [`ProbeStatus::Unbound`]) and
 ///   maps `engine.is_alive`: `Ok(true)`→`Alive`, `Ok(false)`→`Dead`, `Err`
 ///   propagates (transient/unreachable is NOT death — fail-safe-alive).
@@ -535,24 +671,65 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
         // Scoped to CloudflareBoxProvisioner — a Hybrid deployment routes plain checks
         // to the Northflank sub (rota B), which is unaffected.
         if !spec.allow_egress && !is_check_host_spec(spec) {
+            self.registry.mark_no_box(lease_id)?;
             return Ok(());
         }
         // Fail-closed: if spawn errors, nothing is bound (mirrors Northflank).
+        crate::provider_binding::validate_domain(self.engine.provider_domain())?;
         let container = self.engine.spawn(spec)?;
-        self.registry.bind(lease_id, container);
+        self.registry.bind_with_route(
+            lease_id,
+            container,
+            if is_check_host_spec(spec) {
+                ProviderRoute::CheckHost
+            } else {
+                ProviderRoute::Runner
+            },
+        )?;
         Ok(())
     }
 
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
+    }
+
     fn teardown(&self, lease_id: &str) -> Result<()> {
-        // Idempotent: if the lease is already unbound, skip the engine call.
         if let Some(c) = self.registry.resolve(lease_id) {
-            // Delete-first, then unbind. If delete fails we propagate Err and
-            // intentionally do NOT call unbind — the registry entry is kept so
-            // a future reaper can retry teardown on the orphaned handle.
-            self.engine.teardown(&c)?;
-            self.registry.unbind(lease_id);
+            let mode = self.registry.check_mode(lease_id)?;
+            return self.engine.teardown_with_mode(&c, mode);
         }
-        Ok(())
+        if self.registry.has_no_box(lease_id) {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "provider teardown is unconfirmed: no binding for {lease_id}"
+        ))
+    }
+
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let Some(container) = self.registry.resolve(lease_id) else {
+            return if self.registry.has_no_box(lease_id) {
+                CleanupTeardown::ConfirmedDestroyed
+            } else {
+                CleanupTeardown::Unconfirmed
+            };
+        };
+        let Ok(mode) = self.registry.check_mode(lease_id) else {
+            return CleanupTeardown::Unconfirmed;
+        };
+        match self.engine.teardown_with_mode(&container, mode) {
+            Ok(()) => CleanupTeardown::ConfirmedDestroyed,
+            Err(_) => CleanupTeardown::Retryable,
+        }
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        self.registry.unbind(lease_id);
+        self.registry.forget_no_box(lease_id);
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
@@ -562,7 +739,10 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
         };
         // FAIL-SAFE: is_alive only returns Ok(false) for an authoritative
         // dead/terminal status; ambiguous/5xx → Err (propagated, NOT death).
-        match self.engine.is_alive(&c) {
+        match self
+            .engine
+            .is_alive_with_mode(&c, self.registry.check_mode(lease_id)?)
+        {
             Ok(true) => Ok(ProbeStatus::Alive),
             Ok(false) => Ok(ProbeStatus::Dead),
             Err(e) => Err(e),
@@ -787,11 +967,19 @@ impl BoxProvisioner for HybridBoxProvisioner {
         sub.provision(lease_id, spec)
     }
 
+    fn provider_ref(&self, lease_id: &str) -> Result<String> {
+        self.binding_ref(lease_id)
+    }
+
+    fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+        self.restore_binding(lease_id, provider_ref)
+    }
+
     fn teardown(&self, lease_id: &str) -> Result<()> {
-        // Idempotent: a lease the hybrid never provisioned has no route → nothing
-        // to tear down (mirrors NoBoxProvisioner / an already-unbound lease).
         let Some(route) = self.route_of(lease_id) else {
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "provider teardown is unconfirmed: no route for {lease_id}"
+            ));
         };
         let sub = match route {
             // CheckHost rides the CF (`runner`) sub-provisioner — the same engine
@@ -799,12 +987,32 @@ impl BoxProvisioner for HybridBoxProvisioner {
             HybridRoute::Runner | HybridRoute::CheckHost => &self.runner,
             HybridRoute::Check => &self.check,
         };
-        // On success, drop the route. On failure, KEEP it so the reaper retries
-        // teardown against the SAME engine (a failed teardown is never silently
-        // dropped — mirrors the registry-keep-on-failure discipline).
-        sub.teardown(lease_id)?;
+        // Keep the route after provider confirmation until the ledger terminal
+        // transition succeeds; forget_pending_cleanup performs post-finish GC.
+        sub.teardown(lease_id)
+    }
+
+    fn teardown_pending(&self, lease_id: &str) -> CleanupTeardown {
+        let Some(route) = self.route_of(lease_id) else {
+            return CleanupTeardown::Unconfirmed;
+        };
+        let sub = match route {
+            HybridRoute::Runner | HybridRoute::CheckHost => &self.runner,
+            HybridRoute::Check => &self.check,
+        };
+        sub.teardown_pending(lease_id)
+    }
+
+    fn forget_pending_cleanup(&self, lease_id: &str) {
+        let Some(route) = self.route_of(lease_id) else {
+            return;
+        };
+        let sub = match route {
+            HybridRoute::Runner | HybridRoute::CheckHost => &self.runner,
+            HybridRoute::Check => &self.check,
+        };
+        sub.forget_pending_cleanup(lease_id);
         self.forget_route(lease_id);
-        Ok(())
     }
 
     fn probe(&self, lease_id: &str) -> Result<ProbeStatus> {
@@ -1109,7 +1317,7 @@ mod tests {
     /// (FAIL-SAFE: an `Unbound` lease is never reclaimed by the crash sweep).
     #[test]
     fn no_box_provisioner_probe_is_unbound() {
-        let prov = NoBoxProvisioner;
+        let prov = NoBoxProvisioner::default();
         assert_eq!(
             prov.probe("any-lease").unwrap(),
             ProbeStatus::Unbound,
@@ -1122,7 +1330,7 @@ mod tests {
         // The no-op provisioner reports it binds nothing — the signal the acquire
         // path uses to reject a runner lease at admit (S2 cold-start guard).
         assert!(
-            !NoBoxProvisioner.binds_boxes(),
+            !NoBoxProvisioner::default().binds_boxes(),
             "NoBoxProvisioner must report binds_boxes() == false"
         );
     }
@@ -1332,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_teardown_and_probe_unknown_lease_are_idempotent() {
+    fn hybrid_teardown_unknown_lease_is_fail_closed() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner_sub: Arc<dyn BoxProvisioner> =
             Arc::new(SpyProvisioner::new("RUNNER", Arc::clone(&calls)));
@@ -1340,9 +1548,9 @@ mod tests {
             Arc::new(SpyProvisioner::new("CHECK", Arc::clone(&calls)));
         let hybrid = HybridBoxProvisioner::new(runner_sub, check_sub);
 
-        // A lease the hybrid never provisioned: teardown is Ok(()), probe is
-        // Unbound, and NEITHER sub-provisioner is contacted (no route recorded).
-        assert!(hybrid.teardown("never-provisioned").is_ok());
+        // A lease the hybrid never provisioned is ambiguous after restart;
+        // teardown must not claim provider confirmation. Probe remains safe.
+        assert!(hybrid.teardown("never-provisioned").is_err());
         assert_eq!(
             hybrid.probe("never-provisioned").unwrap(),
             ProbeStatus::Unbound
@@ -1565,6 +1773,7 @@ mod tests {
 
     fn cf_cfg() -> CloudflareConfig {
         CloudflareConfig::new("https://spawn.example.dev", "tok")
+            .with_scoped_tokens("exec-tok", "lifecycle-tok")
     }
 
     /// A RUNNER spec (`allow_egress == true`, runner-direct) with a pinned image.
@@ -1595,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn cloudflare_provision_binds_handle_then_probe_alive_then_teardown_unbinds() {
+    fn cloudflare_provision_binds_handle_then_probe_alive_then_teardown_retains_until_forget() {
         let registry = BoxRegistry::new();
         // spawn returns a handle (200), is_alive 200 = Alive, teardown 200 = Ok.
         let prov = cf_provisioner(200, r#"{"handle":"cf-1"}"#, registry.clone_handle());
@@ -1612,11 +1821,14 @@ mod tests {
         // probe resolves the binding and maps is_alive → Alive.
         assert_eq!(prov.probe("lease-A").unwrap(), ProbeStatus::Alive);
 
-        // teardown deletes then unbinds.
+        // teardown deletes but retains the authoritative handle until the
+        // ledger terminal transition has succeeded.
         prov.teardown("lease-A").expect("teardown");
+        assert!(registry.resolve("lease-A").is_some());
+        prov.forget_pending_cleanup("lease-A");
         assert!(
             registry.resolve("lease-A").is_none(),
-            "teardown must unbind the lease"
+            "post-transition cleanup must unbind the lease"
         );
     }
 
@@ -1667,6 +1879,25 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_no_box_evidence_cannot_replace_real_binding() {
+        let registry = BoxRegistry::new();
+        let prov = cf_provisioner(200, r#"{"handle":"cf-live"}"#, registry.clone_handle());
+        prov.provision("lease-rebind", &runner_spec()).unwrap();
+        let offbox = ContainerSpec {
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            ..runner_spec()
+        };
+        assert!(prov.provision("lease-rebind", &offbox).is_err());
+        assert_eq!(
+            registry.resolve("lease-rebind").map(|c| c.name),
+            Some("cf-live".to_string()),
+            "failed no-box transition must preserve the real binding"
+        );
+    }
+
+    #[test]
     fn cloudflare_provision_check_host_still_spawns() {
         // A check-host spec (hermetic + TOOLCHAIN_DIGEST) is NOT off-box — it MUST
         // still spawn (the no-box short-circuit must not swallow it).
@@ -1693,14 +1924,13 @@ mod tests {
     }
 
     #[test]
-    fn cloudflare_teardown_is_idempotent_when_unbound() {
-        // No binding → teardown returns Ok without calling the provider (the
-        // fake transport would 500, but it is never reached).
+    fn cloudflare_teardown_is_fail_closed_when_unbound() {
+        // No binding is ambiguous after restart; never claim teardown success.
         let registry = BoxRegistry::new();
         let prov = cf_provisioner(500, "boom", registry.clone_handle());
         assert!(
-            prov.teardown("never-bound").is_ok(),
-            "teardown of an unbound lease is a no-op Ok (idempotent)"
+            prov.teardown("never-bound").is_err(),
+            "teardown of an unbound lease must remain unconfirmed"
         );
     }
 

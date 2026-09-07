@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn(() => ({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) })) }));
 
 import { ContainmentDO, REDRIVE_RESERVATION_TTL_MS, redriveOrphanedJobs, retryOrphanedSpawns, runContainmentDrain } from "../src/index";
+import { claimSpawn as realClaimSpawn } from "../src/lib";
 import { containmentSpawnActiveKey, drainOwnerTuple } from "../src/containment_effect_route";
 import { authorityProxy, bootstrap, ctx, digest, env, envWithAuthority, event, makeDO, kv, providerReceipt, recoveryFixture, reserveKey, settle, T0, writeDeliveredProof } from "./containment-redrive-test-helpers";
 
@@ -112,7 +113,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     }
     {
       const { d, store } = await queuedDrain();
-      await runContainmentDrain(env(d, store), { claimSpawn: async () => { throw new Error("after permit"); } });
+      await runContainmentDrain(env(d, store), { claimSpawn: async () => { throw new Error("after permit"); }, driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
       expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: null });
       expect(store.map.has("spawn:1")).toBe(false);
     }
@@ -120,7 +121,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       const { d, store } = await queuedDrain();
       const claim = vi.fn(async () => { await store.put("spawn:1", "123"); return true; });
       const bind = vi.fn(async () => { throw new Error("after claim KV"); });
-      await runContainmentDrain(env(d, store), { claimSpawn: claim, bindContainmentSpawnClaim: bind });
+      await runContainmentDrain(env(d, store), { claimSpawn: claim, bindContainmentSpawnClaim: bind, driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
       expect(claim).toHaveBeenCalledTimes(1); expect(bind).toHaveBeenCalledTimes(1); expect(store.map.get("spawn:1")).toBe("123");
       expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
       expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "DRIVING" }));
@@ -128,7 +129,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     {
       const { d, store } = await queuedDrain();
       const bind = vi.fn(async () => {}); const drive = vi.fn(async () => { throw new Error("after bind"); });
-      await runContainmentDrain(env(d, store), { claimSpawn: async () => true, bindContainmentSpawnClaim: bind, driveSpawn: drive });
+      await runContainmentDrain(env(d, store), { claimSpawn: () => realClaimSpawn(store, "1"), bindContainmentSpawnClaim: bind, driveSpawn: drive });
       expect(bind).toHaveBeenCalledTimes(1); expect(drive).toHaveBeenCalledTimes(1);
       expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
       expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "DRIVING" }));
@@ -140,7 +141,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
         await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
         return providerReceipt(opts);
       });
-      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive });
+      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: () => realClaimSpawn(store, "1"), bindContainmentSpawnClaim: async () => {}, driveSpawn: drive });
       expect(drive).toHaveBeenCalledTimes(1); expect((await d.instance.getEvent("evt-1"))?.state).toBe("CLAIMED");
       expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "COMMITTED" }));
     }
@@ -151,7 +152,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
         await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
         return providerReceipt({ jobId: opts.jobId, repo: "acme/repo" });
       });
-      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive as never });
+      await runContainmentDrain(envWithAuthority(d, store, authority), { claimSpawn: () => realClaimSpawn(store, "1"), bindContainmentSpawnClaim: async () => {}, driveSpawn: drive as never });
       expect(drive).toHaveBeenCalledTimes(1); expect((await d.instance.getEvent("evt-1"))?.state).toBe("EFFECT_COMMITTED");
       expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
     }
@@ -164,14 +165,14 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
     let enteredOld = 0; const enteredNew = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
     const oldRun = runContainmentDrain(env(d, store), {
-      claimSpawn: async () => true,
+      claimSpawn: () => realClaimSpawn(store, "1"),
       bindContainmentSpawnClaim: async () => {},
       driveSpawn: async (_env, opts) => { enteredOld++; signalEntered!(); await oldGate; return providerReceipt(opts); },
     });
     await entered;
     expect(enteredOld).toBe(1);
     vi.setSystemTime(T0 + 120_000);
-    await runContainmentDrain(env(d, store), { claimSpawn: async () => true, bindContainmentSpawnClaim: async () => {}, driveSpawn: enteredNew });
+    await runContainmentDrain(env(d, store), { claimSpawn: () => realClaimSpawn(store, "1"), bindContainmentSpawnClaim: async () => {}, driveSpawn: enteredNew });
     expect(enteredNew).not.toHaveBeenCalled();
     expect((await d.instance.getEvent("evt-1"))).toMatchObject({ state: "CLAIMED", effect_permit: expect.any(Object) });
     releaseOld!(); await oldRun;
@@ -188,8 +189,9 @@ describe("T3-W17 deterministic continuation crash seams", () => {
           ? { ownerAcquire: async () => { throw new Error("crash after prepare"); } }
           : { ownerMirror: async () => { throw new Error("crash after acquire"); } }),
       });
-      await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
-      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: crashState }));
+      await runContainmentDrain(envWithAuthority(d, store, oldAuthority), { driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
+      const predecessor = [...d.storage.map.entries()].filter(([key]) => key.includes("spawn-attempt:")).map(([, value]) => value);
+      expect(predecessor).toContainEqual(expect.objectContaining({ path: "drain", state: crashState }));
       expect((await d.instance.getEvent("evt-1"))?.effect_permit).toBeNull();
 
       vi.setSystemTime(T0 + 120_000);
@@ -208,6 +210,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       await runContainmentDrain(envWithAuthority(d, store, newAuthority), { driveSpawn: drive });
       expect(permits.size).toBe(1);
       expect(drive).toHaveBeenCalledTimes(1);
+      expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "ABORTED_PRE_EFFECT", tombstone: true }));
       expect(await d.instance.getEvent("evt-1")).toBeNull();
       expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
     }
@@ -219,7 +222,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       releaseLease: async () => {},
       ownerConfirm: async () => { throw new Error("crash after legacy permit"); },
     });
-    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority), { driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
     expect((await d.instance.getEvent("evt-1"))?.effect_permit).toMatchObject({ issued_to_epoch: 1 });
     vi.setSystemTime(T0 + 120_000);
     const lease = await d.instance.acquireLease("new-owner", T0 + 120_000);
@@ -237,7 +240,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       releaseLease: async () => {},
       ownerAcquire: async () => { throw new Error("crash after prepare"); },
     });
-    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority), { driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
     const oldPointer = [...d.storage.map.entries()].find(([key]) => key.includes("spawn-active:"));
     expect(oldPointer).toBeDefined();
     d.storage.map.set(oldPointer![0], { ...(oldPointer![1] as object), permit_id: "corrupt" });
@@ -292,7 +295,7 @@ describe("T3-W17 deterministic continuation crash seams", () => {
       releaseLease: async () => {},
       ownerAcquire: async () => { throw new Error("crash after prepare"); },
     });
-    await runContainmentDrain(envWithAuthority(d, store, oldAuthority));
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority), { driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }) });
     const oldEvent = (await d.instance.getEvent("evt-1"))!;
     const oldOwner = oldEvent.claim!.owner;
     vi.setSystemTime(T0 + 120_000);
@@ -300,7 +303,8 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     await runContainmentDrain(env(d, store), { claimSpawn: async () => false, driveSpawn: refusedDrive });
     expect(refusedDrive).not.toHaveBeenCalled();
     expect((await d.instance.getEvent("evt-1"))?.effect_permit).toBeNull();
-    expect([...d.storage.map.values()]).toContainEqual(expect.objectContaining({ path: "drain", state: "ABORTED_PRE_EFFECT", tombstone: true }));
+    expect([...d.storage.map.entries()].filter(([key]) => key.includes("spawn-attempt:")).map(([, value]) => value))
+      .toContainEqual(expect.objectContaining({ path: "drain", state: "ABORTED_PRE_EFFECT", tombstone: true }));
 
     const permits = new Set<string>();
     const newAuthority = authorityProxy(d.instance, {

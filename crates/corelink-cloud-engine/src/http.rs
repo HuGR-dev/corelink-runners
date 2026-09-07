@@ -36,9 +36,11 @@ impl Method {
 /// single place that renders it into the `Authorization` header (see
 /// [`auth_header`]) so the wire form is asserted in exactly one unit.
 ///
-/// `Debug` is **hand-written to redact `bearer_token`** (audit D4): the raw
-/// Northflank API token must never reach a log line via `{req:?}`. The derive is
-/// deliberately NOT used so a future `Debug`-print on an error path cannot leak it.
+/// `Debug` is **hand-written to redact credentials and content** (audit D4):
+/// the raw API token and JSON payload must never reach a log line via
+/// `{req:?}`. The derive is deliberately NOT used so a future `Debug`-print on
+/// an error path cannot leak them. The payload remains available unchanged to
+/// the transport; redaction is limited to inspection output.
 #[derive(Clone)]
 pub struct HttpRequest {
     pub method: Method,
@@ -56,7 +58,10 @@ impl std::fmt::Debug for HttpRequest {
             .field("method", &self.method)
             .field("url", &self.url)
             .field("bearer_token", &"***REDACTED***")
-            .field("json_body", &self.json_body)
+            .field(
+                "json_body",
+                &self.json_body.as_ref().map(|_| "***REDACTED***"),
+            )
             .finish()
     }
 }
@@ -65,10 +70,26 @@ impl std::fmt::Debug for HttpRequest {
 /// (the transport is configured NOT to turn them into transport errors) so the
 /// engine maps provider failures to a fail-closed `Err` deliberately, never by
 /// swallowing the body.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field(
+                "body",
+                &if self.body.is_empty() {
+                    ""
+                } else {
+                    "***REDACTED***"
+                },
+            )
+            .finish()
+    }
 }
 
 impl HttpResponse {
@@ -275,5 +296,44 @@ mod tests {
         };
         assert!(ok.is_success());
         assert!(!bad.is_success());
+    }
+
+    #[test]
+    fn debug_redacts_nested_request_and_response_content_without_mutating_wire_values() {
+        let request_body = r#"{"env":{"PAT":"pat_nested_canary","JIT":"jit_nested_canary"}}"#;
+        let request = HttpRequest {
+            method: Method::Post,
+            url: "https://spawn.example.dev/v1/spawn".to_string(),
+            bearer_token: "bearer_nested_canary".to_string(),
+            json_body: Some(request_body.to_string()),
+        };
+        let response_body = r#"{"error":{"detail":"pat_nested_canary"}}"#;
+        let response = HttpResponse {
+            status: 502,
+            body: response_body.to_string(),
+        };
+
+        let request_debug = format!("{request:?}");
+        let response_debug = format!("{response:?}");
+        for rendered in [&request_debug, &response_debug] {
+            assert!(
+                !rendered.contains("pat_nested_canary"),
+                "secret leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains("jit_nested_canary"),
+                "secret leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains("bearer_nested_canary"),
+                "secret leaked: {rendered}"
+            );
+            assert!(
+                rendered.contains("REDACTED"),
+                "missing redaction marker: {rendered}"
+            );
+        }
+        assert_eq!(request.json_body.as_deref(), Some(request_body));
+        assert_eq!(response.body, response_body);
     }
 }

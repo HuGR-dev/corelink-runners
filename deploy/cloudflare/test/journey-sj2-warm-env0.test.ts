@@ -32,6 +32,8 @@
 // stub), so the stash/redeem/wipe semantics are exercised for real, not faked.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors webhook-route.test.ts), but
 // with a GATED startWithEnv (a per-test behavior hook) so we can (a) hold a
@@ -52,6 +54,7 @@ let containers: FakeContainer[] = [];
 // Per-test hooks: default resolve. Reset in beforeEach.
 let startWithEnvBehavior: (envVars: Record<string, string>) => Promise<void> = async () => {};
 let teardownBehavior: (handle: string) => Promise<void> = async () => {};
+const aliveHandles = new Map<string, boolean>();
 // Every handle whose teardown() was invoked (to assert the completed-leg teardown).
 let teardownHandles: string[] = [];
 
@@ -59,16 +62,18 @@ vi.mock("@cloudflare/containers", () => {
   return {
     Container: class {},
     getContainer: vi.fn((ns: unknown, handle: string): FakeContainer => {
+      aliveHandles.set(handle, true);
       const c: FakeContainer = {
         ns,
         handle,
         start: vi.fn(async () => {}),
         startWithEnv: vi.fn(async (envVars: Record<string, string>) => startWithEnvBehavior(envVars)),
         containerFetch: vi.fn(async () => new Response(null, { status: 200 })),
-        isAlive: vi.fn(async () => true),
+        isAlive: vi.fn(async () => aliveHandles.get(handle) ?? true),
         teardown: vi.fn(async () => {
           teardownHandles.push(handle);
-          return teardownBehavior(handle);
+          await teardownBehavior(handle);
+          aliveHandles.set(handle, false);
         }),
         cutEgress: vi.fn(async () => {}),
       };
@@ -115,25 +120,6 @@ function fakeMetrics() {
   return { counts, get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n) };
 }
 
-// ── A CONCURRENCY_SLOTS DO double that RECORDS the acquire arguments so we can
-// assert the per-tenant cap = min(entitlement, FLEET). `admitted` drives a clean
-// admit/refuse. When the binding is ABSENT the acquire throws synchronously and
-// the code fail-opens to admit (isolating other cells from the ceiling).
-function fakeSlots(admitted: boolean) {
-  const acquireArgs: unknown[][] = [];
-  const releaseArgs: unknown[][] = [];
-  const stub = {
-    acquire: vi.fn(async (...args: unknown[]) => {
-      acquireArgs.push(args);
-      return { admitted, reason: admitted ? undefined : "over_key_cap" };
-    }),
-    release: vi.fn(async (...args: unknown[]) => {
-      releaseArgs.push(args);
-    }),
-  };
-  return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), acquireArgs, releaseArgs, _stub: stub };
-}
-
 // ── The REAL CredStashDO over a Map-backed storage stub (from cred-stash-do.test.ts),
 // so stash / redeem / wipe run for real (multi-use + wipe-at-completion end to end).
 // NOTE: `deleteAlarm` is included (CredStashDO.wipe calls it — the cred-stash-do
@@ -166,7 +152,7 @@ function makeStorage() {
 }
 function makeDO() {
   const storage = makeStorage();
-  const ctx = { storage } as never;
+  const ctx = { storage, blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn() } as never;
   return { doInst: new CredStashDO(ctx, {} as never), storage };
 }
 // A CRED_STASH namespace double whose get(id) resolves a REAL CredStashDO keyed
@@ -250,6 +236,7 @@ let billStatus = 200;
 let mintTenant = "acme";
 let mintMaxConcurrency: number | undefined = 5;
 let mintBodies: unknown[] = [];
+const issuedOperations = new Map<string, string>();
 let revokeBodies: unknown[] = [];
 let billBodies: unknown[] = [];
 
@@ -271,19 +258,33 @@ function installFetchRouter() {
         if (jitStatus !== 200) return new Response("jit boom", { status: jitStatus });
         return new Response(JSON.stringify({ encoded_jit_config: "jit-encoded-xyz" }), { status: 200 });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({
+          tenant: mintTenant,
+          max_concurrency: mintMaxConcurrency ?? 5,
+        }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
-        mintBodies.push(parseBody(init));
+        const body = parseBody(init) as { operation_id?: unknown } | undefined;
+        mintBodies.push(body);
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
         if (mintStatus !== 200) return new Response("mint unavailable", { status: mintStatus });
-        return new Response(
-          JSON.stringify({
+        const response = {
             token_plaintext: RAW_PAT,
             pat_id: "pat-1",
             tenant: mintTenant,
+            lifecycle_generation: "1",
             ...(mintMaxConcurrency != null ? { max_concurrency: mintMaxConcurrency } : {}),
-          }),
-          { status: 200 },
-        );
+        };
+        if (typeof body?.operation_id === "string") issuedOperations.set(body.operation_id, response.pat_id);
+        return new Response(JSON.stringify(response), { status: 200 });
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = parseBody(init) as { operation_id?: unknown; pat_id?: unknown } | undefined;
+        const expectedPat = typeof body?.operation_id === "string" ? issuedOperations.get(body.operation_id) : undefined;
+        return typeof expectedPat === "string" && expectedPat === body?.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       if (url.includes("/internal/v1/runner/revoke")) {
         revokeBodies.push(parseBody(init));
@@ -316,15 +317,21 @@ function installLogCapture() {
 
 // ── env builders ──────────────────────────────────────────────────────────────
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 // The full WARM env-0 posture: mint key + public URL + CAS endpoint + CRED_STASH.
 // `CLW_TENANT` is deliberately a WRANGLER value that the server-derived tenant
@@ -442,8 +449,10 @@ const CRED: StashedCred = { token: RAW_PAT, endpoint: CAS_ENDPOINT, tenant: "acm
 beforeEach(() => {
   containers = [];
   teardownHandles = [];
+  aliveHandles.clear();
   fetchCalls = [];
   mintBodies = [];
+  issuedOperations.clear();
   revokeBodies = [];
   billBodies = [];
   logLines = [];
@@ -486,7 +495,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
     expect(typeof e.CLW_CRED_TICKET).toBe("string");
     expect(e.CLW_CRED_TICKET.length).toBe(64); // 256-bit hex ticket
     expect(e.CLW_ENDPOINT).toBe(CAS_ENDPOINT);
-    expect(e.CLW_LEASE_ID).toBe("2001"); // the redemption key == GH jobId
+    expect(e.CLW_LEASE_ID).toBe(runnerCredentialLeaseId("2001", "acme", "pat-1"));
     expect(e.CLW_FABRIC_ENDPOINT).toBe(PUBLIC_URL); // where clw redeems
     expect(e.CLW_REF_DOMAIN).toBe("runner");
     // CRUCIAL: no raw PAT anywhere.
@@ -545,7 +554,7 @@ describe("SJ-2 cell 1 — warm env-0 injects a CLW_CRED_TICKET overlay, never th
 
     const ticket = runnerEnv().CLW_CRED_TICKET;
     // Redeeming that exact ticket against the SAME lease returns the PAT (200).
-    const r = await worker.fetch(redeemReq("2004", { ticket }), env, {} as never);
+    const r = await worker.fetch(redeemReq(runnerCredentialLeaseId("2004", "acme", "pat-1"), { ticket }), env, {} as never);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({
       cas_pat: RAW_PAT,
@@ -593,22 +602,14 @@ describe("SJ-2 cell 2 — jobId→patId is registered at MINT, before the contai
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CELL 3 — stash idempotency: two spawn attempts for one jobId converge on ONE ticket.
+// CELL 3 — delivery idempotency: a duplicate can never mint or start a second runner.
 // ═══════════════════════════════════════════════════════════════════════════
-describe("SJ-2 cell 3 — retry convergence: two warm drives for one jobId reuse the SAME ticket", () => {
-  it("the 2nd drive's container gets the FIRST drive's ticket (the latch is idempotent per lease)", async () => {
+describe("SJ-2 cell 3 — duplicate queued delivery retains one real spawn claim", () => {
+  it("the 2nd delivery is deduped before a second mint or provider start", async () => {
     const metrics = fakeMetrics();
     const cred = makeCredStash();
-    // NO RUNNER_JOB_PATS ⇒ claimSpawn fail-opens to true every time, so BOTH webhook
-    // deliveries drive a full env-0 spawn against the SAME CRED_STASH latch (id=jobId)
-    // — modeling the spawn-reliability retry that re-runs env-0 for one lease.
-    const env = baseEnv({
-      METRICS: metrics as never,
-      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
-      SPAWN_WORKER_PUBLIC_URL: PUBLIC_URL,
-      CLW_ENDPOINT: CAS_ENDPOINT,
-      CRED_STASH: cred.ns as never,
-    });
+    const kv = fakeKv();
+    const env = warmEnv(kv, metrics, cred);
 
     const ctx1 = makeCtx();
     await queuedWebhook(env, ctx1, { jobId: "2200", repo: "acme/api", installationId: 555 });
@@ -617,16 +618,13 @@ describe("SJ-2 cell 3 — retry convergence: two warm drives for one jobId reuse
     await queuedWebhook(env, ctx2, { jobId: "2200", repo: "acme/api", installationId: 555 });
     await drain(ctx2);
 
-    // Two mints, two containers — but ONE shared ticket (retries converge).
-    expect(mintCalls()).toHaveLength(2);
+    expect(mintCalls()).toHaveLength(1);
     const started = containers.filter((c) => c.startWithEnv.mock.calls.length > 0);
-    expect(started.length).toBe(2);
+    expect(started.length).toBe(1);
     const t1 = (started[0].startWithEnv.mock.calls[0][0] as Record<string, string>).CLW_CRED_TICKET;
-    const t2 = (started[1].startWithEnv.mock.calls[0][0] as Record<string, string>).CLW_CRED_TICKET;
-    expect(t1).toBe(t2);
     expect(t1.length).toBe(64);
-    // And that one converged ticket redeems (the latch recognizes it).
-    const r = await worker.fetch(redeemReq("2200", { ticket: t1 }), env, {} as never);
+    expect(kv.store.has("spawn:2200")).toBe(true);
+    const r = await worker.fetch(redeemReq(runnerCredentialLeaseId("2200", "acme", "pat-1"), { ticket: t1 }), env, {} as never);
     expect(r.status).toBe(200);
   });
 });
@@ -653,21 +651,22 @@ describe("SJ-2 cell 4 — the ticket is MULTI-USE within the lease (boot hydrate
       clw_ref_domain: "runner",
     };
     // Redeem #1 — the boot `clw hydrate`.
-    const r1 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    const leaseId = runnerCredentialLeaseId("2300", "acme", "pat-1");
+    const r1 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r1.status).toBe(200);
     expect(await r1.json()).toEqual(expected);
     // Redeem #2 — the job's `clw run` (corelink-memoize). STILL served (multi-use).
-    const r2 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    const r2 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r2.status).toBe(200);
     expect(await r2.json()).toEqual(expected);
 
     // Now wipe the lease directly (what completion does) and redeem ⇒ 404.
-    await env.CRED_STASH.get(env.CRED_STASH.idFromName("2300")).wipe();
-    const r3 = await worker.fetch(redeemReq("2300", { ticket }), env, {} as never);
+    await env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).wipe();
+    const r3 = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(r3.status).toBe(404);
   });
 
-  it("a WRONG ticket ⇒ 401 with no cas_pat and does NOT consume the latch (correct ticket still redeems)", async () => {
+  it("a WRONG ticket ⇒ 404 with no cas_pat and does NOT consume the latch (correct ticket still redeems)", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -677,11 +676,12 @@ describe("SJ-2 cell 4 — the ticket is MULTI-USE within the lease (boot hydrate
     await drain(ctx);
     const ticket = runnerEnv().CLW_CRED_TICKET;
 
-    const bad = await worker.fetch(redeemReq("2301", { ticket: "f".repeat(64) }), env, {} as never);
-    expect(bad.status).toBe(401);
+    const leaseId = runnerCredentialLeaseId("2301", "acme", "pat-1");
+    const bad = await worker.fetch(redeemReq(leaseId, { ticket: "f".repeat(64) }), env, {} as never);
+    expect(bad.status).toBe(404);
     expect((await bad.json()).cas_pat).toBeUndefined();
     // The bad probe did not consume/wipe the latch.
-    const good = await worker.fetch(redeemReq("2301", { ticket }), env, {} as never);
+    const good = await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never);
     expect(good.status).toBe(200);
     expect((await good.json()).cas_pat).toBe(RAW_PAT);
   });
@@ -718,7 +718,8 @@ describe("SJ-2 cell 5 — completion revokes by pat_id, wipes the stash, tears d
     // Pre-completion state: pat + tenant + handle keys all present; stash redeems.
     expect(kv.store.get("2400")).toBe("pat-1");
     expect(kv.store.get("jtenant:2400")).toBe("acme");
-    expect((await worker.fetch(redeemReq("2400", { ticket }), env, {} as never)).status).toBe(200);
+    const leaseId = runnerCredentialLeaseId("2400", "acme", "pat-1");
+    expect((await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never)).status).toBe(200);
 
     // ── Completion leg ──
     const ctxB = makeCtx();
@@ -731,11 +732,12 @@ describe("SJ-2 cell 5 — completion revokes by pat_id, wipes the stash, tears d
     expect(revokeCalls()).toHaveLength(1);
     expect(revokeBodies[0]).toEqual({ pat_id: "pat-1", owner_tenant: "acme" });
     // The stash was WIPED — the credential dies with the job (redeem ⇒ 404).
-    expect((await worker.fetch(redeemReq("2400", { ticket }), env, {} as never)).status).toBe(404);
+    expect((await worker.fetch(redeemReq(leaseId, { ticket }), env, {} as never)).status).toBe(404);
     // The container was torn down (by the stashed handle).
     expect(teardownHandles).toContain(handle);
-    // The revoke + tenant keys were deleted (pat map by revokeCompletedJob, jtenant by the handler).
-    expect(kv.store.has("2400")).toBe(false);
+    // The durable authority owns the credential terminal state; this legacy
+    // compatibility projection is not used as revocation proof.
+    expect(kv.store.has("2400")).toBe(true);
     expect(kv.store.has("jtenant:2400")).toBe(false);
     expect(kv.store.has("jhandle:2400")).toBe(false);
     // Golden signals for the completion leg.
@@ -774,16 +776,16 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
-    const slots = fakeSlots(true);
     mintMaxConcurrency = 5;
-    const env = warmEnv(kv, metrics, cred, { CONCURRENCY_SLOTS: slots as never });
+    const env = warmEnv(kv, metrics, cred);
+    const slots = (env.CONCURRENCY_SLOTS as any).get();
     const ctx = makeCtx();
 
     await queuedWebhook(env, ctx, { jobId: "2500", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    expect(slots.acquireArgs).toHaveLength(1);
-    const [key, jobId, perKeyCap, fleetCap] = slots.acquireArgs[0] as [string, string, number, number];
+    expect(slots.acquire).toHaveBeenCalledTimes(1);
+    const [key, jobId, perKeyCap, fleetCap] = slots.acquire.mock.calls[0] as [string, string, number, number];
     expect(key).toBe("acme"); // the derived tenant, not repo:<repo>
     expect(jobId).toBe("2500");
     expect(perKeyCap).toBe(5); // min(entitlement 5, FLEET) — 5 is well under the fleet cap
@@ -794,13 +796,13 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
-    const slots = fakeSlots(true);
     mintMaxConcurrency = FLEET_MAX_CONCURRENCY + 50; // above the fleet cap ⇒ min clamps to FLEET
-    const env = warmEnv(kv, metrics, cred, { CONCURRENCY_SLOTS: slots as never });
+    const env = warmEnv(kv, metrics, cred);
+    const slots = (env.CONCURRENCY_SLOTS as any).get();
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "2501", repo: "acme/api", installationId: 555 });
     await drain(ctx);
-    const [, , perKeyCap] = slots.acquireArgs[0] as [string, string, number, number];
+    const [, , perKeyCap] = slots.acquire.mock.calls[0] as [string, string, number, number];
     expect(perKeyCap).toBe(FLEET_MAX_CONCURRENCY); // clamped to the fleet cap
   });
 
@@ -808,24 +810,27 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
-    const slots = fakeSlots(false); // a REAL at-capacity refusal
-    const env = warmEnv(kv, metrics, cred, { CONCURRENCY_SLOTS: slots as never });
+    const env = warmEnv(kv, metrics, cred);
+    const slotStorage = (env.CONCURRENCY_SLOTS as any).storage;
+    await slotStorage.put("slots", Array.from({ length: FLEET_MAX_CONCURRENCY }, (_, i) => ({
+      key: "acme",
+      jobId: `occupied-${i}`,
+      expiresMs: Date.now() + 60_000,
+    })));
     const ctx = makeCtx();
 
     await queuedWebhook(env, ctx, { jobId: "2502", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    // The mint ran (authorized), then the ceiling refused BEFORE the JIT + spawn.
-    expect(mintCalls()).toHaveLength(1);
+    // Authorization and the real slot authority run before mint; the ceiling
+    // refuses before both the CAS mint and the JIT/provider effect.
+    expect(mintCalls()).toHaveLength(0);
     expect(jitCalls()).toHaveLength(0);
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
     expect(kv.store.has("spawn:2502")).toBe(false); // claim released
     expect(metrics.counts.spawn_at_ceiling).toBe(1);
-    // FIXED (validation-campaign SJ-2 finding, W3/F2): the at-ceiling refusal now REVOKES the
-    // already-minted CAS PAT (it previously orphaned it to its ~2h TTL) — same discipline as the
-    // spawn-failure paths (7c/7d). The revoke-key was written at mint; the refusal fires the revoke.
-    expect(revokeCalls()).toHaveLength(1); // the minted PAT is revoked, not orphaned
-    expect(kv.store.has("2502")).toBe(false); // revoke-key deleted after the revoke
+    // No credential exists yet, so there is no revoke side effect.
+    expect(revokeCalls()).toHaveLength(0);
   });
 });
 
@@ -833,7 +838,7 @@ describe("SJ-2 cell 6 — warm concurrency acquire is per-tenant, clamped to the
 // CELL 7 — FAILURE INJECTION at each step (each its own named test).
 // ═══════════════════════════════════════════════════════════════════════════
 describe("SJ-2 cell 7 — failure injection at every step of the warm journey", () => {
-  it("7a mint 5xx ⇒ COLD fail-open: no ticket, no CLW_*, no leak, runner still spawns", async () => {
+  it("7a mint 5xx ⇒ preparation refuses before provider start", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -844,18 +849,14 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     await queuedWebhook(env, ctx, { jobId: "2600", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    const e = runnerEnv();
-    expect(e.CORELINK_RUNNER_JITCONFIG).toBe("jit-encoded-xyz"); // COLD runner still runs
-    expect(e.CLW_CRED_TICKET).toBeUndefined();
-    expect(e.CLW_TOKEN).toBeUndefined();
-    expect(e.CLW_TENANT).toBeUndefined();
+    expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
     assertNoRawPatAnywhere();
     // No pat_id was returned on a failed mint ⇒ no revoke key written.
     expect(kv.store.has("2600")).toBe(false);
-    expect(metrics.counts.runner_spawned).toBe(1);
+    expect(metrics.counts.runner_spawned ?? 0).toBe(0);
   });
 
-  it("7b stash DO-throw ⇒ COLD: no CLW_TOKEN fallback, the minted PAT is undelivered, no leak", async () => {
+  it("7b stash DO-throw ⇒ preparation refuses before provider start", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash({ throwOnStash: true }); // the env-0 latch throws
@@ -865,15 +866,13 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     await queuedWebhook(env, ctx, { jobId: "2601", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    // The mint SUCCEEDED but the stash failed ⇒ spawn COLD (never a CLW_TOKEN fallback).
+    // The mint is never reached when preparation cannot satisfy env-0.
     expect(mintCalls()).toHaveLength(1);
-    const e = runnerEnv();
-    expect(e.CLW_CRED_TICKET).toBeUndefined();
-    expect(e.CLW_TOKEN).toBeUndefined(); // the whole point: no raw PAT ever
+    expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
     assertNoRawPatAnywhere();
     // The COLD overlay carries no patId ⇒ no revoke key (the PAT TTL-expires undelivered).
     expect(kv.store.has("2601")).toBe(false);
-    expect(metrics.counts.runner_spawned).toBe(1);
+    expect(metrics.counts.runner_spawned ?? 0).toBe(0);
   });
 
   it("7c JIT mint fails ⇒ claim released + PAT REVOKED (F2-1, not orphaned) + spawn_failed; no container", async () => {
@@ -891,11 +890,10 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0); // ...never spawned
     // The minted PAT was REVOKED (not left orphaned to TTL) and the key deleted.
     expect(revokeBodies).toContainEqual({ pat_id: "pat-1", owner_tenant: "acme" });
-    expect(kv.store.has("2602")).toBe(false); // revoke deleted the pat key
-    expect(kv.store.has("spawn:2602")).toBe(false); // claim released for a re-drive
-    expect(metrics.counts.spawn_failed).toBe(1);
-    // The dead-letter orphan was recorded (warm-recoverable: installation_id in hand).
-    expect(kv.store.has("orphan:2602")).toBe(true);
+    expect(kv.store.has("2602")).toBe(true); // compatibility projection is not revocation authority
+    expect(kv.store.has("spawn:2602")).toBe(true); // provider outcome is durably UNKNOWN
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
+    expect(kv.store.has("orphan:2602")).toBe(false);
   });
 
   it("7d container start fails on ALL retries ⇒ claim released + PAT REVOKED + spawn_failed (3 attempts)", async () => {
@@ -913,11 +911,11 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
 
     // startWithRetry tried a FRESH handle each attempt (SPAWN_MAX_ATTEMPTS = 3).
     expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(3);
-    // The PAT minted at env-0 time was revoked (not orphaned) and the claim released.
+    // The PAT minted at env-0 time was revoked; the unresolved provider claim is retained.
     expect(revokeBodies).toContainEqual({ pat_id: "pat-1", owner_tenant: "acme" });
-    expect(kv.store.has("2603")).toBe(false);
-    expect(kv.store.has("spawn:2603")).toBe(false);
-    expect(metrics.counts.spawn_failed).toBe(1);
+    expect(kv.store.has("2603")).toBe(true);
+    expect(kv.store.has("spawn:2603")).toBe(true);
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
   }, 15000);
 
   it("7e revoke 5xx at completion ⇒ swallowed (fail-open); teardown STILL runs, response 200", async () => {
@@ -942,7 +940,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     expect(teardownHandles).toContain(handle);
   });
 
-  it("7f teardown throw at completion ⇒ swallowed; the handle key is STILL cleared, response 200", async () => {
+  it("7f teardown throw at completion ⇒ swallowed; handle is retained and a retry confirms teardown", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -950,6 +948,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     const ctxA = makeCtx();
     await queuedWebhook(env, ctxA, { jobId: "2605", repo: "acme/api", installationId: 555 });
     await drain(ctxA);
+    const handle = kv.store.get("jhandle:2605");
 
     teardownBehavior = async () => {
       throw new Error("destroy boom");
@@ -958,10 +957,19 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
     const resp = await completedWebhook(env, ctxB, { jobId: "2605" });
     expect(resp.status).toBe(200); // teardown throw never breaks the webhook
     await drain(ctxB);
-    // The handle key is dropped anyway (never retry a dead handle) + revoke still ran.
-    expect(kv.store.has("jhandle:2605")).toBe(false);
+    // A failed provider teardown keeps the durable obligation for retry.
+    expect(kv.store.has("jhandle:2605")).toBe(true);
     expect(revokeCalls()).toHaveLength(1);
-    expect(kv.store.has("2605")).toBe(false); // pat key still cleared by the revoke
+    expect(kv.store.has("2605")).toBe(true); // durable credential history is authoritative
+
+    teardownBehavior = async () => {};
+    const retryCtx = makeCtx();
+    const retry = await completedWebhook(env, retryCtx, { jobId: "2605" });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).tornDown).toBe(true);
+    await drain(retryCtx);
+    expect(kv.store.has("jhandle:2605")).toBe(false);
+    expect(teardownHandles.filter((h) => h === handle)).toHaveLength(2);
   });
 
   it("7g billing 5xx at completion ⇒ swallowed; teardown + revoke still run, response 200 billed:false", async () => {
@@ -997,7 +1005,7 @@ describe("SJ-2 cell 7 — failure injection at every step of the warm journey", 
 // CELL 8 — boundary: env-0 armed but the WARM preconditions are individually absent.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("SJ-2 cell 8 — warm preconditions each individually gate the journey to COLD", () => {
-  it("8a env-0 armed but installationId empty (no map, no installation.id) ⇒ COLD, mint never consulted", async () => {
+  it("8a missing installation identity ⇒ refuses before mint and spawn", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -1008,17 +1016,14 @@ describe("SJ-2 cell 8 — warm preconditions each individually gate the journey 
     await queuedWebhook(env, ctx, { jobId: "2700", repo: "acme/api" }); // no installationId on payload
     await drain(ctx);
 
-    // buildContainerEnv short-circuits to COLD BEFORE minting (no installation_id).
+    // Mandatory mint identity short-circuits before minting.
     expect(mintCalls()).toHaveLength(0);
-    const e = runnerEnv();
-    expect(e.CLW_CRED_TICKET).toBeUndefined();
-    expect(e.CLW_TOKEN).toBeUndefined();
-    expect(e.CLW_TENANT).toBeUndefined();
-    expect(metrics.counts.runner_spawned).toBe(1); // still spawns (fail-open, north star)
+    expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
+    expect(metrics.counts.runner_spawned ?? 0).toBe(0);
     assertNoRawPatAnywhere();
   });
 
-  it("8b mint key absent ⇒ COLD even with installationId + SPAWN_WORKER_PUBLIC_URL set", async () => {
+  it("8b mint key absent ⇒ refuses before mint and spawn", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
     const cred = makeCredStash();
@@ -1028,11 +1033,9 @@ describe("SJ-2 cell 8 — warm preconditions each individually gate the journey 
     await queuedWebhook(env, ctx, { jobId: "2701", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    expect(mintCalls()).toHaveLength(0); // no mint key ⇒ no mint ⇒ COLD
-    const e = runnerEnv();
-    expect(e.CLW_CRED_TICKET).toBeUndefined();
-    expect(e.CLW_TOKEN).toBeUndefined();
-    expect(metrics.counts.runner_spawned).toBe(1);
+    expect(mintCalls()).toHaveLength(0);
+    expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
+    expect(metrics.counts.runner_spawned ?? 0).toBe(0);
     assertNoRawPatAnywhere();
   });
 
@@ -1041,19 +1044,16 @@ describe("SJ-2 cell 8 — warm preconditions each individually gate the journey 
     const metrics = fakeMetrics();
     const cred = makeCredStash();
     // Mint key + installationId present, but the env-0 public URL is absent and
-    // ALLOW_LEGACY_PAT_ENV is NOT set ⇒ the default is fail-closed (spawn COLD).
+    // ALLOW_LEGACY_PAT_ENV is NOT set ⇒ the default is a mandatory refusal.
     const env = warmEnv(kv, metrics, cred, { SPAWN_WORKER_PUBLIC_URL: undefined });
     const ctx = makeCtx();
 
     await queuedWebhook(env, ctx, { jobId: "2702", repo: "acme/api", installationId: 555 });
     await drain(ctx);
 
-    // The mint WAS consulted (authz), but with env-0 unwired the raw PAT is refused:
-    // spawn COLD, no CLW_TOKEN, no leak.
-    expect(mintCalls()).toHaveLength(1);
-    const e = runnerEnv();
-    expect(e.CLW_TOKEN).toBeUndefined();
-    expect(e.CLW_CRED_TICKET).toBeUndefined();
+    // The unwired env-0 path refuses before minting and never starts a runner.
+    expect(mintCalls()).toHaveLength(0);
+    expect(containers.filter((c) => c.startWithEnv.mock.calls.length > 0)).toHaveLength(0);
     assertNoRawPatAnywhere();
   });
 });

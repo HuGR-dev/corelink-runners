@@ -601,6 +601,25 @@ impl<H: HttpTransport> NorthflankEngine<H> {
         Self { http, cfg }
     }
 
+    /// Configured API domain and project, excluding credentials, for durable
+    /// provider binding descriptors.
+    pub fn provider_domain(&self) -> Result<String> {
+        if self.cfg.project_id.is_empty()
+            || self.cfg.project_id.len() > 256
+            || !self
+                .cfg
+                .project_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            bail!("invalid provider project identity");
+        }
+        Ok(format!(
+            "{}/projects/{}",
+            self.cfg.base_url, self.cfg.project_id
+        ))
+    }
+
     fn jobs_url(&self) -> String {
         format!(
             "{}/projects/{}/jobs",

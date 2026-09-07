@@ -22,6 +22,10 @@
 //! side = a recording provisioner (so we can assert it got — or did not get — the
 //! lease). Zero account/network dependency.
 
+#[macro_use]
+#[path = "support/provider_binding.rs"]
+mod provider_binding_fixture;
+
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -46,6 +50,16 @@ use tower::ServiceExt;
 
 const PINNED_IMAGE: &str =
     "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+// Keep the hybrid fixture aligned with the Worker control-plane contract:
+// spawn, exec, and lifecycle requests each carry their own exact, distinct
+// token. Runner and check-host provisioning both use the same Cloudflare
+// engine; even though these cases do not execute a command, probe/teardown
+// still use the lifecycle scope and the engine validates all three credentials
+// before contacting the fake Worker.
+const SPAWN_AUTH_TOKEN: &str = "fixture-hybrid-spawn-auth-token";
+const EXEC_AUTH_TOKEN: &str = "fixture-hybrid-exec-auth-token";
+const LIFECYCLE_AUTH_TOKEN: &str = "fixture-hybrid-lifecycle-auth-token";
 
 fn acme() -> TenantId {
     TenantId::new("acme").expect("valid tenant id")
@@ -121,6 +135,7 @@ impl RecordingProvisioner {
 }
 
 impl BoxProvisioner for RecordingProvisioner {
+    synthetic_provider_binding!();
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> anyhow::Result<()> {
         self.calls
             .lock()
@@ -161,7 +176,8 @@ fn hybrid_harness(worker: Arc<FakeWorker>, check_sub: RecordingProvisioner) -> R
     let registry = BoxRegistry::new();
     let engine = Arc::new(CloudflareEngine::new(
         ArcWorker(Arc::clone(&worker)),
-        CloudflareConfig::new("https://spawn.example.dev", "super-secret-token"),
+        CloudflareConfig::new("https://spawn.example.dev", SPAWN_AUTH_TOKEN)
+            .with_scoped_tokens(EXEC_AUTH_TOKEN, LIFECYCLE_AUTH_TOKEN),
     ));
     let runner_sub: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
         Arc::clone(&engine),

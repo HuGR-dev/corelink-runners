@@ -15,6 +15,7 @@
 //
 // NEW FILE (WP-D). Disjoint from every other test in the suite (own mock scope).
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors webhook-route.test.ts) ────
 interface FakeContainer {
@@ -151,20 +152,46 @@ async function queuedWebhook(
 // The two external calls a real spawn drive makes: the GitHub JIT mint and the
 // CAS-PAT warm mint. If the gate refuses correctly, NEITHER is ever hit.
 let fetchCalls: string[] = [];
+const issuedOperations = new Map<string, string>();
+type RunnerWire = { url: string; headers: Record<string, string>; body: Record<string, unknown> };
+let runnerWire: RunnerWire[] = [];
+let authorizeMode: "success" | "divergent" | "invalid" = "success";
+let lastAuthorities: ReturnType<typeof makeWorkerAuthorities> | undefined;
 function installFetchRouter() {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : (input as Request).url ?? String(input);
       fetchCalls.push(url);
+      const headers = Object.fromEntries(new Headers(init?.headers).entries());
+      const body = init?.body ? JSON.parse(init.body as string) as Record<string, unknown> : {};
       if (url.includes("generate-jitconfig")) {
         return new Response(JSON.stringify({ encoded_jit_config: "jit-encoded-xyz" }), { status: 200 });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        runnerWire.push({ url, headers, body });
+        if (authorizeMode !== "success") {
+          return new Response(JSON.stringify({ code: "FORBIDDEN", message: "runner mint unauthorized" }), { status: 403 });
+        }
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 5 }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
+        runnerWire.push({ url, headers, body });
+        if (typeof body.operation_id === "string") issuedOperations.set(body.operation_id, "pat-1");
         return new Response(
-          JSON.stringify({ token_plaintext: "cas-pat", pat_id: "pat-1", tenant: "acme", max_concurrency: 5 }),
+          JSON.stringify({ token_plaintext: "cas-pat", pat_id: "pat-1", tenant: "acme", lifecycle_generation: "1", max_concurrency: 5 }),
           { status: 200 },
         );
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const body = init?.body ? JSON.parse(init.body as string) as { operation_id?: unknown; pat_id?: unknown } : undefined;
+        const patId = body?.pat_id;
+        return typeof body?.operation_id === "string"
+          && typeof patId === "string"
+          && typeof issuedOperations.get(body.operation_id) === "string"
+          && issuedOperations.get(body.operation_id) === patId
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     }),
@@ -174,20 +201,35 @@ const jitCalls = () => fetchCalls.filter((u) => u.includes("generate-jitconfig")
 const mintCalls = () => fetchCalls.filter((u) => u.includes("/internal/v1/runner/mint"));
 
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
     PINNED_IMAGE_DIGEST: "",
+    CORELINK_RUNNER_MINT_AUTH_KEY: "mint-internal-key",
+    SPAWN_WORKER_PUBLIC_URL: "https://spawn.corelink.example",
+    CLW_ENDPOINT: "https://cas.corelink.example",
+    CRED_STASH: {
+      idFromName: vi.fn((name: string) => name),
+      get: vi.fn(() => ({ stash: vi.fn(async (ticket: string) => ticket), wipe: vi.fn(async () => {}) })),
+    } as never,
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  lastAuthorities = authorities;
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 beforeEach(() => {
   containers = [];
   fetchCalls = [];
+  runnerWire = [];
+  authorizeMode = "success";
+  issuedOperations.clear();
   vi.mocked(getContainer).mockClear();
   installFetchRouter();
 });
@@ -206,11 +248,10 @@ describe("/webhook installation allowlist — UNSET ⇒ current behavior preserv
 
     const resp = await queuedWebhook(env, ctx, { jobId: "2001", repo: "foreign/repo", installationId: 999999 });
     expect(resp.status).toBe(202);
-    expect(await resp.json()).toMatchObject({ ok: true, spawning: true, job_id: "2001" });
-    // The claim was taken synchronously — the whole point of "current behavior".
-    expect(kv.store.has("spawn:2001")).toBe(true);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, job_id: "2001" });
 
     await drain(ctx);
+    expect(kv.store.has("spawn:2001")).toBe(true);
     expect(jitCalls()).toHaveLength(1);
     expect(containers).toHaveLength(1);
     expect(metrics.counts.webhook_installation_not_allowlisted ?? 0).toBe(0);
@@ -222,8 +263,8 @@ describe("/webhook installation allowlist — UNSET ⇒ current behavior preserv
     const ctx = makeCtx();
     const resp = await queuedWebhook(env, ctx, { jobId: "2002", repo: "foreign/repo", installationId: 999999 });
     expect(resp.status).toBe(202);
-    expect(kv.store.has("spawn:2002")).toBe(true); // proceeded
     await drain(ctx);
+    expect(kv.store.has("spawn:2002")).toBe(true); // proceeded
     expect(jitCalls()).toHaveLength(1);
   });
 });
@@ -245,10 +286,10 @@ describe("/webhook installation allowlist — SET + KNOWN id ⇒ proceeds", () =
       installationId: DOGFOOD_INSTALL,
     });
     expect(resp.status).toBe(202);
-    expect(await resp.json()).toMatchObject({ ok: true, spawning: true, job_id: "2003" });
-    expect(kv.store.has("spawn:2003")).toBe(true);
+    expect(await resp.json()).toMatchObject({ ok: true, queued: true, job_id: "2003" });
 
     await drain(ctx);
+    expect(kv.store.has("spawn:2003")).toBe(true);
     expect(jitCalls()).toHaveLength(1);
     expect(containers).toHaveLength(1);
     expect(metrics.counts.webhook_installation_not_allowlisted ?? 0).toBe(0);
@@ -263,8 +304,8 @@ describe("/webhook installation allowlist — SET + KNOWN id ⇒ proceeds", () =
     const ctx = makeCtx();
     const resp = await queuedWebhook(env, ctx, { jobId: "2004", repo: "acme/api", installationId: 424242 });
     expect(resp.status).toBe(202);
-    expect(kv.store.has("spawn:2004")).toBe(true);
     await drain(ctx);
+    expect(kv.store.has("spawn:2004")).toBe(true);
     expect(jitCalls()).toHaveLength(1);
   });
 
@@ -280,8 +321,8 @@ describe("/webhook installation allowlist — SET + KNOWN id ⇒ proceeds", () =
     // listed dogfood id, so the armed gate still admits it.
     const resp = await queuedWebhook(env, ctx, { jobId: "2005", repo: "HuGR-Labs/corelink-runners" });
     expect(resp.status).toBe(202);
-    expect(kv.store.has("spawn:2005")).toBe(true);
     await drain(ctx);
+    expect(kv.store.has("spawn:2005")).toBe(true);
     expect(jitCalls()).toHaveLength(1);
   });
 });
@@ -343,5 +384,86 @@ describe("/webhook installation allowlist — SET + UNKNOWN id ⇒ EARLY refuse 
     expect(containers).toHaveLength(0);
     expect(kv.store.has("spawn:2101")).toBe(false);
     expect(kv.store.has("orphan:2101")).toBe(false);
+  });
+});
+
+describe("ADR-0013 combined installation + acquiring PAT acceptance", () => {
+  const dualIdentityEnv = (kv: ReturnType<typeof fakeKv>) => baseEnv({
+    RUNNER_JOB_PATS: kv as never,
+    REPO_TENANT_PAT_MAP: JSON.stringify({ "acme/api": "ACME_TENANT_PAT" }),
+    ACME_TENANT_PAT: "pat-for-acme",
+  } as Partial<Env>);
+
+  it("sends both identities to authorize and mint, then completes the normal provider path", async () => {
+    const kv = fakeKv();
+    const env = dualIdentityEnv(kv);
+    const ctx = makeCtx();
+    const resp = await queuedWebhook(env, ctx, { jobId: "2200", repo: "acme/api", installationId: 424242 });
+    expect(resp.status).toBe(202);
+    await drain(ctx);
+
+    const auth = runnerWire.find(call => call.url.includes("/authorize"));
+    const mint = runnerWire.find(call => call.url.includes("/mint"));
+    expect(auth?.body.installation_id).toBe("424242");
+    expect(mint?.body.installation_id).toBe("424242");
+    expect(auth?.headers.authorization).toBe("Bearer pat-for-acme");
+    expect(mint?.headers.authorization).toBe("Bearer pat-for-acme");
+    expect(auth?.body.tenant).toBeUndefined();
+    expect(mint?.body.tenant).toBeUndefined();
+    expect(mint?.body.lifecycle_generation).toBeUndefined();
+    expect(runnerWire.filter(call => call.url.includes("/authorize"))).toHaveLength(1);
+    expect(runnerWire.filter(call => call.url.includes("/mint"))).toHaveLength(1);
+    expect(jitCalls()).toHaveLength(1);
+    expect(containers).toHaveLength(1);
+    expect(kv.store.has("spawn:2200")).toBe(true);
+    expect(lastAuthorities?.containmentStorage.values.get("job-attribution:2200")).toEqual(
+      JSON.stringify({ jobId: "2200", tenant: "acme" }),
+    );
+  });
+
+  it.each([
+    ["divergent PAT", "divergent"],
+    ["invalid PAT", "invalid"],
+  ])(
+    "%s from authorize is fail-closed before mint, attribution, claim, or provider effects",
+    async (_label, mode) => {
+      authorizeMode = mode as "divergent" | "invalid";
+      const kv = fakeKv();
+      const env = dualIdentityEnv(kv);
+      const ctx = makeCtx();
+      const jobId = mode === "divergent" ? "2201" : "2202";
+      const resp = await queuedWebhook(env, ctx, { jobId, repo: "acme/api", installationId: 424242 });
+      expect(resp.status).toBe(202);
+      await drain(ctx);
+
+      const auth = runnerWire.find(call => call.url.includes("/authorize"));
+      expect(auth?.body.installation_id).toBe("424242");
+      expect(auth?.headers.authorization).toBe("Bearer pat-for-acme");
+      expect(runnerWire.filter(call => call.url.includes("/mint"))).toHaveLength(0);
+      expect(jitCalls()).toHaveLength(0);
+      expect(containers).toHaveLength(0);
+      expect(kv.store.has(`spawn:${jobId}`)).toBe(false);
+      expect(kv.store.has(`orphan:${jobId}`)).toBe(false);
+      expect(lastAuthorities?.containmentStorage.values.has(`job-attribution:${jobId}`)).toBe(false);
+    },
+  );
+
+  it("missing mapped repository PAT refuses before authorize, slot, mint, claim, or provider effects", async () => {
+    const kv = fakeKv();
+    const env = baseEnv({
+      RUNNER_JOB_PATS: kv as never,
+      REPO_TENANT_PAT_MAP: JSON.stringify({ "acme/api": "MISSING_PAT_SECRET" }),
+    } as Partial<Env>);
+    const ctx = makeCtx();
+    const resp = await queuedWebhook(env, ctx, { jobId: "2203", repo: "acme/api", installationId: 424242 });
+    expect(resp.status).toBe(202);
+    await drain(ctx);
+
+    expect(runnerWire).toHaveLength(0);
+    expect(jitCalls()).toHaveLength(0);
+    expect(containers).toHaveLength(0);
+    expect(kv.store.has("spawn:2203")).toBe(false);
+    expect(kv.store.has("orphan:2203")).toBe(false);
+    expect(lastAuthorities?.containmentStorage.values.has("job-attribution:2203")).toBe(false);
   });
 });

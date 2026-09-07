@@ -20,6 +20,7 @@
 //
 // NEW FILE. Does NOT touch any other test file.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { makeWorkerAuthorities } from "./helpers/worker-authorities";
 
 // ── Test double for @cloudflare/containers (mirrors webhook-route.test.ts) ─────
 interface FakeContainer {
@@ -158,6 +159,7 @@ const MINT_KEY = "mint-internal-key";
 
 // ── A configurable global-fetch router for every external call the drive makes ─
 //    POST …/actions/runners/generate-jitconfig   (GitHub JIT mint)   → jitStatus
+//    POST …/internal/v1/runner/authorize         (server tenant/cap) → 200
 //    POST …/internal/v1/runner/mint              (CAS-PAT warm mint) → mintStatus
 //    POST …/internal/v1/runner/revoke            (D-9 PAT revoke)    → 200
 //    GET  …/actions/runs?status=queued           (reconciler scan)   → ghRuns
@@ -172,6 +174,7 @@ let jitStatus = 200;
 let mintStatus = 200;
 let ghRuns: { id: number; createdMsAgo: number }[] = [];
 let ghJobsByRun: Record<number, { id: number; status: string; runner_id: number | null; labels: string[] }[]> = {};
+const issuedOperations = new Map<string, string>();
 
 function installFetchRouter() {
   vi.stubGlobal(
@@ -186,18 +189,29 @@ function installFetchRouter() {
         if (jitStatus !== 200) return new Response("jit mint failed", { status: jitStatus });
         return new Response(JSON.stringify({ encoded_jit_config: "jit-encoded-xyz" }), { status: 200 });
       }
+      if (url.includes("/internal/v1/runner/authorize")) {
+        return new Response(JSON.stringify({ tenant: "acme", max_concurrency: 5 }), { status: 200 });
+      }
       if (url.includes("/internal/v1/runner/mint")) {
+        const requestBody = body ? JSON.parse(body) as { operation_id?: unknown } : undefined;
         if (mintStatus === 403) return new Response("mint forbidden", { status: 403 });
         if (mintStatus !== 200) return new Response("mint unavailable", { status: mintStatus });
-        return new Response(
-          JSON.stringify({
+        const response = {
             token_plaintext: "cas-pat-plaintext",
             pat_id: "pat-1",
             tenant: "acme",
+            lifecycle_generation: "1",
             max_concurrency: 5,
-          }),
-          { status: 200 },
-        );
+        };
+        if (typeof requestBody?.operation_id === "string") issuedOperations.set(requestBody.operation_id, response.pat_id);
+        return new Response(JSON.stringify(response), { status: 200 });
+      }
+      if (url.includes("/internal/v1/runner/adopt")) {
+        const requestBody = body ? JSON.parse(body) as { operation_id?: unknown; pat_id?: unknown } : undefined;
+        const expectedPat = typeof requestBody?.operation_id === "string" ? issuedOperations.get(requestBody.operation_id) : undefined;
+        return typeof expectedPat === "string" && expectedPat === requestBody?.pat_id
+          ? new Response(null, { status: 204 })
+          : new Response("adoption mismatch", { status: 400 });
       }
       if (url.includes("/internal/v1/runner/revoke")) {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -256,15 +270,21 @@ async function queuedWebhook(
 }
 
 function baseEnv(over: Partial<Env> = {}): Env {
-  return {
+  const env = {
     RUNNER_CONTAINER: RUNNER_NS as never,
     CHECK_HOST_CONTAINER: CHECK_NS as never,
     CLOUDFLARE_SPAWN_AUTH_TOKEN: "spawn-secret",
+    CLOUDFLARE_EXEC_AUTH_TOKEN: "exec-control-secret",
+    CLOUDFLARE_LIFECYCLE_AUTH_TOKEN: "lifecycle-control-secret",
     GITHUB_WEBHOOK_SECRET: SECRET,
     GITHUB_MINT_TOKEN: "ghp-mint",
     PINNED_IMAGE_DIGEST: "",
     ...over,
   } as Env;
+  const authorities = makeWorkerAuthorities(env.RUNNER_JOB_PATS);
+  if (!over.CONTAINMENT) env.CONTAINMENT = authorities.CONTAINMENT as never;
+  if (!over.CONCURRENCY_SLOTS) env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
+  return env;
 }
 
 // Env armed for a WARM mint (env-0): mint key + fabric public URL + a CRED_STASH.
@@ -281,6 +301,10 @@ function warmEnv(kv: FakeKv, metrics: ReturnType<typeof fakeMetrics>, over: Part
   });
 }
 
+function recoveryEnv(kv: FakeKv, over: Partial<Env> = {}): Env {
+  return baseEnv({ RUNNER_JOB_PATS: kv as never, ...over });
+}
+
 const REC = (over: Partial<OrphanRecord> = {}): OrphanRecord => ({
   repo: "octo/external-repo",
   installationId: "44556677",
@@ -295,6 +319,7 @@ beforeEach(() => {
   reqs = [];
   jitStatus = 200;
   mintStatus = 200;
+  issuedOperations.clear();
   ghRuns = [];
   ghJobsByRun = {};
   vi.mocked(getContainer).mockClear();
@@ -304,9 +329,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// ── Cell 1 — driveSpawnGuarded catch: release + spawn_failed + REVOKE + record ─
-describe("SJ-6 · cell 1 — driveSpawnGuarded catch on a WARM spawn failure", () => {
-  it("releases the claim, bumps spawn_failed, REVOKES the minted PAT (not orphaned), and records orphan:<jobId>", async () => {
+// ── Cell 1 — a provider failure after DRIVING is durably UNKNOWN ─────────────
+describe("SJ-6 · cell 1 — a WARM provider failure retains its canonical claim", () => {
+  it("revokes the minted PAT but preserves the claim and never records a retryable orphan", async () => {
     jitStatus = 500; // the GitHub JIT mint throws AFTER the CAS-PAT was warm-minted
     const kv = fakeKv();
     const metrics = fakeMetrics();
@@ -324,24 +349,18 @@ describe("SJ-6 · cell 1 — driveSpawnGuarded catch on a WARM spawn failure", (
     expect(jitCalls()).toHaveLength(1);
     // F2-1: the minted PAT was REVOKED (not left to orphan to its TTL)...
     expect(revokeCalls()).toHaveLength(1);
-    // ...and its revoke-key was deleted after the revoke.
-    expect(kv.store.has("2001")).toBe(false);
+    // The compatibility projection is not revocation authority.
+    expect(kv.store.has("2001")).toBe(true);
     // No container was ever started.
     expect(containers).toHaveLength(0);
-    // The guard RELEASED the spawn claim so a redelivery / reconciler can re-drive.
-    expect(kv.store.has("spawn:2001")).toBe(false);
-    // spawn_failed golden signal moved.
-    expect(metrics.counts.spawn_failed).toBe(1);
-    // F8: an orphan dead-letter was recorded (installation_id was in hand ⇒ warm-recoverable).
-    expect(kv.store.has("orphan:2001")).toBe(true);
-    expect(JSON.parse(kv.store.get("orphan:2001")!)).toMatchObject({
-      repo: "acme/api",
-      installationId: "555",
-      attempts: 1,
-    });
+    // DRIVING means a provider effect may have happened: retain the exact claim
+    // and never schedule a blind second provider call.
+    expect(kv.store.has("spawn:2001")).toBe(true);
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
+    expect(kv.store.has("orphan:2001")).toBe(false);
   });
 
-  it("COLD failure (no installation_id): releases + spawn_failed, but NO revoke and NO orphan record (the F8 IFF)", async () => {
+  it("unmapped COLD input refuses before claim, JIT, or provider effects", async () => {
     jitStatus = 500;
     const kv = fakeKv();
     const metrics = fakeMetrics();
@@ -354,12 +373,12 @@ describe("SJ-6 · cell 1 — driveSpawnGuarded catch on a WARM spawn failure", (
     await drain(ctx);
 
     expect(mintCalls()).toHaveLength(0); // cold: the runner-mint seam is never consulted
-    expect(jitCalls()).toHaveLength(1); // the JIT mint was attempted (and failed)
+    expect(jitCalls()).toHaveLength(0);
     expect(revokeCalls()).toHaveLength(0); // NO PAT ⇒ NO revoke
     expect(containers).toHaveLength(0);
-    expect(kv.store.has("spawn:2002")).toBe(false); // claim released
-    expect(metrics.counts.spawn_failed).toBe(1);
-    expect(kv.store.has("orphan:2002")).toBe(false); // F8 IFF: cold ⇒ NOT recorded
+    expect(kv.store.has("spawn:2002")).toBe(false);
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
+    expect(kv.store.has("orphan:2002")).toBe(false);
   });
 });
 
@@ -369,7 +388,7 @@ describe("SJ-6 · cell 2 — recordOrphan (dead-letter of the FIRST warm-recover
 
   it("records {repo, installationId, labels, attempts:1} under orphan: with the self-healing TTL", async () => {
     const kv = fakeKv();
-    await recordOrphan({ RUNNER_JOB_PATS: kv } as unknown as Env, OPTS);
+    await recordOrphan(recoveryEnv(kv), OPTS);
     expect(JSON.parse(kv.store.get("orphan:job-x")!)).toEqual({
       repo: "octo/ext",
       installationId: "9090",
@@ -386,14 +405,14 @@ describe("SJ-6 · cell 2 — recordOrphan (dead-letter of the FIRST warm-recover
 
   it("a SECOND failure does NOT clobber/bump an existing record (the reconciler owns attempts)", async () => {
     const kv = fakeKv({ "orphan:job-x": JSON.stringify(REC({ attempts: 2 })) });
-    await recordOrphan({ RUNNER_JOB_PATS: kv } as unknown as Env, OPTS);
+    await recordOrphan(recoveryEnv(kv), OPTS);
     expect(JSON.parse(kv.store.get("orphan:job-x")!).attempts).toBe(2); // untouched
     expect(kv.put).not.toHaveBeenCalled(); // no clobber
   });
 
   it("a COLD job (no installation_id) is NOT recorded — it is not warm-recoverable", async () => {
     const kv = fakeKv();
-    await recordOrphan({ RUNNER_JOB_PATS: kv } as unknown as Env, { ...OPTS, installationId: "" });
+    await recordOrphan(recoveryEnv(kv), { ...OPTS, installationId: "" });
     expect(kv.store.has("orphan:job-x")).toBe(false);
     expect(kv.put).not.toHaveBeenCalled();
   });
@@ -402,7 +421,7 @@ describe("SJ-6 · cell 2 — recordOrphan (dead-letter of the FIRST warm-recover
     const kv = fakeKv();
     kv.put.mockRejectedValueOnce(new Error("KV down"));
     await expect(
-      recordOrphan({ RUNNER_JOB_PATS: kv } as unknown as Env, OPTS),
+      recordOrphan(recoveryEnv(kv), OPTS),
     ).resolves.toBeUndefined();
   });
 });
@@ -436,113 +455,106 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
       list: vi.fn(async () => ({ keys: [{ name: "orphan:ghost" }] })),
     };
     const drive = vi.fn(async () => {});
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
     expect(drive).not.toHaveBeenCalled();
     expect(kv.delete).not.toHaveBeenCalled();
   });
 
   it("giveup at max ⇒ DELETE the dead-letter, never drive, never claim", async () => {
-    const kv = fakeKv({ "orphan:g1": JSON.stringify(REC({ attempts: MAX_ORPHAN_ATTEMPTS })) });
+    const kv = fakeKv({ "orphan:4101": JSON.stringify(REC({ attempts: MAX_ORPHAN_ATTEMPTS })) });
     const drive = vi.fn(async () => {});
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
     expect(drive).not.toHaveBeenCalled();
-    expect(kv.store.has("orphan:g1")).toBe(false);
-    expect(kv.store.has("spawn:g1")).toBe(false);
+    expect(kv.store.has("orphan:4101")).toBe(false);
+    expect(kv.store.has("spawn:4101")).toBe(false);
   });
 
   it("retry + claim-lost (a live path already holds the claim) ⇒ bump but SKIP the drive, LEAVE the record", async () => {
     const kv = fakeKv({
-      "orphan:c1": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:c1": "1", // the live path / another tick won the claim
+      "orphan:4102": JSON.stringify(REC({ attempts: 1 })),
+      "spawn:4102": "1", // the live path / another tick won the claim
     });
     const drive = vi.fn(async () => {});
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
     expect(drive).not.toHaveBeenCalled(); // claimSpawn returned false
-    expect(JSON.parse(kv.store.get("orphan:c1")!).attempts).toBe(2); // bumped, but left
+    expect(JSON.parse(kv.store.get("orphan:4102")!).attempts).toBe(2); // bumped, but left
   });
 
   it("retry + drive SUCCESS ⇒ claim, drive WARM, KEEP the record (placement unconfirmed)", async () => {
-    const kv = fakeKv({ "orphan:r1": JSON.stringify(REC({ attempts: 1 })) });
-    const drive = vi.fn(async () => {});
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
-    expect(drive).toHaveBeenCalledWith(expect.anything(), {
-      jobId: "r1",
+    const kv = fakeKv({ "orphan:4103": JSON.stringify(REC({ attempts: 1 })) });
+    const drive = vi.fn(async (_env: Env, opts: { jobId: string; repo: string }) => ({
+      resource_id: `job:${opts.repo}/${opts.jobId}`, receipt_id: "retry-4103", provider_signature: "fixture",
+    }));
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
+    expect(drive).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      jobId: "4103",
       repo: "octo/external-repo",
       installationId: "44556677",
       labels: ["corelink"],
-    });
+    }), undefined);
     // The claim VALUE is a timestamp now (the reconciler ages it); what the
     // contract has always been is that a claim EXISTS.
-    expect(Number(kv.store.get("spawn:r1"))).toBeGreaterThan(0); // claimed (dedup vs the live path)
+    expect(Number(kv.store.get("spawn:4103"))).toBeGreaterThan(0); // claimed (dedup vs the live path)
     // A returned drive means a CONTAINER STARTED, not that the job is placed — so
     // the reconciler no longer deletes here. `driveSpawn` re-stamps the record as a
     // provisional placement; confirmation (or the grace window) resolves it.
-    expect(kv.store.has("orphan:r1")).toBe(true);
+    expect(kv.store.has("orphan:4103")).toBe(true);
   });
 
-  it("retry + drive THROW ⇒ releaseSpawnClaim + spawn_failed + LEAVE the (bumped) record", async () => {
-    const kv = fakeKv({ "orphan:f1": JSON.stringify(REC({ attempts: 1 })) });
+  it("retry + drive THROW ⇒ retain UNKNOWN claim and LEAVE the bumped record", async () => {
+    const kv = fakeKv({ "orphan:4104": JSON.stringify(REC({ attempts: 1 })) });
     const metrics = fakeMetrics();
     const drive = vi.fn(async () => {
       throw new Error("spawn still failing");
     });
     await retryOrphanedSpawns(
-      { RUNNER_JOB_PATS: kv, METRICS: metrics } as unknown as Env,
+      recoveryEnv(kv, { METRICS: metrics as never }),
       CTX,
       Date.now(),
       drive,
     );
-    expect(kv.store.has("spawn:f1")).toBe(false); // claim RELEASED for a later tick
-    expect(JSON.parse(kv.store.get("orphan:f1")!).attempts).toBe(2); // record LEFT, bumped
-    expect(metrics.counts.spawn_failed).toBe(1);
+    expect(kv.store.has("spawn:4104")).toBe(true);
+    expect(JSON.parse(kv.store.get("orphan:4104")!).attempts).toBe(2); // record LEFT, bumped
+    expect(metrics.counts.spawn_failed ?? 0).toBe(0);
   });
 });
 
 // ── Cell 5 — bounded retries: keeps failing ⇒ giveup at MAX, never forever ────
-describe("SJ-6 · cell 5 — a persistently-failing job hits giveup at MAX_ORPHAN_ATTEMPTS", () => {
-  it("N ticks of an always-throwing drive advance 1→2→3 then DELETE at giveup (never retries forever)", async () => {
-    const kv = fakeKv({ "orphan:loop": JSON.stringify(REC({ attempts: 1 })) });
+describe("SJ-6 · cell 5 — an unresolved provider outcome is never re-driven", () => {
+  it("later ticks observe DRIVING and do not make a second provider call", async () => {
+    const kv = fakeKv({ "orphan:4105": JSON.stringify(REC({ attempts: 1 })) });
     const drive = vi.fn(async () => {
       throw new Error("always fails");
     });
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+    const env = recoveryEnv(kv);
 
-    // Tick until the dead-letter is gone, bounding the loop generously.
-    let ticks = 0;
-    while (kv.store.has("orphan:loop") && ticks < 25) {
-      await retryOrphanedSpawns(env, CTX, Date.now(), drive);
-      ticks++;
-    }
-    // With MAX_ORPHAN_ATTEMPTS=3 and a start of attempts:1: ticks bump 1→2 (drive),
-    // 2→3 (drive), then attempts==max ⇒ giveup (delete, no drive). So the drive is
-    // attempted exactly MAX-1 times and the record is gone after MAX ticks.
-    expect(drive).toHaveBeenCalledTimes(MAX_ORPHAN_ATTEMPTS - 1);
-    expect(ticks).toBe(MAX_ORPHAN_ATTEMPTS);
-    expect(kv.store.has("orphan:loop")).toBe(false); // given up ⇒ bounded, deleted
+    await retryOrphanedSpawns(env, CTX, Date.now(), drive);
+    await retryOrphanedSpawns(env, CTX, Date.now(), drive);
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(kv.store.get("orphan:4105")!).attempts).toBe(2);
+    expect(kv.store.has("spawn:4105")).toBe(true);
   });
 });
 
 // ── Cell 6 — idempotency: the retry uses the THROWING driveSpawn (not the guard) ─
 describe("SJ-6 · cell 6 — a retry FAILURE does not re-record (throwing driveSpawn, not driveSpawnGuarded)", () => {
-  it("two failing ticks advance attempts 1→2→3 monotonically — never RESET to 1 (no re-record)", async () => {
-    const kv = fakeKv({ "orphan:idem": JSON.stringify(REC({ attempts: 1 })) });
+  it("an UNKNOWN retry remains at its first bumped attempt and is never re-driven", async () => {
+    const kv = fakeKv({ "orphan:4106": JSON.stringify(REC({ attempts: 1 })) });
     const drive = vi.fn(async () => {
       throw new Error("still failing");
     });
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+    const env = recoveryEnv(kv);
     await retryOrphanedSpawns(env, CTX, Date.now(), drive);
-    expect(JSON.parse(kv.store.get("orphan:idem")!).attempts).toBe(2);
+    expect(JSON.parse(kv.store.get("orphan:4106")!).attempts).toBe(2);
     await retryOrphanedSpawns(env, CTX, Date.now(), drive);
-    // If the retry path re-entered recordOrphan (as driveSpawnGuarded would), the
-    // FIRST-failure record would reset attempts to 1. It stays monotonic ⇒ proof
-    // the retry drives the THROWING driveSpawn, whose catch never re-records.
-    expect(JSON.parse(kv.store.get("orphan:idem")!).attempts).toBe(3);
+    expect(JSON.parse(kv.store.get("orphan:4106")!).attempts).toBe(2);
+    expect(drive).toHaveBeenCalledTimes(1);
     expect(orphanKeys(kv)).toHaveLength(1); // exactly ONE record throughout (no duplicate)
   });
 
   it("REAL default driveSpawn (no injected drive): a warm-mint+JIT-fail throw LEAVES the bumped record, does NOT re-record", async () => {
     jitStatus = 500; // warm mint 200, then the GitHub JIT mint throws
-    const kv = fakeKv({ "orphan:real": JSON.stringify(REC({ attempts: 2, repo: "acme/api" })) });
+    const kv = fakeKv({ "orphan:4107": JSON.stringify(REC({ attempts: 2, repo: "acme/api" })) });
     const metrics = fakeMetrics();
     const env = warmEnv(kv, metrics);
     // No 4th arg ⇒ retryOrphanedSpawns uses its DEFAULT `driveSpawn` (the throwing one).
@@ -551,20 +563,20 @@ describe("SJ-6 · cell 6 — a retry FAILURE does not re-record (throwing driveS
     expect(jitCalls()).toHaveLength(1); // JIT mint attempted (and 500'd)
     expect(revokeCalls()).toHaveLength(1); // driveSpawn's own catch revoked the minted PAT
     // The dead-letter is LEFT with attempts bumped 2→3 — NOT reset to 1 (no re-record).
-    expect(JSON.parse(kv.store.get("orphan:real")!).attempts).toBe(3);
+    expect(JSON.parse(kv.store.get("orphan:4107")!).attempts).toBe(3);
     expect(orphanKeys(kv)).toHaveLength(1);
-    expect(kv.store.has("spawn:real")).toBe(false); // claim released for a later tick
+    expect(kv.store.has("spawn:4107")).toBe(true); // provider outcome is unknown
   });
 
   it("claimSpawn dedups vs a concurrent LIVE path — a held claim skips the retry drive", async () => {
     const kv = fakeKv({
-      "orphan:dd": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:dd": "1", // the live webhook path already claimed this job
+      "orphan:4108": JSON.stringify(REC({ attempts: 1 })),
+      "spawn:4108": "1", // the live webhook path already claimed this job
     });
     const drive = vi.fn(async () => {});
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
     expect(drive).not.toHaveBeenCalled(); // deduped — no double spawn
-    expect(kv.store.has("orphan:dd")).toBe(true); // record left for later
+    expect(kv.store.has("orphan:4108")).toBe(true); // record left for later
   });
 });
 
@@ -572,21 +584,21 @@ describe("SJ-6 · cell 6 — a retry FAILURE does not re-record (throwing driveS
 describe("SJ-6 · cell 7 — the retry re-drives WARM (buildContainerEnv authorizes+mints)", () => {
   it("the injected drive receives the stored installation_id + labels + repo (not a cold re-spawn)", async () => {
     const kv = fakeKv({
-      "orphan:w1": JSON.stringify(REC({ attempts: 1, repo: "octo/cust", installationId: "778899", labels: ["corelink-large"] })),
+      "orphan:4109": JSON.stringify(REC({ attempts: 1, repo: "octo/cust", installationId: "778899", labels: ["corelink-large"] })),
     });
     const seen: { jobId: string; repo: string; installationId: string; labels: string[] }[] = [];
     const drive = vi.fn(async (_env: Env, opts: { jobId: string; repo: string; installationId: string; labels: string[] }) => {
       seen.push(opts);
+      return { resource_id: `job:${opts.repo}/${opts.jobId}`, receipt_id: "retry-4109", provider_signature: "fixture" };
     });
-    await retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive);
-    expect(seen).toEqual([
-      { jobId: "w1", repo: "octo/cust", installationId: "778899", labels: ["corelink-large"] },
-    ]);
+    await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ jobId: "4109", repo: "octo/cust", installationId: "778899", labels: ["corelink-large"] });
   });
 
   it("REAL default driveSpawn: the WARM re-drive's mint request carries the stored installation_id (server derives the tenant)", async () => {
     const kv = fakeKv({
-      "orphan:w2": JSON.stringify(REC({ attempts: 1, repo: "acme/api", installationId: "6543210", labels: ["corelink"] })),
+      "orphan:4110": JSON.stringify(REC({ attempts: 1, repo: "acme/api", installationId: "6543210", labels: ["corelink"] })),
     });
     const metrics = fakeMetrics();
     const env = warmEnv(kv, metrics);
@@ -601,7 +613,7 @@ describe("SJ-6 · cell 7 — the retry re-drives WARM (buildContainerEnv authori
     // re-stamped PROVISIONAL — the real `driveSpawn` calls `recordPlacement`, so
     // this asserts the whole seam through the production path.
     expect(containers).toHaveLength(1);
-    const w2 = kv.store.get("orphan:w2");
+    const w2 = kv.store.get("orphan:4110");
     expect(w2).toBeTruthy();
     expect(JSON.parse(w2!).placedMs).toEqual(expect.any(Number));
   });
@@ -615,6 +627,12 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     return baseEnv({
       RUNNER_JOB_PATS: kv as never,
       RECONCILER_REPOS: "octo/first-party",
+      REPO_INSTALLATION_MAP: JSON.stringify({ "octo/first-party": "44556677" }),
+      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      CORELINK_MINT_URL: "https://mint.test",
+      SPAWN_WORKER_PUBLIC_URL: "https://w",
+      CLW_ENDPOINT: "https://cas.test",
+      CRED_STASH: fakeCredStash() as never,
       ...over,
     });
   }
@@ -623,7 +641,16 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     ghRuns = [{ id: 900, createdMsAgo: 300_000 }]; // 5 min old ⇒ past the 90s grace window
     ghJobsByRun[900] = [{ id: 8001, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
     const kv = fakeKv();
-    const env = reconcilerEnv(kv);
+    const env = baseEnv({
+      RUNNER_JOB_PATS: kv as never,
+      RECONCILER_REPOS: "octo/first-party",
+      REPO_INSTALLATION_MAP: JSON.stringify({ "octo/first-party": "44556677" }),
+      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      CORELINK_MINT_URL: "https://mint.test",
+      SPAWN_WORKER_PUBLIC_URL: "https://w",
+      CLW_ENDPOINT: "https://cas.test",
+      CRED_STASH: fakeCredStash() as never,
+    });
     const ctx = makeCtx();
 
     await worker.scheduled(EVENT, env, ctx as never);
@@ -741,7 +768,16 @@ describe("SJ-6 · cell 9 — dead-letter + GitHub-scan see the SAME job: no doub
     ghRuns = [{ id: 700, createdMsAgo: 300_000 }];
     ghJobsByRun[700] = [{ id: 7001, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
     const kv = fakeKv({ "orphan:7001": JSON.stringify(REC({ attempts: 1, repo: "octo/first-party" })) });
-    const env = baseEnv({ RUNNER_JOB_PATS: kv as never, RECONCILER_REPOS: "octo/first-party" });
+    const env = baseEnv({
+      RUNNER_JOB_PATS: kv as never,
+      RECONCILER_REPOS: "octo/first-party",
+      REPO_INSTALLATION_MAP: JSON.stringify({ "octo/first-party": "44556677" }),
+      CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
+      CORELINK_MINT_URL: "https://mint.test",
+      SPAWN_WORKER_PUBLIC_URL: "https://w",
+      CLW_ENDPOINT: "https://cas.test",
+      CRED_STASH: fakeCredStash() as never,
+    });
     const ctx = makeCtx();
 
     await worker.scheduled(EVENT, env, ctx as never);
@@ -759,26 +795,26 @@ describe("SJ-6 · cell 9 — dead-letter + GitHub-scan see the SAME job: no doub
 
 // ── Cell 10 — ordering: fail→bump→recover→delete; vs record→TTL-expire→gone ────
 describe("SJ-6 · cell 10 — retry ordering across ticks", () => {
-  it("record → tick1 retry-FAIL (bump 1→2) → tick2 retry-SUCCESS: recovers on the 2nd tick", async () => {
-    const kv = fakeKv({ "orphan:ord": JSON.stringify(REC({ attempts: 1 })) });
-    const env = { RUNNER_JOB_PATS: kv } as unknown as Env;
+  it("a provider failure retains the canonical claim, so a second tick cannot re-drive", async () => {
+    const kv = fakeKv({ "orphan:4111": JSON.stringify(REC({ attempts: 1 })) });
+    const env = recoveryEnv(kv);
 
     // Tick 1: the drive throws ⇒ release + leave the bumped record.
     const failDrive = vi.fn(async () => {
       throw new Error("tick1 fails");
     });
     await retryOrphanedSpawns(env, CTX, Date.now(), failDrive);
-    expect(JSON.parse(kv.store.get("orphan:ord")!).attempts).toBe(2);
-    expect(kv.store.has("spawn:ord")).toBe(false); // released for the next tick
+    expect(JSON.parse(kv.store.get("orphan:4111")!).attempts).toBe(2);
+    expect(kv.store.has("spawn:4111")).toBe(true);
 
     // Tick 2: the drive succeeds ⇒ the job is re-driven. The record survives as the
     // provisional placement (`driveSpawn` re-stamps it) rather than being deleted,
     // so a box that starts and then never claims the job is still recoverable.
-    const okDrive = vi.fn(async () => {});
+    const okDrive = vi.fn(async () => ({ resource_id: "job:octo/external-repo/4111", receipt_id: "retry-4111", provider_signature: "fixture" }));
     await retryOrphanedSpawns(env, CTX, Date.now(), okDrive);
     expect(failDrive).toHaveBeenCalledTimes(1);
-    expect(okDrive).toHaveBeenCalledTimes(1);
-    expect(kv.store.has("orphan:ord")).toBe(true);
+    expect(okDrive).not.toHaveBeenCalled();
+    expect(kv.store.has("orphan:4111")).toBe(true);
   });
 
   it("record → TTL-expire between list and get ⇒ the phantom key is a no-op (self-heal, no drive)", async () => {
@@ -792,7 +828,7 @@ describe("SJ-6 · cell 10 — retry ordering across ticks", () => {
     };
     const drive = vi.fn(async () => {});
     await expect(
-      retryOrphanedSpawns({ RUNNER_JOB_PATS: kv } as unknown as Env, CTX, Date.now(), drive),
+      retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive),
     ).resolves.toBeUndefined();
     expect(drive).not.toHaveBeenCalled();
     expect(kv.delete).not.toHaveBeenCalled(); // missing ≠ giveup: nothing to delete

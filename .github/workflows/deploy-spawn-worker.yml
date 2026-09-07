@@ -103,7 +103,7 @@ jobs:
       run:
         working-directory: deploy/cloudflare
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install deps
         run: npm ci
@@ -147,7 +147,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install deps (wrangler)
         run: npm ci
@@ -171,6 +171,12 @@ jobs:
           # the deadline, every single time.
           EXCLUDE_RUNNERS: ${{ runner.name }}
         run: bash scripts/ci/wait-for-idle-fleet.sh
+
+      - name: Guard — reject Option-C map depletion
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/ci/check-repo-tenant-pat-map.mjs deploy/cloudflare/wrangler.jsonc
 
       - name: Deploy (wrangler)
         env:
