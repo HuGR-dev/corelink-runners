@@ -1250,7 +1250,7 @@
       "decision_contract": {
         "path": "docs/plan/execution/2026-09-06-t9-w1-d2-authority-decision.md",
         "source_commit": "97d6dd33f1a8e34b78cd242f068aa5b9384d839b",
-        "integration_commit": "6489f31f1a9a9be80a05f9cc16b075e011057de9",
+        "integration_commit": "6489f319e0f068da06a04e9cdd30ddcb9c209c63",
         "disposition": "Defines the qualified provider terminal-artifact authority and D2 disposition; it does not complete T9-W1 or waive F005/F007, provisioning, migration, or live acceptance."
       }
     },
