@@ -79,7 +79,7 @@
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
         "T2-W2b": "local fail-closed preflight approved; external/live blocked by O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
         "T2-W4": "external/live blocked: T2-W2b and latest-image ship evidence absent",
-        "T2-W6": "external/live blocked: O1/T2-W2b; runbook and evidence absent"
+        "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
     }
   },
@@ -1714,15 +1714,17 @@
         "T7-W4",
         "T7-W4b"
       ],
-      "next_action": "Blocked external/live pending O1 and T2-W2b; the secret-rotation runbook and AU1.8 evidence are absent.",
-      "blockers": ["O1", "T2-W2b", "runbook absent", "AU1.8 evidence absent"],
-      "commits": [],
+      "next_action": "Local secret-rotation runbook is approved at d7c6feb. Execution remains blocked pending O1 and T2-W2b; obtain real AU1.8 evidence before any implementation or live claim.",
+      "blockers": ["O1", "T2-W2b", "AU1.8 execution evidence absent"],
+      "commits": ["d7c6febfa124de33bc2bef4b9cb7df1f41608aab"],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": [],
+      "evidence": [
+        "Local secret-rotation runbook approved at d7c6feb; it is preparation only and does not substitute for real AU1.8 execution evidence or live qualification."
+      ],
       "historical_sprint": 2
     },
     {
@@ -3087,6 +3089,23 @@
       "conclusion": "Approved local fail-closed preflight integrated. This is local preparation only: T2-W2b remains backlog/unknown and blocked by O1, O-DEVENV-PIN, O-FLEETBUSY, and deploy evidence; no implementation or live credit.",
       "evidence": [
         "Approved source commit ecbe1d439b03211893480557a7e31cf376bd5b53 cherry-picked onto f34dd580b39d73ab5ea4f4babaac6c6031762e62."
+      ]
+    },
+    {
+      "at": "2026-09-07T20:00:08+00:00",
+      "task": "T2-W6 local secret-rotation runbook integration",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/runbook/secret-rotation.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W6",
+      "role": "integrator",
+      "source_commit": "d7c6febfa124de33bc2bef4b9cb7df1f41608aab",
+      "conclusion": "Approved local secret-rotation runbook integrated. T2-W6 remains backlog/unknown pending O1, T2-W2b, real AU1.8 execution evidence, and live qualification; no implementation or live credit.",
+      "evidence": [
+        "Approved source commit 004d3725f3d16373b2ce3e258ceea2dc748ccfe3 cherry-picked onto ab52c15e7a9e4b75d936c2ea0a26942521af9bb4."
       ]
     }
   ],
