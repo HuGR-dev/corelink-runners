@@ -381,7 +381,9 @@ mod tests {
     async fn unsuspend_lifts_the_suspension() {
         let state = state_with_held_lease(Some(KEY));
         let acme = TenantId::new("acme").unwrap();
-        state.suspend_tenant(&acme);
+        state
+            .suspend_tenant_with_event(&acme, 1)
+            .expect("event suspension should persist");
         assert!(state.is_tenant_suspended(&acme));
 
         let resp = unsuspend(State(state.clone()), Path("acme".into()), hdrs(Some(KEY))).await;
@@ -418,7 +420,9 @@ mod tests {
         let acme = TenantId::new("acme").unwrap();
         let failing = Arc::new(FailingUnsuspendLedger::new());
         let state = state_with_ledger(failing.clone(), Some(KEY));
-        state.suspend_tenant(&acme);
+        state
+            .suspend_tenant_with_event(&acme, 1)
+            .expect("event suspension should persist");
         failing
             .fail_unsuspend
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -441,7 +445,9 @@ mod tests {
     async fn a_suspended_tenant_acquire_is_429() {
         let state = state_with_held_lease(Some(KEY));
         let acme = TenantId::new("acme").unwrap();
-        state.suspend_tenant(&acme);
+        state
+            .suspend_tenant_with_event(&acme, 1)
+            .expect("event suspension should persist");
         assert_acquire_blocked(state, acme).await;
     }
 

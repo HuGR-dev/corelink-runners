@@ -102,7 +102,11 @@ fn resuspend_waits_for_unsuspend_durable_write_and_keeps_suspension_cached() {
 
     let resuspend_state = Arc::clone(&state);
     let resuspend_tenant = tenant.clone();
-    let resuspend = thread::spawn(move || resuspend_state.suspend_tenant(&resuspend_tenant));
+    let resuspend = thread::spawn(move || {
+        resuspend_state
+            .suspend_tenant_with_event(&resuspend_tenant, 2)
+            .expect("event resuspension should persist")
+    });
     let lock_held = matches!(
         state.suspended_tenants.try_lock(),
         Err(std::sync::TryLockError::WouldBlock)

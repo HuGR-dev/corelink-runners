@@ -1647,29 +1647,6 @@ impl AppState {
             .cloned()
     }
 
-    /// Track-C AUP1: mark a tenant SUSPENDED (idempotent). A suspended tenant is
-    /// rejected at `acquire` (fail-closed) and its held leases are killed by the
-    /// suspend action. `true` iff the tenant was NOT already suspended (a real
-    /// state change — used to make the forensic line + the lease-kill fire once).
-    pub(crate) fn suspend_tenant(&self, tenant: &TenantId) -> bool {
-        let mut suspended = self
-            .suspended_tenants
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let changed = suspended.insert(tenant.as_str().to_string());
-        // Durable write-through (multi-instance): a suspend issued on one shard
-        // must reach EVERY shard + survive a restart. No-op on a non-pg ledger
-        // (in-memory is authoritative at N=1). A failure is logged, not fatal —
-        // this instance's cache already blocks the tenant immediately.
-        if let Err(e) = self.ledger.set_tenant_suspended(tenant.as_str(), true) {
-            eprintln!(
-                "suspend_tenant({tenant}): durable write FAILED: {e:#} \
-                 — suspension is in-memory-only on this instance until it succeeds"
-            );
-        }
-        changed
-    }
-
     /// Record a newly observed suspension and its durable Worker-delivery
     /// event. The PgLedger implementation commits both rows atomically.
     pub(crate) fn record_tenant_suspension_event(
