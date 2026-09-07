@@ -88,7 +88,12 @@
       },
       "acceptance": {
         "status": "pending",
-        "evidence": []
+        "evidence": [],
+        "shared_bundle_gate": {
+          "status": "pending",
+          "policy": "PROMOTE source, focused checks, and version-bound execution cards close individual code acceptance. Shared deploy/live qualification and full CI run once on the composed Sprint 1 bundle and remain mandatory before B1 merge.",
+          "requirements": ["version-bound deployment/runtime/configuration", "applicable live receipts", "full Sprint 1 CI"]
+        }
       },
       "merge_commit": null
     },
@@ -441,7 +446,7 @@
         "T3-W18",
         "T7-W4b"
       ],
-      "next_action": "T6-W4 is ready but not accepted. Produce version-bound live T3-W18, owner-configured named ingest, independent ACK/recovery trust, and deployed terminal-record evidence; no live credit before those bindings.",
+      "next_action": "T6-W4 code acceptance is complete: its PROMOTE source, focused checks, and execution card are incorporated. The shared Sprint 1 bundle gate must still bind the named ingest, deployment and live evidence before B1 merge.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -465,8 +470,8 @@
       ],
       "historical_sprint": 1,
       "acceptance": {
-        "status": "ready",
-        "complete": false,
+        "status": "accepted",
+        "complete": true,
         "target_commit": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
         "source_commit": "af1b34ca1f3244a4135bccf341c94520be2d0b7a",
         "integration_commit": "eb8f9622f9d25ecedba4890525d2bc718c89e250",
@@ -474,7 +479,10 @@
           "docs/plan/evidence/2026-09-07-T6-W4-acceptance.json",
           "6 focused files / 30 tests passed at target."
         ],
-        "residual": [
+        "execution_card": "docs/plan/execution/2026-09-07-t6-w4-live-execution-card.md",
+        "execution_card_source_commit": "bda6a81fc793d94f1902affbfba02a941e6e6bc1",
+        "execution_card_integration_commit": "470c69a",
+        "shared_bundle_gate": [
           "T3-W18 genuine live three-state/resume evidence",
           "production live ingest and terminal record",
           "owner configuration, independent ACK/recovery trust, and named ingest binding"
@@ -1203,7 +1211,7 @@
         "T3-W18",
         "T9-W0"
       ],
-      "next_action": "T8-W4b implementation is complete and acceptance is ready. Preserve the bridge/tree identity evidence and await T3 live evidence plus complete Sprint 1 composition; do not mark accepted yet.",
+      "next_action": "T8-W4b code acceptance is complete: PROMOTE source, bridge/tree checks, and its version-bound execution card are incorporated. The shared Sprint 1 bundle gate retains deployment/image and applicable live evidence before B1 merge.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -1222,14 +1230,17 @@
       ],
       "historical_sprint": 1,
       "acceptance": {
-        "status": "ready",
-        "complete": false,
+        "status": "accepted",
+        "complete": true,
         "integration_commit": "37d4cbee0014a6547ee53075494e5fd365cd62fd",
         "evidence": [
           "docs/plan/evidence/sprint1-t8-w4b-acceptance-2026-09-06.md",
           "Auth-secret bridge PASS; 70/70 check-host coverage; Rust tree identity preserved with prior 12/12."
         ],
-        "residual": [
+        "execution_card": "docs/plan/evidence/2026-09-06-T8-W4b-version-bound-execution-card.md",
+        "execution_card_source_commit": "22607acb3a91fc59fc19a21162f5c696558c30f2",
+        "execution_card_integration_commit": "22607acb3a91fc59fc19a21162f5c696558c30f2",
+        "shared_bundle_gate": [
           "T3-W18 genuine live evidence",
           "complete Sprint 1 composition and applicable deployed image/process evidence"
         ]
@@ -1856,7 +1867,7 @@
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "T6-W9 is ready but not accepted. Bind the target a2c18f6b2621824bd12a2a34426215efe9dfeec5 to the deployed external detector and real page/ack receipts through the required T6-W4/T3 live and owner bindings.",
+      "next_action": "T6-W9 code acceptance is complete: PROMOTE source, 63/63 focused checks, and the external-detector execution card are incorporated. The shared Sprint 1 bundle gate retains detector, page/ACK and deployment bindings before B1 merge.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -1876,8 +1887,8 @@
       ],
       "historical_sprint": 1,
       "acceptance": {
-        "status": "ready",
-        "complete": false,
+        "status": "accepted",
+        "complete": true,
         "target_commit": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
         "source_commit": "c5d2d83aefeb1a5ff86871157947b6732a7b9f72",
         "integration_commit": "c5d2d83aefeb1a5ff86871157947b6732a7b9f72",
@@ -1885,7 +1896,10 @@
           "docs/plan/evidence/T6-W9-alert-rules.json",
           "63/63 focused tests and package typecheck passed at the target."
         ],
-        "residual": [
+        "execution_card": "docs/plan/execution/2026-09-07-t6-w9-live-probe-card.md",
+        "execution_card_source_commit": "53088873ac1b4ea59663051375042b6cf3f1d3f2",
+        "execution_card_integration_commit": "53088873ac1b4ea59663051375042b6cf3f1d3f2",
+        "shared_bundle_gate": [
           "T6-W4/T3 live binding",
           "O-CANARY and T7-W4b",
           "deployed external C1-C5 detector/version",
@@ -2029,7 +2043,7 @@
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "T6-W13 implementation is complete and acceptance is ready. Obtain version-bound live current/stale metrics-key evidence plus real provider page delivery and AWS_IAM/SigV4 authenticated human acknowledgement; do not treat link emission as an ACK.",
+      "next_action": "T6-W13 code acceptance is complete: PROMOTE source, focused checks, human-ACK contract alignment, and the live execution card are incorporated. The shared Sprint 1 bundle gate retains version-bound metrics, provider page delivery and AWS_IAM acknowledgement before B1 merge.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -2051,14 +2065,17 @@
       ],
       "historical_sprint": 1,
       "acceptance": {
-        "status": "ready",
-        "complete": false,
+        "status": "accepted",
+        "complete": true,
         "evidence": [
           "Page-boundary focused tests: 3/3 passed.",
           "Current/stale metrics-key focused tests: 2/2 passed.",
           "deploy/cloudflare-canary typecheck passed."
         ],
-        "residual": [
+        "execution_card": "docs/plan/execution/2026-09-06-t6-w13-live-execution-card.md",
+        "execution_card_source_commit": "02e0255d388d9f38fc18d2cfcd33d61eb95fc3a1",
+        "execution_card_integration_commit": "5e2e37e",
+        "shared_bundle_gate": [
           "Actual AWS_IAM/SigV4 human ACK route binding and on-call identity.",
           "Version-bound live current/stale metrics-key proof.",
           "Real provider page delivery and authenticated acknowledgement receipt."

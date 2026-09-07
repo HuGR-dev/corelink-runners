@@ -81,7 +81,8 @@ Os itens abaixo são condições de passagem, não tarefas extras nem comprovant
 - [ ] Nenhum stub temporário, declaração falsa, supressão de erro ou defeito impeditivo usado para produzir verde.
 - [ ] PR do bundle tem escopo, SHAs e matriz de aceite atualizados; dependências externas concretamente verificadas.
 - [ ] Disparar CI completa e testes pesados uma vez no candidato completo; armazenar resultados por job/SHA.
-- [ ] Qualificação em produção permanece distinta do CI; provas têm runtime/configuração/versão corretos.
+- [ ] Cada WP que dependa de operação tem seu cartão de execução versionado e sua fonte PROMOTE incorporada; o cartão não duplica um probe live por WP.
+- [ ] A qualificação compartilhada de deploy/live da Sprint 1 roda uma vez no SHA do bundle, com runtime/configuração/versão corretos; ela permanece obrigatória para o merge B1.
 
 ### C6 — Tratar CI vermelha
 
@@ -94,7 +95,7 @@ Os itens abaixo são condições de passagem, não tarefas extras nem comprovant
 ### C7 — Promover e mesclar a sprint
 
 - [ ] Todos os critérios de entrega aplicáveis satisfeitos; nenhum bloqueio de segurança, integridade ou qualidade obrigatório aberto.
-- [ ] CI/checks exigidos verdes no SHA final e aceites operacionais vinculados à versão correta.
+- [ ] CI/checks exigidos verdes no SHA final e o gate compartilhado de deploy/live da Sprint 1, quando aplicável, vinculado à versão correta.
 - [ ] Diff e base do PR conferidos; ordem e compatibilidade Runner/Server demonstradas quando necessárias.
 - [ ] Executar somente o merge B1, B2 ou B3 autorizado pelo plano; confirmar SHA na main remota.
 - [ ] Registrar WPs entregues, provas e merge em A2; atualizar A6 e liberar somente então a próxima sprint.
@@ -151,6 +152,10 @@ Classificação obrigatória: **ATIVO NA SPRINT**, **PRESERVADO PARA SPRINT FUTU
 | B3 — qualificação e go-live | Sprint 3: 28 WPs das antigas Sprints 3 e 4 | implementação e aceites de ambas, gates operacionais, janela real exigida, releases/runbooks/provas, CI e terceiro merge |
 
 Cada WP aparece exatamente uma vez no inventário ao fim deste documento. Por instrução explícita do usuário, existem exatamente TRÊS sprints operacionais, serializadas: S1=B1 (12 WPs), S2=B2 (14 WPs), S3=B3 (28 WPs). A antiga divisão em quatro permanece apenas como referência histórica de origem dos critérios; não governa mais a execução. Não executar WPs da sprint seguinte antes de fechar e mesclar a atual. Cada sprint tem um único PR de bundle na pilha: S1 sobre main, S2 sobre S1, S3 sobre S2; após cada merge, reconciliar a base do sucessor com main sem alterar o escopo. Criar/publicar o sucessor quando sua sprint puder começar. Cada PR recebe CI completa e testes pesados somente quando todos os WPs de sua sprint estiverem completos e integrados. Go-live só recebe crédito com a qualificação completa.
+
+### Política de aceite operacional compartilhado da Sprint 1
+
+Um WP fecha o seu aceite de código quando a fonte PROMOTE, os checks focados e o cartão de execução versionado estão incorporados ao B1. As provas compartilhadas de deploy, live e CI completa não são repetidas por WP: rodam uma vez no candidato B1 composto e continuam obrigatórias para o merge. Os resultados desse gate vinculam runtime, configuração e versão aos cartões de T8-W4b, T6-W4, T6-W9, T6-W13 e aos demais consumidores aplicáveis. Esta regra centraliza a execução, não remove requisito live, nem concede crédito de deploy ou go-live antes do gate do bundle.
 
 ## Cinco etapas de execução
 
