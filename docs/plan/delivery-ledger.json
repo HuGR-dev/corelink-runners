@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "external/live blocked: O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
+        "T2-W2b": "local fail-closed preflight approved; external/live blocked by O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
         "T2-W4": "external/live blocked: T2-W2b and latest-image ship evidence absent",
         "T2-W6": "external/live blocked: O1/T2-W2b; runbook and evidence absent"
       }
@@ -1643,15 +1643,17 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Blocked external/live: bind O1, O-DEVENV-PIN and O-FLEETBUSY, then collect the version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json.",
+      "next_action": "Local fail-closed preflight is approved at 20d1eb5. Bind O1, O-DEVENV-PIN and O-FLEETBUSY, then collect the version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json; do not claim implementation or live completion.",
       "blockers": ["O1", "O-DEVENV-PIN", "O-FLEETBUSY", "deploy evidence absent"],
-      "commits": [],
+      "commits": ["20d1eb5d40f10ba949e16ba72a75048ae10d61b0"],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": [],
+      "evidence": [
+        "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not remove O1, O-DEVENV-PIN, O-FLEETBUSY, deploy-evidence, implementation, or live blockers."
+      ],
       "historical_sprint": 2
     },
     {
@@ -3068,6 +3070,23 @@
         "Author: ghost runtime/tests 16; durability/claim/slot/stale 54; installation 19; redrive/orphan 76; typecheck PASS.",
         "Compensation reviewer APPROVED: 16 plus 54 focused checks, typecheck PASS.",
         "Installation reviewer APPROVE_FINAL: 59 focused checks, typecheck PASS."
+      ]
+    },
+    {
+      "at": "2026-09-07T20:00:07+00:00",
+      "task": "T2-W2b local fail-closed preflight integration",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "scripts/ci/t2-w2b-preflight.sh",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commit": "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
+      "conclusion": "Approved local fail-closed preflight integrated. This is local preparation only: T2-W2b remains backlog/unknown and blocked by O1, O-DEVENV-PIN, O-FLEETBUSY, and deploy evidence; no implementation or live credit.",
+      "evidence": [
+        "Approved source commit ecbe1d439b03211893480557a7e31cf376bd5b53 cherry-picked onto f34dd580b39d73ab5ea4f4babaac6c6031762e62."
       ]
     }
   ],
