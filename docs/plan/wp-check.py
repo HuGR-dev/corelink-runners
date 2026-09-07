@@ -407,7 +407,7 @@ DAG_FILENAME = "2026-09-01-reconciled-dispatch-dag.md"
 HANDOFF_FILENAME = "2026-09-01-session-state-go-live-remediation.md"
 DAG_SCHEMA_MARKER = (
     "**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · "
-    "**Status: PROMOTED · FROZEN · NOT DISPATCHABLE · post-promotion quiet count 0**"
+    "**Status: PROMOTED · FROZEN · DISPATCHABLE · post-promotion quiet count 2**"
 )
 DAG_TABLE_HEADING = "## Canonical node table"
 DAG_BATCH_HEADING = "## Deterministic ready sets and proof"

@@ -11,9 +11,9 @@
     "b2_scope_freeze": {
       "work_packages": 14,
       "scope": ["T2-W2b", "T2-W4", "T2-W6", "T4-W1", "T4-W2", "T3-W3", "T3-W1", "T3-W2", "T8-W1", "T8-W3", "T3-W14", "T3-W9", "T8-W5", "T8-W2"],
-      "dispatchability": "blocked: canonical DAG is PROMOTED/FROZEN; post-promotion quiet count 0 means no dispatch authority",
+      "dispatchability": "enabled: canonical DAG is PROMOTED/FROZEN/DISPATCHABLE; individual rows retain their own hard predecessors and blockers",
       "promotion": {
-        "status": "PROMOTED_FROZEN_NOT_DISPATCHABLE",
+        "status": "PROMOTED_FROZEN_DISPATCHABLE",
         "pre_promotion_target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
         "valid_pre_reviews": [
           {
@@ -34,8 +34,32 @@
             "conclusion": "invalid; no quiet credit"
           }
         ],
-        "post_promotion_quiet_count": 0,
-        "next_gate": "two independent quiet reviews over byte-identical promoted bytes, then the clean post-incident baseline"
+        "post_promotion_target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+        "valid_post_reviews": [
+          {
+            "author": "b2_quiet_post_1",
+            "target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+            "conclusion": "QUIET_ENABLE_DISPATCH",
+            "credit": "1/2",
+            "evidence": "182/182 gates-selftest PASS"
+          },
+          {
+            "author": "b2_gate_adjudicator",
+            "target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+            "conclusion": "QUIET_ENABLE_DISPATCH",
+            "credit": "2/2",
+            "evidence": "wp-check and delivery-ledger PASS"
+          }
+        ],
+        "discarded_post_reviews": [
+          {
+            "author": "b2_quiet_post_2",
+            "conclusion": "HOLD; discarded with no quiet credit"
+          }
+        ],
+        "post_promotion_quiet_count": 2,
+        "clean_post_incident_baseline": "220090f8d9a0408c955d2f7a915308f6496028f8",
+        "next_gate": "dispatch only rows whose own canonical predecessors and per-WP blockers permit work"
       },
       "gate_evidence": [
         "At 265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7, root-reported focused source proof: T4-W1 19/19 plus typecheck PASS; T4-W2 11/11; T3-W3 18/18 plus typecheck PASS; T3-W1 Rust 40/40 plus Worker 41/41; T8-W1 15/15; T3-W14 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21; T8-W5 18/18; T8-W2 31/31.",
@@ -2890,6 +2914,57 @@
       "source_target": "fdf3a27fab6aa2231323ed6a95af369ae46f136a",
       "conclusion": "PROMOTED_FROZEN_NOT_DISPATCHABLE",
       "post_promotion_quiet_count": 0
+    },
+    {
+      "at": "2026-09-07T20:00:00+00:00",
+      "task": "B2 POST quiet review",
+      "owner": "b2_quiet_post_1",
+      "state": "completed",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+      "conclusion": "QUIET_ENABLE_DISPATCH",
+      "credit": "1/2",
+      "evidence": "182/182 gates-selftest PASS"
+    },
+    {
+      "at": "2026-09-07T20:00:01+00:00",
+      "task": "B2 POST gate adjudication",
+      "owner": "b2_gate_adjudicator",
+      "state": "completed",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+      "conclusion": "QUIET_ENABLE_DISPATCH",
+      "credit": "2/2",
+      "evidence": "wp-check and delivery-ledger PASS"
+    },
+    {
+      "at": "2026-09-07T20:00:02+00:00",
+      "task": "B2 POST quiet review discarded",
+      "owner": "b2_quiet_post_2",
+      "state": "completed",
+      "scope": [],
+      "target": "220090f8d9a0408c955d2f7a915308f6496028f8",
+      "conclusion": "HOLD_DISCARDED_NO_CREDIT"
+    },
+    {
+      "at": "2026-09-07T20:00:03+00:00",
+      "task": "B2 clean post-incident baseline and dispatch enablement",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/delivery-ledger.json",
+        "docs/plan/wp-check.py"
+      ],
+      "baseline": "220090f8d9a0408c955d2f7a915308f6496028f8",
+      "conclusion": "PROMOTED_FROZEN_DISPATCHABLE",
+      "post_promotion_quiet_count": 2
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
