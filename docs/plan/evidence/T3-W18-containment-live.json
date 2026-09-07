@@ -120,6 +120,8 @@
       "observed_at": "2026-09-07T01:26:00Z",
       "github": {
         "identity": "gmhelmold",
+        "credential_scopes_observed": ["admin:org", "repo", "workflow", "audit_log"],
+        "credential_scope_conclusion": "Sufficient for repository/org Actions settings and organization billing API reads; no active budget object was available for a scoped reversible update",
         "organization_id": 311862110,
         "organization_membership": "admin/active",
         "repository_permissions": "admin",
