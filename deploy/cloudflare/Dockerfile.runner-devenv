@@ -7,6 +7,9 @@
 # corelink-check-exec-server
 # Stage 2 (bin-downloader): downloads ttyd + code-server
 # Stage 3 (runtime): Ubuntu 24.04 + Chromium + Xvfb + noVNC + non-root user coder
+# Supply-chain contract: every base image is digest-pinned, every downloaded
+# release artifact is SHA-256 verified, and the final build requires OCI
+# revision/date metadata.
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1: Download and validate the verified clw binary
@@ -31,7 +34,10 @@ RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${C
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1b: Build in-container exec-server from Rust source (musl static)
 # ══════════════════════════════════════════════════════════════════════
-FROM rust:1.96-alpine AS exec-builder
+# Official Docker Hub library/rust:1.96-alpine multi-arch manifest digest,
+# resolved 2026-09-07 from registry-1.docker.io. Keep the manifest-level pin
+# so the requested target platform selects its corresponding image.
+FROM rust:1.96-alpine@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS exec-builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static git make perl
 
@@ -57,7 +63,9 @@ RUN mkdir -p /out \
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 2: Download pre-built ttyd + code-server binaries
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS bin-downloader
+# Official Docker Hub library/debian:12-slim multi-arch manifest digest,
+# resolved 2026-09-07 from registry-1.docker.io.
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS bin-downloader
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -90,13 +98,20 @@ RUN curl -fsSL -o /tmp/code-server.tar.gz \
 # ══════════════════════════════════════════════════════════════════════
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
-ARG OCI_REVISION=unknown
+ARG VCS_REF
+ARG BUILD_DATE
 ARG OCI_SOURCE=https://github.com/HuGR-Labs/corelink-runners
-ARG OCI_CREATED=unknown
 
-LABEL org.opencontainers.image.revision="$OCI_REVISION" \
+# A deployable image must carry provenance. Reject missing/default metadata so
+# local or CI builds cannot silently produce an untraceable artifact.
+RUN test -n "${VCS_REF:-}" \
+ && test "${VCS_REF}" != unknown \
+ && test -n "${BUILD_DATE:-}" \
+ && test "${BUILD_DATE}" != unknown
+
+LABEL org.opencontainers.image.revision="$VCS_REF" \
       org.opencontainers.image.source="$OCI_SOURCE" \
-      org.opencontainers.image.created="$OCI_CREATED"
+      org.opencontainers.image.created="$BUILD_DATE"
 
 ENV DEBIAN_FRONTEND=noninteractive
 

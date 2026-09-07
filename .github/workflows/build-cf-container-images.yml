@@ -1,0 +1,275 @@
+# Build + push the CoreLink CF Container images to the Cloudflare MANAGED registry
+# (ADR-0008). This is what takes local Docker OUT of the deploy loop: once these
+# images live in `registry.cloudflare.com/<ACCOUNT_ID>/...`, `deploy/cloudflare/
+# wrangler.jsonc` references them by tag/digest and a local `wrangler deploy` no
+# longer needs a Docker daemon.
+#
+# Two images are built + pushed (both are Container-DO classes in wrangler.jsonc):
+#   - RunnerContainer   (build context: deploy/runner)      -> corelink-spawn-worker-runnercontainer
+#   - CheckHostContainer(build context: deploy/check-host)  -> corelink-spawn-worker-checkhostcontainer
+#
+# NOTE: the check-host image has NEVER been pushed to the CF registry. THIS
+# workflow creates it on its first run; only after that first push can
+# wrangler.jsonc's CheckHostContainer be flipped off its Dockerfile (see the
+# comment there).
+#
+# ── SELF-HOSTED, DAEMONLESS (2026-08-17) ──────────────────────────────────────
+# This job used to run on GitHub-hosted `ubuntu-latest` because `wrangler
+# containers build` shells to `docker buildx`, which the fleet's docker-shim does
+# not support. Under the zero-hosted billing block that lane is DEAD (it fails at
+# "Set up job", so the runner image could never be rebuilt). It now runs on the
+# ephemeral `corelink` fleet, DAEMONLESS, using the proven chain:
+#   1. `docker build`  — the baked docker-shim runs nerdctl/buildkit (containerd
+#      image store). Plain `docker build` works here (proven F2 + reprobed).
+#   2. `wrangler containers push <tag>` — wrangler mints the short-lived CF
+#      registry credential and pushes via the `docker` binary (-> shim -> nerdctl
+#      push). No `docker buildx`, no Docker daemon, no hosted spend. Proven
+#      end-to-end on a live lease 2026-08-17 (a build+push of a probe image
+#      returned `Pushed image: registry.cloudflare.com/.../...`).
+# The manifest digest is parsed from wrangler's push output for an immutable X4
+# pin; resolution fails closed if the push transcript has no valid digest.
+#
+# ── WHY THERE IS NO BUSY-FLEET GATE HERE ─────────────────────────────────────
+# deploy-spawn-worker.yml refuses to run while fabric runners are executing
+# customer jobs, because `wrangler deploy` rolls the RunnerContainer class. THIS
+# workflow deliberately has no such gate: it only BUILDS and PUSHES images to the
+# registry and prints the refs. It never deploys and never edits the
+# `containers[].image` pin in wrangler.jsonc — that pin is a hand edit, and the
+# rollout happens on the subsequent `wrangler deploy` of the NEW digest (see
+# build-fabricd-image.yml's header: "a NEW digest forces the container rollout; a
+# config-only change does not"). A push on its own rolls nothing, so gating it
+# would only block image builds for no safety gain.
+#
+# ── OWNER DEPENDENCIES ────────────────────────────────────────────────────────
+#   GH SECRET `CLOUDFLARE_API_TOKEN` — a Cloudflare API token with
+#   Containers/Workers push scope for account 6a1fc1c626fc2628823e60b9db01f5cd.
+#   Wrangler reads it from the env; the job is GUARDED on it (fails fast).
+name: build-cf-container-images
+
+on:
+  # MANUAL-ONLY: a heavy image build should not fire on every merge. Dispatch it
+  # explicitly when the runner/check-host Dockerfile (or a baked pin) changes:
+  #   gh workflow run build-cf-container-images.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
+
+jobs:
+  build-and-push:
+    # Ephemeral CoreLink fleet — amd64-native (fast) + baked nerdctl/buildkit +
+    # docker-shim + Node + Rust. Zero GitHub-hosted spend.
+    runs-on: corelink
+    timeout-minutes: 120
+    steps:
+      - name: Guard — require the CLOUDFLARE_API_TOKEN secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing GH secret CLOUDFLARE_API_TOKEN — a Cloudflare API" \
+                 "token with Containers/Workers push scope for account" \
+                 "${CLOUDFLARE_ACCOUNT_ID} is required. Set it in repo Settings →" \
+                 "Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Guard — all configured container image pins are immutable
+        # A2.1 / INV-2: validate every image entry across every Wrangler
+        # config, including the currently image-free canary config. Keep this
+        # guard here until the dedicated image-pin tripwire lands; a deploy of
+        # an unpinned image must fail before any build or push starts.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          paths = (
+              Path("deploy/cloudflare/wrangler.jsonc"),
+              Path("deploy/cloudflare-fabricd/wrangler.jsonc"),
+              Path("deploy/cloudflare-canary/wrangler.jsonc"),
+          )
+          image_key = re.compile(r'^\s*"image"\s*:\s*"([^"]*)"', re.MULTILINE)
+          digest = re.compile(r'@sha256:[0-9a-f]{64}$')
+          total = 0
+
+          for path in paths:
+              if not path.is_file():
+                  raise SystemExit(f"::error::Missing Wrangler config: {path}")
+              refs = image_key.findall(path.read_text(encoding="utf-8"))
+              total += len(refs)
+              for ref in refs:
+                  if not digest.search(ref):
+                      raise SystemExit(
+                          f"::error::{path}: mutable or malformed container image pin: {ref}"
+                      )
+              print(f"{path}: checked {len(refs)} image pin(s)")
+
+          if total == 0:
+              raise SystemExit("::error::Container image scan was vacuous")
+          print(f"Checked {total} immutable container image pin(s) across 3 Wrangler configs")
+          PY
+
+      - name: Unpoison a stale docker-shim lock (warm-box bootstrap)
+        # A warm-reused RunnerContainer can carry a root-owned
+        # /tmp/corelink-docker-shim.lock from a prior job, which bricks the
+        # runner-user shim ("cannot create …: Permission denied"). The baked shim
+        # now degrades gracefully (fix/shim-lock-robust), but THIS build still runs
+        # the OLD baked shim at the sanity step below, so clear the poison first.
+        run: sudo rm -f /tmp/corelink-docker-shim.lock || true
+
+      - name: Sanity — the docker shim (nerdctl/buildkit) answers
+        run: docker version
+
+      - name: Install deps (wrangler)
+        working-directory: deploy/cloudflare
+        run: npm ci
+
+      # RunnerContainer — the image customers' `runs-on: corelink` jobs boot on.
+      - name: Build + push RunnerContainer image
+        id: runner
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-spawn-worker-runnercontainer"
+          TAG="${GITHUB_SHA}"
+          # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
+          # deploy/runner (Dockerfile + action-archive-pins.txt live there).
+          docker build -t "${IMAGE}:${TAG}" deploy/runner
+          # Push via wrangler (mints the CF registry cred; uses the docker binary).
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "Runner image pushed: ${REF}"
+
+      # CheckHostContainer — COPYs a prebuilt static musl exec-server from its
+      # context. Build it with the image's baked toolchain (musl target baked on
+      # 1.91.1), stage it, then build+push the image the same daemonless way.
+      - name: Build corelink-check-exec-server (musl) into the check-host context
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup target add x86_64-unknown-linux-musl || true
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools || \
+            echo "::warning::musl-tools install failed (may already be present); continuing"
+          cargo build -p corelink-check-exec-server --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/corelink-check-exec-server \
+             deploy/check-host/corelink-check-exec-server
+          ls -la deploy/check-host/corelink-check-exec-server
+
+      - name: Build + push CheckHostContainer image
+        id: checkhost
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-spawn-worker-checkhostcontainer"
+          TAG="${GITHUB_SHA}"
+          docker build -t "${IMAGE}:${TAG}" deploy/check-host
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "Check-host image pushed: ${REF}"
+
+      # RunnerDevEnvDO — the persistent customer development environment.
+      # Its Dockerfile copies the Rust workspace plus two runtime files. The
+      # repository-wide .dockerignore excludes deploy/, so assemble a minimal
+      # context explicitly instead of accidentally sending the whole checkout.
+      - name: Build + push RunnerDevEnvDO image
+        id: devenv
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-runner-devenv"
+          TAG="${GITHUB_SHA}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DOCKERFILE="${GITHUB_WORKSPACE}/deploy/cloudflare/Dockerfile.runner-devenv"
+          CONTEXT="$(mktemp -d)"
+          cleanup() {
+            rm -rf -- "${CONTEXT}"
+          }
+          trap cleanup EXIT
+
+          # Keep this context to the files named by the Dockerfile. In
+          # particular, deploy/ is intentionally ignored by the root
+          # .dockerignore, so entrypoint.sh and supervisord.conf must be copied
+          # to the context root under the names used by COPY below.
+          cp Cargo.toml Cargo.lock "${CONTEXT}/"
+          cp -R crates "${CONTEXT}/"
+          cp deploy/cloudflare/entrypoint.sh deploy/cloudflare/supervisord.conf "${CONTEXT}/"
+
+          # Static focal guard: every source of every non-stage COPY must be
+          # present in the exact context that will be handed to Docker. This
+          # fails before any build/push if the Dockerfile or context drifts.
+          python3 - "${DOCKERFILE}" "${CONTEXT}" <<'PY'
+          import shlex
+          import sys
+          from pathlib import Path
+
+          dockerfile = Path(sys.argv[1])
+          context = Path(sys.argv[2])
+          missing = []
+          checked = []
+          for number, raw in enumerate(dockerfile.read_text(encoding="utf-8").splitlines(), 1):
+              if not raw.lstrip().upper().startswith("COPY "):
+                  continue
+              tokens = shlex.split(raw, comments=True)
+              if any(token.startswith("--from=") for token in tokens[1:]):
+                  continue
+              sources = tokens[1:-1]
+              for source in sources:
+                  path = context / source
+                  checked.append(source)
+                  if not path.exists():
+                      missing.append(f"line {number}: {source}")
+          if missing:
+              raise SystemExit("Missing RunnerDevEnv COPY source(s): " + ", ".join(missing))
+          if not checked:
+              raise SystemExit("RunnerDevEnv COPY source scan was vacuous")
+          print(f"RunnerDevEnv context guard: checked {len(checked)} COPY source(s)")
+          PY
+
+          docker build \
+            --file "${DOCKERFILE}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            --build-arg "OCI_SOURCE=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "${IMAGE}:${TAG}" \
+            "${CONTEXT}"
+          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
+          REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "RunnerDevEnvDO image pushed: ${REF}"
+
+      - name: Summary — pushed image refs to pin in wrangler.jsonc
+        run: |
+          {
+            echo "### CoreLink CF Container images pushed (self-hosted, daemonless)"
+            echo ""
+            echo "Pin these in \`deploy/cloudflare/wrangler.jsonc\` (containers[].image):"
+            echo ""
+            echo "**RunnerContainer**"
+            echo '```'
+            echo "${{ steps.runner.outputs.ref }}"
+            echo '```'
+            echo ""
+            echo "**CheckHostContainer** (first push — then flip wrangler.jsonc off the Dockerfile)"
+            echo '```'
+            echo "${{ steps.checkhost.outputs.ref }}"
+            echo '```'
+            echo ""
+            echo "**RunnerDevEnvDO** (hand-pin this digest before restoring its Wrangler container entry)"
+            echo '```'
+            echo "${{ steps.devenv.outputs.ref }}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
