@@ -2008,7 +2008,7 @@
         "docs/plan/execution/2026-09-06-sprint1-source-closure.json",
         "PROMOTE 539facc replayed as 1932a81. Re-review reports 17 focused checks plus typecheck; conflict-composition rerun passed page-ack 4/4 plus typecheck. Miniflare -88 is retained as infrastructure signal only.",
         "Human ACK binding supplement supersedes the incomplete T6-W13 page ACK assumptions; prior local readiness evidence is retained but not sufficient until contract alignment is fixed.",
-        "Final PROMOTE T6-W13 composition: c9d3882 replayed as b2bbd0b and 2a10073 replayed as e0966a1; focused page-boundary 3/3, current/stale 2/2, and typecheck passed. Human AWS_IAM live binding remains residual."
+        "Final PROMOTE T6-W13 composition: c9d3882 replayed as b2bbd0b9c08a2f2fc1c16e0a9fa32a869805fc44 and e0966a1e82d51e2e8ed77735ded86797a962a6c2; focused page-boundary 3/3, current/stale 2/2, and typecheck passed. Human AWS_IAM live binding remains residual."
       ],
       "historical_sprint": 1,
       "acceptance": {
@@ -2030,8 +2030,8 @@
         "contract": "docs/plan/execution/2026-09-06-t6-w15-human-ack-binding-supplement.md",
         "resolution": "The canary emits a validated human page link/correlation after delivery and never auto-ACKs; incomplete page configuration remains fail-closed. The human AWS_IAM route and operator acknowledgement remain live acceptance residuals.",
         "integration_commits": [
-          "b2bbd0b87fd5b6f81f0b44b142c1221af9122f62",
-          "e0966a1af3d60bbe44ec9013e26b2014395e28d4"
+          "b2bbd0b9c08a2f2fc1c16e0a9fa32a869805fc44",
+          "e0966a1e82d51e2e8ed77735ded86797a962a6c2"
         ]
       }
     },
