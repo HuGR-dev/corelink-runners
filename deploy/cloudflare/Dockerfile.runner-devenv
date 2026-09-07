@@ -3,20 +3,30 @@
 #
 # CoreLink Runner DevEnv Container (Multi-Stage Build)
 #
-# Stage 1 (clw-builder): builds clw + corelink-check-exec-server
+# Stage 1 (clw-builder): validates the pinned clw artifact + builds the
+# corelink-check-exec-server
 # Stage 2 (bin-downloader): downloads ttyd + code-server
 # Stage 3 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
 
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 1: Download verified clw binary (from corelink-workspaces releases)
+# STAGE 1: Download and validate the verified clw binary
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS clw-download
+# clw v0.1.5 is a dynamically-linked GNU/Linux binary with a GLIBC_2.39
+# floor.  Debian 12 ships glibc 2.36, so using Debian for this stage would
+# only postpone the failure until runtime.  Keep the builder and runtime on
+# the same pinned glibc floor.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
 ARG CLW_VERSION=0.1.5
 ARG CLW_SHA256=95a05db35e4e5be50a104acb7c30466ff7ec5f7a154403943aca24279b5d8bf2
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends curl ca-certificates binutils \
+ && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" -o /clw \
  && echo "${CLW_SHA256}  /clw" | sha256sum -c - \
- && chmod +x /clw
+ && chmod +x /clw \
+ && test "$(readelf --version-info /clw | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)" = GLIBC_2.39 \
+ && /clw --version
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1b: Build in-container exec-server from Rust source (musl static)
@@ -71,13 +81,22 @@ ARG CODE_SERVER_SHA256=7b60ae570dc8a4a5e56ddfdd73a7cce40b2b155b390dffa6897f815e9
 RUN curl -fsSL -o /tmp/code-server.tar.gz \
     "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
  && echo "${CODE_SERVER_SHA256}  /tmp/code-server.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/code-server.tar.gz -C /out --strip-components=1 \
+ && mkdir -p /out/code-server \
+ && tar -xzf /tmp/code-server.tar.gz -C /out/code-server --strip-components=1 \
  && rm -f /tmp/code-server.tar.gz
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 3: Final Runtime Image
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+
+ARG OCI_REVISION=unknown
+ARG OCI_SOURCE=https://github.com/HuGR-Labs/corelink-runners
+ARG OCI_CREATED=unknown
+
+LABEL org.opencontainers.image.revision="$OCI_REVISION" \
+      org.opencontainers.image.source="$OCI_SOURCE" \
+      org.opencontainers.image.created="$OCI_CREATED"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -108,7 +127,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 \
     libpango-1.0-0 \
     libcairo2 \
-    libasound2 \
+    libasound2t64 \
     libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -120,13 +139,15 @@ RUN groupadd --system --gid 1000 coder \
 COPY --from=clw-download /clw /usr/local/bin/clw
 COPY --from=exec-builder /out/exec-server /usr/local/bin/exec-server
 COPY --from=bin-downloader /out/ttyd /usr/local/bin/ttyd
-COPY --from=bin-downloader /out/bin/code-server /usr/local/bin/code-server
+COPY --from=bin-downloader /out/code-server /opt/code-server
 
 # Entrypoint & Supervisord configs
 COPY entrypoint.sh /entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-RUN chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd /usr/local/bin/code-server \
+RUN ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
+ && chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd \
+              /opt/code-server/bin/code-server /opt/code-server/lib/node \
  && chmod 0755 /entrypoint.sh
 
 # Data & Runtime directories
