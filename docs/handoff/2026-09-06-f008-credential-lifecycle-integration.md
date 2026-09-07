@@ -355,16 +355,30 @@ deliveries or change the T6-W15 DoD.
 `docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
 canonical closeout plan, byte-identical to
 `$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
-`bf6839181736a67fc3c086a10456cffcd169ffce5712caadc502cc845d7cfbe1`.
-It fixes exactly three Runner merges: B1 has 12 Sprint 1 WPs, B2 has 14 Sprint
-2 WPs, and B3 has 28 Sprint 3/4 WPs. It supersedes prior closeout variants.
+`35aa85e3902a3d5c5ae42add58422e606f91b55f7b592f400efb475b83807f72`.
+It fixes exactly three serialized operational Runner sprints and merges: S1/B1
+has 12 WPs, S2/B2 has 14, and S3/B3 has 28. Historical Sprint 3/4 membership
+is retained in the ledger only to trace the criteria inherited by S3/B3; it
+does not create a fourth operational sprint.
+
+Only the active operational sprint may execute. S2 starts after B1 merges and
+S3 starts after B2 merges. Full CI and heavy tests wait for every WP in the
+active sprint to be complete and composed in its stacked bundle PR. Any CI
+repair is grouped by root cause and disjoint scope, then checked again on its
+new SHA. The ledger checker enforces the three scopes, serial predecessors, and
+the preserved historical membership.
 
 The plan's mandatory method governs entry, review, correction, and exit for
 each WP: the same executor receives partial-review follow-up; a second
 submission rejected by review goes to root for causal diagnosis before another
 attempt; lack of progress requires a checkpoint within 60 minutes; and no WP
-is abandoned or moved to a new plan after compaction. These rules preserve the
-original DoD and forbid new policy or test suppression.
+is abandoned or moved to a new plan after compaction. Every fix records the
+causal mechanism, affected branches, state consequences, minimal complete
+repair, proportionate prevention, and evidence. Reviews are bounded to a
+specific SHA, objective, scope, risks, criteria, evidence, and a consolidated
+PROMOTE/CORRECT/INCONCLUSIVE outcome; re-review covers the delta and relevant
+regressions. These rules preserve the original DoD and forbid test suppression,
+unrelated refactors, and hypothetical architecture.
 
 For T6-W15 base acceptance, trusted time/TSA, WORM, three-account independence,
 crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17

@@ -9,7 +9,7 @@ Este é o plano operacional que o orquestrador deve seguir, por determinação e
 - Exatamente TRÊS merges de bundles de PR na main de corelink-runners. Não mesclar individualmente a antiga pilha #548–#558. A coordenação necessária com corelink-server não será escondida: mudanças pareadas têm suas próprias evidências e ordem de deployment, registradas nos bundles consumidores.
 - Um executor Luna responsável por cada WP até seu aceite. Revisores e integrador são apoios. O mesmo executor recebe todas as correções; retorno completed de uma tarefa não encerra o WP.
 - Root decide arquitetura, contratos, prioridade e solução dos bloqueios; acompanha o fechamento. Agentes executam código e revisão. Terra apenas nos pontos justificados, atualmente revisão crítica e integração global.
-- Até 15 agentes simultâneos. Operação normal admite até 12 executores, um revisor e um integrador; root coordena. Não abrir subtarefas com donos substitutos nem ocupar vagas artificialmente. Um agente não executa dois WPs ao mesmo tempo. Com a contenção atual, no máximo dois jobs pesados de testes simultâneos.
+- Até 15 agentes simultâneos. Operação normal admite até 12 executores, um revisor e um integrador; root coordena. Não abrir subtarefas com donos substitutos nem ocupar vagas artificialmente. Um agente não executa dois WPs ao mesmo tempo. Com a contenção atual, testes pesados ficam proibidos durante implementação; no gate final da sprint, no máximo dois jobs pesados locais simultâneos por causa da contenção observada. Preferir a capacidade apropriada do CI do PR, sem interferir em jobs de outros projetos.
 - Reutilizar código, commits, revisões e testes válidos. Nenhuma reimplementação para reorganizar a campanha. Nenhum corte de critérios, waiver implícito, número de testes usado como entrega, produção fictícia ou janela temporal acelerada artificialmente.
 
 ## Os três bundles e seus marcos
@@ -18,16 +18,16 @@ Este é o plano operacional que o orquestrador deve seguir, por determinação e
 |---|---|---|
 | B1 — base operacional | 12 WPs remanescentes da Sprint 1 | 12 implementações completas, composição/revisão, CI da Sprint 1, aceites pertencentes aos WPs, merge confirmado na main |
 | B2 — execução e credenciais | 14 WPs da Sprint 2 | composição compatível com B1 e Server, critérios de código e aceites aplicáveis da Sprint 2, CI e segundo merge |
-| B3 — qualificação e go-live | 28 WPs das Sprints 3 e 4 | implementação e aceites de ambas, gates operacionais, janela real exigida, releases/runbooks/provas, CI e terceiro merge |
+| B3 — qualificação e go-live | Sprint 3: 28 WPs das antigas Sprints 3 e 4 | implementação e aceites de ambas, gates operacionais, janela real exigida, releases/runbooks/provas, CI e terceiro merge |
 
-Cada WP aparece exatamente uma vez no inventário ao fim deste documento. As quatro sprints originais continuam delimitando critérios e CI; a nova organização agrupa sua entrega em três merges. Planejar CI e merges sem criar dependência circular entre evidências posteriores e a base que as habilita. Go-live só recebe crédito com a qualificação completa.
+Cada WP aparece exatamente uma vez no inventário ao fim deste documento. Por instrução explícita do usuário, existem exatamente TRÊS sprints operacionais, serializadas: S1=B1 (12 WPs), S2=B2 (14 WPs), S3=B3 (28 WPs). A antiga divisão em quatro permanece apenas como referência histórica de origem dos critérios; não governa mais a execução. Não executar WPs da sprint seguinte antes de fechar e mesclar a atual. Cada sprint tem um único PR de bundle na pilha: S1 sobre main, S2 sobre S1, S3 sobre S2; após cada merge, reconciliar a base do sucessor com main sem alterar o escopo. Criar/publicar o sucessor quando sua sprint puder começar. Cada PR recebe CI completa e testes pesados somente quando todos os WPs de sua sprint estiverem completos e integrados. Go-live só recebe crédito com a qualificação completa.
 
 ## Cinco etapas de execução
 
 1. **[EM ANDAMENTO] Consolidar a base e preparar B1.** Integrador reconcilia a pilha existente com os commits aprovados e constrói um candidato B1 limpo, sem importar trabalho parcial de B2/B3. Root vincula cada WP a executor, revisão, fonte e falta original. Saída: inventário único e diff B1 rastreável; preservar todos os worktrees/evidências úteis.
 2. **[EM ANDAMENTO] Encerrar B1 e fazer o merge 1.** Prioridade de implementação: T6-W15 e T9-W1, os dois parciais da Sprint 1. Os outros dez já têm implementação registrada como completa e seguem para suas pendências de aceite, sem reescrita. Assim que as 12 implementações estiverem compostas, executar CI completa da sprint. Cumprir os aceites aplicáveis, resolver falhas com os mesmos executores e confirmar o merge B1 na main.
-3. **[FILA] Encerrar B2 e fazer o merge 2.** Preservar as seis implementações completas da Sprint 2; concluir seus três parciais e cinco ainda sem implementação comprovada. Consumidores podem ser implementados antecipadamente quando existir contrato congelado e ausência de conflito de escrita; produção depende das capacidades reais. Aceitar B2 no SHA composto, com compatibilidade Runner/Server e ordem de deployment demonstradas.
-4. **[FILA] Encerrar B3 e fazer o merge 3.** Concluir os 28 WPs das Sprints 3/4, incluindo fornecedor/inventário, monitor final, recuperação durável, canary/provas, onboarding, integrações e releases. Construir o candidato completo necessário à qualificação antes de iniciar a janela imutável. Usar o período obrigatório de observação para tarefas compatíveis que não alterem a identidade observada. Não prometer sete dias antes de existir um início válido e selado.
+3. **[FILA] Encerrar B2 e fazer o merge 2.** Preservar as seis implementações completas da Sprint 2; concluir seus três parciais e cinco ainda sem implementação comprovada. Dentro da Sprint 2 ativa, consumidores podem ser implementados em paralelo quando existir contrato congelado e ausência de conflito de escrita; produção depende das capacidades reais. Nenhuma execução antecipada de WPs da Sprint 2 durante a Sprint 1. Aceitar B2 no SHA composto, com compatibilidade Runner/Server e ordem de deployment demonstradas.
+4. **[FILA] Encerrar B3 e fazer o merge 3.** Concluir os 28 WPs da nova Sprint 3 (origem histórica: antigas Sprints 3/4), incluindo fornecedor/inventário, monitor final, recuperação durável, canary/provas, onboarding, integrações e releases. Construir o candidato completo necessário à qualificação antes de iniciar a janela imutável. Usar o período obrigatório de observação para tarefas compatíveis que não alterem a identidade observada. Não prometer sete dias antes de existir um início válido e selado.
 5. **[PENDENTE DOS TRÊS MERGES] Conferir entrega integral.** Root confere os 54 WPs remanescentes contra os critérios originais, os três SHAs de merge, artefatos/deployments e evidências. Integrador confirma main, compatibilidade dos repositórios, documentação operacional e limpeza segura. Backlog zero somente quando nenhuma obrigação permanecer escondida em prepared, partial, PR auxiliar ou worktree.
 
 ## T6-W15: titularidade e lista finita de fechamento
@@ -49,7 +49,7 @@ Root é responsável por resolver a decisão de arquitetura/capacidade que imped
 1. Executor entrega SHA completo, paths próprios e evidência contra cada critério do WP.
 2. Revisor independente aprova o SHA exato ou devolve uma lista única de defeitos reproduzíveis contra o contrato congelado. Root resolve ambiguidades; não aceitar critérios novos a cada rodada.
 3. Integrador incorpora imediatamente código aprovado quando suas dependências permitem, com verificação de alterações e testes afetados. Isso é integração, não merge em main nem entrega.
-4. Candidato do bundle contém apenas seu escopo e prerequisites aprovados. CI completa roda com a implementação da sprint composta, conforme regra existente. No B3, validar os escopos das duas sprints no candidato pertinente.
+4. Candidato do bundle contém apenas seu escopo e prerequisites aprovados. CI completa e testes pesados rodam apenas com todos os WPs da sprint ativa completos e integrados em seu único stacked PR. Em S3/B3 há uma única sprint operacional com os 28 WPs e todos os critérios herdados.
 5. PR do bundle descreve o problema resolvido, a composição final, cada WP, validação, aceites e limitações reais. Mudança de head/base exige conferir o novo diff e checks aplicáveis, sem reutilizar cegamente aprovação antiga.
 6. Após todos os gates correspondentes, fazer exatamente o merge B1, B2 ou B3. Confirmar SHA remoto na main e atualizar ledger. Nenhum merge individual de WP ou quarto merge de ajuste planejado.
 
@@ -97,7 +97,64 @@ BLOQUEADO é uma condição explícita, não um estado terminal conveniente: reg
 - Defeito real novo continua sendo corrigido, mesmo descoberto tarde. O método limita retrabalho evitável, não a descoberta de problemas. Qualquer nova obrigação de aceite exige referência ao contrato original ou decisão explícita; não enfraquecer teste para produzir verde.
 - Root faz julgamento e diagnóstico de processo/contrato; inspeção e correção de código continuam com agentes. Usar Terra em um diagnóstico delimitado quando a dificuldade justificar, sem converter todo o trabalho para modelos mais caros.
 
-### 4. Concorrência e checkpoint operacional
+### 4. Revisões, auditorias e cold reviews: contratos finitos e promoção objetiva
+
+É proibido despachar uma revisão com uma instrução aberta como "audita aí". Root fornece um mandato de revisão antes do início; isso também vale para segurança e auditoria independente. Nenhuma revisão pode redefinir silenciosamente o aceite de um WP.
+
+**Mandato obrigatório:** identificador/WP e estágio de promoção; objetivo ou pergunta a responder; baseline e SHA alvo completos; paths/contratos e dependências em escopo; independência necessária; riscos concretos a cobrir; lista de critérios e evidências exigidas; comandos permitidos; exclusões; prazo de checkpoint; formato de retorno e condição de encerramento. Faltando entrada, solicitar a informação exata a root e realizar apenas a parte independente já delimitada. Não presumir sucesso nem sair à procura de uma nova tarefa.
+
+**Começo:** confirmar SHA/base, diff e contexto corretos; conferir os critérios e as evidências existentes. Registrar defeitos anteriores relevantes sem atribuí-los ao patch incorretamente. Não executar testes repetidos só para produzir um log próprio quando o mandato permite verificar evidência válida.
+
+**Meio:** inspecionar todos os critérios do mandato e as ramificações pertinentes do mecanismo alterado. Executar apenas verificações necessárias para responder às perguntas definidas. Qualidade e segurança incluem, quando aplicáveis ao escopo: comportamento correto e limites; autorização/isolamento de identidade; proteção de secrets; validação de entradas; integridade e atomicidade do estado; idempotência, concorrência e recuperação; tratamento de falhas; compatibilidade; dependências e privilégios; simplicidade/manutenibilidade. Justificar critérios não aplicáveis; não transformar essa lista em auditoria irrestrita de todo o sistema.
+
+**Fim:** entregar UM parecer consolidado contendo cobertura de cada critério (PASS/FAIL/NÃO VERIFICADO), evidências, achados e decisão sobre a promoção solicitada. A revisão termina quando respondeu ao mandato; não fica aberta para procurar indefinidamente mais coisas. Revisão encerrada com reprovação não significa produto aprovado: o fix continua com o executor e recebe verificação delimitada.
+
+| Decisão | Critério objetivo | Próxima ação |
+|---|---|---|
+| PROMOVER | Todos os critérios obrigatórios do estágio satisfeitos no SHA alvo; evidência suficiente; nenhum defeito impeditivo conhecido | Integrar ou avançar para o próximo gate definido; não inferir autorização de deploy/merge a partir de revisão de fonte |
+| CORRIGIR | Um ou mais critérios obrigatórios falham, com regra violada e evidência concreta | Devolver uma lista consolidada ao mesmo executor; depois verificar fixes e regressões pertinentes |
+| INCONCLUSIVO | Evidência/ambiente/entrada indispensável indisponível; a hipótese ainda não permite conclusão | Informar exatamente a lacuna, seu dono e a menor ação para resolvê-la; não promover nem condenar código por adivinhação |
+
+**Achados objetivos:** cada achado contém ID estável, critério/contrato violado, localização, evidência (reprodução ou caminho demonstrável), impacto, gravidade fundamentada e condição verificável de resolução. Classificar como introduzido, preexistente ou hipótese ainda não comprovada. Gravidade de segurança é derivada de exposição e impacto; não exigir exploração em produção para reconhecer uma falha demonstrável. Hipótese plausível grave demanda a verificação delimitada necessária, não uma promoção por falta de exploração.
+
+**O que impede promoção:** violação de segurança, integridade, autorização, comportamento, recuperação ou compatibilidade exigidos; critério de qualidade obrigatório descumprido; ou prova indispensável ausente. Nenhum achado impeditivo pode ser ignorado para cumprir prazo. Requisitos de qualidade devem estar no contrato/regras aplicáveis e ser verificáveis. Preferência pessoal, generalização para futuro hipotético ou refatoração opcional não são defeitos e não bloqueiam. Um defeito real de menor gravidade permanece explicitamente tratado; não usar "não bloqueante" para esconder dívida sem autorização.
+
+**Revisão da correção:** manter os mesmos IDs e critérios. Avaliar o diff desde o SHA revisado, a resolução dos achados e os efeitos relacionados. Reabrir um item só com evidência de que a condição de resolução falhou ou houve regressão. Uma falha nova legítima recebe ID, justificativa de escopo e a análise de causa/ramificações/consequências/prevenção. Não repetir a auditoria inteira nem impor uma nova preferência em cada rodada. A segunda submissão reprovada aciona o diagnóstico de processo/contrato de root já definido neste plano.
+
+**Cold review:** independência significa autor diferente, contexto de aceite suficiente e conclusão própria sobre o alvo exato. Não significa desconhecer o contrato, ignorar provas já válidas ou refazer tudo. Um cold reviewer que alterar produto passa a autor da alteração e outro revisor independente verifica esse ajuste.
+
+**Promoções separadas:** aprovação de fonte habilita integração; composição válida habilita o gate completo da sprint; CI e aceites aplicáveis aprovados no SHA correto habilitam um dos três merges. Mudança de SHA requer análise do delta e revalidação proporcional, não invalidação automática de toda evidência nem reutilização cega da aprovação. CI completa/testes pesados permanecem exclusivamente no fechamento da sprint ativa. Falhas são agrupadas e corrigidas em paralelo pelo protocolo já definido.
+
+**Controle de duração:** o mandato define um checkpoint proporcional ao escopo, nunca superior aos 60 minutos sem avanço verificável definidos neste plano. No checkpoint, o revisor apresenta cobertura concluída, achados e falta concreta; root reduz ambiguidades ou resolve bloqueios. Tempo esgotado não transforma FAIL/INCONCLUSIVO em PASS. A revisão tem fim pela cobertura objetiva do mandato, não por cansaço do agente ou do usuário.
+
+### 5. Todo fix: causa raiz, ramificações, consequências e prevenção proporcional
+
+Esta regra vale para TODO defeito, desde a primeira correção. O diagnóstico adicional após uma segunda reprovação continua obrigatório, mas não substitui a análise inicial. A profundidade da análise é proporcional ao impacto; um bug simples pode ser documentado em um parágrafo, sem processo artificial.
+
+O executor entrega junto ao fix um registro objetivo com seis elementos:
+
+1. **Causa raiz:** mecanismo que produziu o defeito e por que foi introduzido ou escapou dos controles existentes. Distinguir fato demonstrado de hipótese; não parar na mensagem de erro ou no sintoma.
+2. **Ramificações:** outros caminhos, consumidores, contratos ou estados que compartilham a mesma causa. Busca limitada ao mecanismo afetado; quando houver ocorrências, corrigir todas dentro dos escopos autorizados e coordenar os owners envolvidos. Não transformar a busca em auditoria genérica do repositório.
+3. **Consequências:** efeitos já produzidos ou possíveis sobre estado persistido, dados, segurança, compatibilidade, ações externas e operação. Se houver dados/efeitos a reconciliar, uma alteração de código sozinha não encerra o defeito. Registrar a remediação concreta, sua evidência e qualquer autorização específica necessária antes de ação irreversível.
+4. **Correção completa e mínima:** eliminar a causa e as manifestações relacionadas, preservando contratos e tratando estados afetados. Não remendar o sintoma, não ocultar a falha e não misturar refatoração sem relação.
+5. **Prevenção avaliada:** indicar se precisa de teste de regressão significativo, validação de fronteira, ajuste de contrato/configuração ou controle operacional. Escolher o menor mecanismo eficaz. Se os controles existentes já bastam, explicar brevemente por que nenhuma nova medida é necessária; não criar uma ferramenta ou abstração apenas para mostrar prevenção.
+6. **Evidência:** reprodução inicial, critério de correção e verificação dos caminhos afetados. Durante implementação/retrabalho usar verificações pequenas necessárias; testes pesados permanecem exclusivos do gate de entrega da sprint.
+
+O revisor confere esses seis pontos, a cobertura das ramificações pertinentes e o tamanho da solução. Um fix com causa eliminada mas consequências obrigatórias pendentes continua aberto. Um fix correto sem necessidade de arquitetura adicional não pode ser bloqueado por preferência de estilo ou generalização hipotética.
+
+**Controle de overengineering:** antes de propor camada, framework, serviço, dependência, API genérica ou migração nova, o executor precisa demonstrar qual requisito atual não pode ser atendido com os mecanismos existentes. Root decide a necessidade. Preferir alterações locais, APIs existentes e testes nos limites do comportamento. Não construir para necessidades futuras imaginadas, não duplicar lógica já qualificada e não ampliar o escopo apenas para tornar a solução mais elegante. Ser objetivo não autoriza omitir segurança, recuperação, compatibilidade ou consequências exigidas pelo problema real.
+
+### 6. Falhas de CI: reparo paralelo por causa e escopo
+
+- CI vermelha mantém a mesma sprint ativa. Não iniciar a seguinte, abrir uma quarta sprint ou marcar entrega parcial.
+- Root e o integrador consolidam as N falhas por causa provável, WP e arquivos afetados. Falhas em cascata da mesma causa são um único pacote de correção; não criar N agentes para N mensagens de erro.
+- Cada pacote recebe causa/reprodução, paths exclusivos, critério de correção, executor e revisor. O executor original do WP mantém sua responsabilidade. Apoios de correção só entram com escopos de escrita disjuntos; não transferem titularidade do WP.
+- Pacotes independentes executam em paralelo e de forma assíncrona até o teto de 15 agentes. Pacotes que alteram o mesmo arquivo são unidos ou serializados. Root resolve contratos antes de liberar alterações concorrentes.
+- Durante o reparo, executar apenas reproduções pequenas e verificações focadas necessárias. Não relançar a suíte pesada inteira por agente ou por commit.
+- Integrador incorpora correções aprovadas assim que prontas. Após a composição das correções necessárias, rodar os jobs falhos/afetados e os checks exigidos no novo SHA do PR. Gate completo é repetido quando exigido pelo CI ou pelo impacto da alteração, não por reflexo.
+- Zero falhas impeditivas, evidências de aceite válidas e checks exigidos aprovados no SHA final autorizam o merge da sprint. Só depois liberar a próxima.
+
+### 7. Concorrência e checkpoint operacional
 
 - Escrita disjunta é condição para paralelizar. Um owner de integração por repositório; shared files entram em fila. Nunca dois agentes consertando o mesmo arquivo simultaneamente.
 - Priorizar encerrar revisões/correções e incorporar trabalho pronto antes de ocupar uma vaga com um novo WP. Isso não obriga trabalho independente a esperar um bloqueio externo sem relação.
@@ -110,7 +167,7 @@ BLOQUEADO é uma condição explícita, não um estado terminal conveniente: reg
 - Consultar este plano e o ledger antes de delegar, integrar, alterar estado ou iniciar merge. Atualizar o registro a cada mudança verificável.
 - Se o agente terminou mas o WP não: encaminhar revisão, integração ou correção ao mesmo executor imediatamente. Se completed exige mais trabalho autorizado, usar followup_task; send_message não retoma agente encerrado.
 - Não abrir outra frente para contornar a pendência. Root decide e registra uma solução ou um bloqueio factual com responsável e próxima ação.
-- Reaproveitar uma vaga somente depois do fechamento da atribuição e da passagem clara de responsabilidade. Um WP bloqueado mantém seu dono; não fica abandonado em uma lista.
+- Reaproveitar uma vaga somente para outro escopo elegível da MESMA sprint ativa, depois do fechamento da atribuição e da passagem clara de responsabilidade. Um WP bloqueado mantém seu dono; não fica abandonado em uma lista.
 - Status ao usuário: WPs que mudaram de estágio, merges efetivos, faltas e decisões. Não apresentar commits/testes como progresso de entrega, nem ocultar implementação concluída atrás de um contador global estático.
 - Qualquer desvio deste plano exige registro no próprio plano: motivo, evidência, impacto nos três bundles e ação corretiva. Alteração de escopo/aceite exige a autorização correspondente. Não criar outro plano paralelo ou recomeçar a campanha após compaction.
 
@@ -120,7 +177,7 @@ Estado inicial é extraído do ledger; complete abaixo significa implementação
 
 ### B1 — 12 WPs
 
-| WP | Sprint original | Implementação inicial |
+| WP | Sprint histórica de origem | Implementação inicial |
 |---|---:|---|
 | T4-W4 | 1 | complete |
 | T3-W10 | 1 | complete |
@@ -137,7 +194,7 @@ Estado inicial é extraído do ledger; complete abaixo significa implementação
 
 ### B2 — 14 WPs
 
-| WP | Sprint original | Implementação inicial |
+| WP | Sprint histórica de origem | Implementação inicial |
 |---|---:|---|
 | T4-W1 | 2 | complete |
 | T4-W2 | 2 | complete |
@@ -156,7 +213,7 @@ Estado inicial é extraído do ledger; complete abaixo significa implementação
 
 ### B3 — 28 WPs
 
-| WP | Sprint original | Implementação inicial |
+| WP | Sprint histórica de origem | Implementação inicial |
 |---|---:|---|
 | T5-W1 | 4 | unknown |
 | T5-W2 | 4 | unknown |
@@ -187,3 +244,7 @@ Estado inicial é extraído do ledger; complete abaixo significa implementação
 | T6-W12 | 3 | unknown |
 | T6-W14 | 4 | unknown |
 
+
+## Adendo vinculante — serialização de sprints e paralelismo interno
+
+A instrução mais recente do usuário prevalece sobre qualquer formulação anterior: três sprints operacionais, exatamente uma ativa por vez; dentro dela, máximo paralelismo útil e assíncrono com rigor, até 15 agentes, um dono por WP e escritas sem conflito. Nenhum teste pesado durante implementação. Testes focados pequenos continuam permitidos quando necessários. Cada sprint fecha sua implementação em um stacked PR, recebe CI/testes pesados, tem as falhas reparadas em paralelo por escopo e só termina após aceite e merge. A próxima sprint não inicia antes disso. Trabalho já existente de sprints posteriores fica preservado, sem retomada de execução antecipada.
