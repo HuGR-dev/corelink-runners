@@ -901,7 +901,7 @@ pub fn autoscaler_config_from_env(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use anyhow::Result;
+    use anyhow::{Result, bail};
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
@@ -939,6 +939,31 @@ mod tests {
             self.provisioned.lock().unwrap().push(lease_id.to_string());
             Ok(())
         }
+
+        fn provider_ref(&self, lease_id: &str) -> Result<String> {
+            crate::provider_binding::ProviderBinding {
+                lease_id: lease_id.to_string(),
+                backend: crate::provider_binding::ProviderBackend::NoBox,
+                route: crate::provider_binding::ProviderRoute::NoBox,
+                handle: None,
+                domain: "local:nobox".to_string(),
+            }
+            .encode()
+        }
+
+        fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+            let binding = crate::provider_binding::ProviderBinding::decode(provider_ref)?;
+            if binding.lease_id != lease_id
+                || binding.backend != crate::provider_binding::ProviderBackend::NoBox
+                || binding.route != crate::provider_binding::ProviderRoute::NoBox
+                || binding.domain != "local:nobox"
+                || binding.handle.is_some()
+            {
+                bail!("invalid recording provisioner provider binding")
+            }
+            Ok(())
+        }
+
         fn teardown(&self, lease_id: &str) -> Result<()> {
             self.torn_down.lock().unwrap().push(lease_id.to_string());
             Ok(())

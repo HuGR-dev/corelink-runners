@@ -1449,7 +1449,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use anyhow::Result;
+    use anyhow::{Result, bail};
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use corelink_fabric::{
@@ -1479,6 +1479,33 @@ mod tests {
     /// Content-pinned image accepted by `ContainerSpec::from_lease`.
     const PINNED: &str =
         "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+    /// Return the same durable no-box descriptor used by the production test
+    /// provisioner. Successful test doubles still have to satisfy the real
+    /// provision -> provider_ref -> Pending->Held contract.
+    fn recording_provider_ref(lease_id: &str) -> Result<String> {
+        crate::provider_binding::ProviderBinding {
+            lease_id: lease_id.to_string(),
+            backend: crate::provider_binding::ProviderBackend::NoBox,
+            route: crate::provider_binding::ProviderRoute::NoBox,
+            handle: None,
+            domain: "local:nobox".to_string(),
+        }
+        .encode()
+    }
+
+    fn restore_recording_provider_ref(lease_id: &str, provider_ref: &str) -> Result<()> {
+        let binding = crate::provider_binding::ProviderBinding::decode(provider_ref)?;
+        if binding.lease_id != lease_id
+            || binding.backend != crate::provider_binding::ProviderBackend::NoBox
+            || binding.route != crate::provider_binding::ProviderRoute::NoBox
+            || binding.domain != "local:nobox"
+            || binding.handle.is_some()
+        {
+            bail!("invalid recording provisioner provider binding")
+        }
+        Ok(())
+    }
 
     /// True iff `id` has the WP-FIX-LEASE-ID-UUID mint shape: `lease-<uuid-v4>`
     /// (the `lease-` prefix + a 36-char hyphenated UUID). Used by the tests that
@@ -1578,6 +1605,14 @@ mod tests {
             Ok(())
         }
 
+        fn provider_ref(&self, lease_id: &str) -> Result<String> {
+            recording_provider_ref(lease_id)
+        }
+
+        fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+            restore_recording_provider_ref(lease_id, provider_ref)
+        }
+
         fn teardown(&self, _lease_id: &str) -> Result<()> {
             Ok(())
         }
@@ -1598,6 +1633,14 @@ mod tests {
             let is_pending = matches!(rec.map(|r| r.state), Some(LeaseState::Pending));
             *self.observed_pending.lock().unwrap() = is_pending;
             Ok(())
+        }
+
+        fn provider_ref(&self, lease_id: &str) -> Result<String> {
+            recording_provider_ref(lease_id)
+        }
+
+        fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+            restore_recording_provider_ref(lease_id, provider_ref)
         }
 
         fn teardown(&self, _lease_id: &str) -> Result<()> {
@@ -2135,6 +2178,15 @@ mod tests {
             fn provision(&self, _lease_id: &str, _spec: &ContainerSpec) -> Result<()> {
                 Ok(())
             }
+
+            fn provider_ref(&self, lease_id: &str) -> Result<String> {
+                recording_provider_ref(lease_id)
+            }
+
+            fn restore_provider_ref(&self, lease_id: &str, provider_ref: &str) -> Result<()> {
+                restore_recording_provider_ref(lease_id, provider_ref)
+            }
+
             fn teardown(&self, lease_id: &str) -> Result<()> {
                 self.0.lock().unwrap().push(lease_id.to_string());
                 Ok(())
