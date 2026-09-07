@@ -120,7 +120,6 @@ import {
   type OrphanRecord,
 } from "./lib";
 import { flushBillingUsageBacklog } from "./billing_recovery";
-import { spendAdmissionBudget, type AdmissionBudgetVerdict } from "./lib/admission_budget";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
   dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
@@ -451,6 +450,8 @@ export interface SpawnClaimRecord {
   phase: "claimed" | "active";
   claimedAtMs: number;
   expiresAtMs: number;
+  /** The provider identity that GitHub echoes on a completion webhook. */
+  providerIdentity?: string;
 }
 
 export type SpawnClaimResult =
@@ -534,7 +535,11 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       const key = `spawn-claim:${jobId}`;
       const current = await storage.get<SpawnClaimRecord>(key);
       if (current && current.expiresAtMs > now) return { status: "held", generation: current.generation };
-      const generation = (current?.generation ?? 0) + 1;
+      // Keep a monotonic counter after release. Reusing generation 1 after a
+      // completed/failed attempt makes audits ambiguous and weakens the exact
+      // attempt proof carried into completion.
+      const generationKey = `spawn-claim-generation:${jobId}`;
+      const generation = ((await storage.get<number>(generationKey)) ?? 0) + 1;
       const record: SpawnClaimRecord = {
         jobId,
         generation,
@@ -544,6 +549,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
         expiresAtMs: now + ttlMs,
       };
       await storage.put(key, record);
+      await storage.put(generationKey, generation);
       return { status: "acquired", generation, ownerToken: record.ownerToken };
     });
   }
@@ -568,6 +574,39 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       // here would permit a duplicate spawn during a long running job.
       await storage.put(key, { ...current, phase: "active", expiresAtMs: Number.MAX_SAFE_INTEGER });
       return true;
+    });
+  }
+
+  /**
+   * Bind the provider identity after dispatch. Completion supplies this value,
+   * so it can release only the exact attempt that actually owned that runner.
+   */
+  async bindSpawnClaimProvider(jobId: string, generation: number, ownerToken: string, providerIdentity: string): Promise<boolean> {
+    if (!providerIdentity) return false;
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken || current.phase !== "active") return false;
+      if (current.providerIdentity && current.providerIdentity !== providerIdentity) return false;
+      await storage.put(key, { ...current, providerIdentity });
+      return true;
+    });
+  }
+
+  /**
+   * Completion deliberately accepts a provider identity, never an unqualified
+   * job id. A stale completion for runner A therefore cannot release a later
+   * generation B for the same job.
+   */
+  async releaseSpawnClaimForCompletion(jobId: string, providerIdentity: string): Promise<SpawnClaimRelease> {
+    if (!providerIdentity) return "stale";
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current) return "missing";
+      if (current.phase !== "active" || current.providerIdentity !== providerIdentity) return "stale";
+      await storage.delete(key);
+      return "released";
     });
   }
 
@@ -707,11 +746,6 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
-  }
-
-  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
-    const nowMs = Date.now();
-    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
   }
 
   async getEvent(eventId: string): Promise<ContainmentEvent | null> {
@@ -2316,6 +2350,12 @@ async function spawnRunner(
   const { handle, provisioned, attempt } = await startWithRetry<MintedJit>(
     async (attempt) => {
       const minted = await mintJit(env, repo, labels, installationId);
+      // Persist the exact GitHub runner identity before its container can start.
+      // Completion later presents this same runner_name; without this fence a
+      // fast completion could race a post-start binding and leave capacity held.
+      if (opts.bindProviderIdentity && !(await opts.bindProviderIdentity(minted.runnerName))) {
+        throw new Error("spawn claim provider binding unavailable");
+      }
       await bumpMetrics(env, "jit_minted");
       // Recorded so a box killed by the WRONG completion can be traced back to the
       // job it was minted for — the permutation is invisible without this line.
@@ -2477,9 +2517,9 @@ async function teardownCompletedRunner(
   // `jhandle:<jobId>` records the box we STARTED for this job's webhook, which
   // under GitHub's label-match assignment is frequently a DIFFERENT box that is
   // still busy; destroying it is what killed live jobs on 2026-08-02. The jobId
-  // lookup survives only as a fallback for a completion with no runner_name
-  // (a job cancelled before it was ever assigned to a runner) and for records
-  // written before this change shipped.
+  // lookup survives only for a completion with no runner_name (a job cancelled
+  // before assignment). Once GitHub supplied a runner identity, falling back to
+  // a job pointer can destroy a replacement box for the same job.
   let handle: string | null = null;
   let resolvedBy: "runner_name" | "job_id" = "runner_name";
   try {
@@ -2488,7 +2528,7 @@ async function teardownCompletedRunner(
       // that change shipped, a bare handle string) — `parseRunnerBinding` reads both.
       handle = parseRunnerBinding(await env.RUNNER_JOB_PATS.get(runnerHandleKey(runnerName)))?.h ?? null;
     }
-    if (!handle) {
+    if (!runnerName) {
       resolvedBy = "job_id";
       // `jhandle:` was never given a record shape; it still holds a bare handle.
       handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
@@ -2519,27 +2559,31 @@ async function teardownCompletedRunner(
     logEvent("error", "teardown_confirmation_failed", { jobId, error: (e as Error).message });
     return false;
   }
-  // Drop BOTH bindings for this box. The runner-name key is the one that was
-  // just consumed; the jobId key is dropped too so the stale (possibly
-  // wrong-box) pointer can never be followed by a redelivered completion.
+  // With a runner name, remove only that exact runner binding. A job pointer can
+  // already belong to a replacement attempt and must remain untouched.
   if (runnerName) {
     await env.RUNNER_JOB_PATS.delete(runnerHandleKey(runnerName)).catch(() => {
       /* best-effort: the key TTL-expires */
     });
+  } else {
+    await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
+      /* best-effort: the key TTL-expires */
+    });
   }
-  await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
-    /* best-effort: the key TTL-expires */
-  });
   return true;
 }
 
 async function teardownObligationPresent(env: Env, jobId: string, runnerName?: string): Promise<boolean | null> {
   if (!env.RUNNER_JOB_PATS) return false;
   try {
-    const keys = [jobHandleKey(jobId)];
-    if (runnerName) keys.push(runnerHandleKey(runnerName));
-    for (const key of keys) if (await env.RUNNER_JOB_PATS.get(key)) return true;
-    return false;
+    if (runnerName) {
+      // Absence is not proof that a completion may release this job's current
+      // slot: the exact runner binding could have been lost while a replacement
+      // still owns the job pointer. Retain capacity until the exact completion
+      // path confirms teardown and claim identity.
+      return true;
+    }
+    return Boolean(await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId)));
   } catch {
     return null;
   }
@@ -2797,6 +2841,7 @@ function spawnClaimCallbacks(env: Env, jobId: string): {
   claim: () => Promise<boolean>;
   release: () => Promise<void>;
   active: () => Promise<boolean>;
+  bindProvider: (providerIdentity: string) => Promise<boolean>;
 } {
   let lease: SpawnClaimLease | null = null;
   return {
@@ -2811,6 +2856,11 @@ function spawnClaimCallbacks(env: Env, jobId: string): {
     active: async () => {
       if (!lease || !env.CONCURRENCY_SLOTS) return false;
       try { return await concurrencySlots(env).markSpawnClaimActive(jobId, lease.generation, lease.ownerToken); }
+      catch { return false; }
+    },
+    bindProvider: async (providerIdentity: string) => {
+      if (!lease || !env.CONCURRENCY_SLOTS) return false;
+      try { return await concurrencySlots(env).bindSpawnClaimProvider(jobId, lease.generation, lease.ownerToken, providerIdentity); }
       catch { return false; }
     },
   };
@@ -2919,8 +2969,8 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
 //   • cold (no derived tenant): key = `repo:<repo>`, perKeyCap = COLD_REPO_CAP —
 //     the old KV path skipped cold spawns entirely (unlimited runners); they are
 //     now capped per-repo AND under the same global FLEET cap.
-// FAIL-OPEN ONLY on a THROWN DO/infra error (never block a legit job on an infra
-// hiccup); a clean `{admitted:false}` is a REAL at-capacity refusal and is honored.
+// The slot authority is mandatory. Both a clean cap refusal and an authority
+// failure stop the attempt before mint or provider dispatch.
 export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
@@ -2943,20 +2993,8 @@ export async function acquireConcurrencySlot(
       preparationId,
     );
   } catch (e) {
-    // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
-    // at-capacity decision above is NOT an error and is honored as a real refusal.
-    //
-    // The budget is authoritative: an absent, unreadable, or failed ContainmentDO
-    // transaction refuses rather than bypassing the bound.
-    let verdict: { admitted: boolean; reason?: string };
-    try {
-      verdict = env.CONTAINMENT
-        ? await containmentAuthority(env).spendAdmissionBudget()
-        : { admitted: false, reason: "slot_failopen_budget_unreadable" };
-    } catch {
-      verdict = { admitted: false, reason: "slot_failopen_budget_unreadable" };
-    }
-    logEvent("error", "concurrency_slot_acquire_error_failopen", {
+    const verdict = { admitted: false, reason: "slot_authority_unavailable" };
+    logEvent("error", "concurrency_slot_acquire_error_refused", {
       jobId,
       key,
       error: (e as Error).message,
@@ -4540,7 +4578,10 @@ async function driveSpawnGuarded(
   if (!(await spawnClaim.claim())) return;
   try {
     if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-    await driveSpawn(env, opts);
+    const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider });
+    if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) {
+      throw new Error("spawn claim provider binding unavailable");
+    }
   } catch (e) {
     await spawnClaim.release();
     // A ceiling REFUSAL still needs the dead-letter (that is the whole point —
@@ -4578,6 +4619,8 @@ type ContainmentDriveOpts = {
   // Supplied by runCanonicalEffect only after it has durably bound the provider
   // identity. This is local route evidence, never a caller-provided protocol field.
   effect_binding?: ContainmentEffectBinding;
+  /** Internal attempt callback; persisted before the runner container starts. */
+  bindProviderIdentity?: (providerIdentity: string) => Promise<boolean>;
 };
 function isContainmentDrive(opts: ContainmentDriveOpts): opts is ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string; effect_binding: ContainmentEffectBinding } {
   return typeof opts.effect_id === "string"
@@ -4768,8 +4811,9 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         drive: async driveOpts => {
           const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
-          if (!dependencies.claimSpawn && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-          return drive(env, typed, prepared);
+          const receipt = await drive(env, { ...typed, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+          if (!dependencies.claimSpawn && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+          return receipt;
         },
         beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
@@ -4817,8 +4861,9 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       beforeDrive: spawnClaim.active,
       drive: async opts => {
         await bindContainmentSpawnClaim(env, opts);
-        if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-        return driveSpawn(env, opts, prepared);
+        const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+        if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+        return receipt;
       },
     });
     await authority.normalIntakeSettle(event.event_id, event.body_sha256,
@@ -5310,20 +5355,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           jobId,
           evt.workflow_job?.runner_name ?? undefined,
         );
-        if (tornDown || teardownPending === false) await releaseConcurrencySlot(env, jobId);
-        else if (teardownPending === true || teardownPending === null) {
-          logEvent("error", "concurrency_slot_release_deferred", { jobId });
-        }
+        let exactClaimReleased = !evt.workflow_job?.runner_name;
         if (tornDown || teardownPending === false) {
           try {
-            const marker = env.RUNNER_JOB_PATS ? await env.RUNNER_JOB_PATS.get(`spawn:${jobId}`) : null;
-            const parsed = marker ? JSON.parse(marker) as { generation?: number; owner_token?: string } : null;
-            if (parsed?.generation && parsed.owner_token) {
-              await releaseSpawnClaimAtomic(env, jobId, { generation: parsed.generation, ownerToken: parsed.owner_token });
+            const providerIdentity = evt.workflow_job?.runner_name;
+            if (providerIdentity && env.CONCURRENCY_SLOTS) {
+              const released = await concurrencySlots(env).releaseSpawnClaimForCompletion(jobId, providerIdentity);
+              // `spawn:` remains a migration/evidence projection only. Its value
+              // is never read to decide completion ownership.
+              exactClaimReleased = released === "released";
+              if (exactClaimReleased && env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(`spawn:${jobId}`);
             }
           } catch (e) {
             logEvent("error", "spawn_claim_release_deferred", { jobId, error: (e as Error).message });
           }
+        }
+        if ((tornDown || teardownPending === false) && exactClaimReleased) await releaseConcurrencySlot(env, jobId);
+        else if (teardownPending === true || teardownPending === null || !exactClaimReleased) {
+          logEvent("error", "concurrency_slot_release_deferred", { jobId });
         }
         // Exact PAT leases are closed by the durable revocation authority above.
         // Also clean the historical job-scoped stash during migration.
@@ -5945,8 +5994,9 @@ export async function redriveOrphanedJobs(
             beforeDrive: async () => useInjectedClaim ? true : spawnClaim.active(),
             drive: async driveOpts => {
               await bindContainmentSpawnClaim(env, driveOpts);
-              if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-              return drive(env, driveOpts, prepared);
+              const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+              if (!useInjectedClaim && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+              return receipt;
             },
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
@@ -5981,7 +6031,7 @@ export async function redriveOrphanedJobs(
         ctx.waitUntil((async () => {
           try {
             if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
+            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, bindProviderIdentity: spawnClaim.bindProvider });
           } catch (e) {
             if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
             else await spawnClaim.release();
@@ -6021,7 +6071,7 @@ export async function retryOrphanedSpawns(
   now: number,
   drive: (
     env: Env,
-    opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: "installation-only" },
+    opts: ContainmentDriveOpts,
     prepared?: ContainerEnvResult,
   ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
@@ -6240,8 +6290,9 @@ export async function retryOrphanedSpawns(
         beforeDrive: spawnClaim.active,
         drive: async driveOpts => {
           await bindContainmentSpawnClaim(env, driveOpts);
-          if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-          return drive(env, driveOpts, prepared);
+          const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+          if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+          return receipt;
         },
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
@@ -6262,13 +6313,15 @@ export async function retryOrphanedSpawns(
     if (!(await spawnClaim.claim())) continue;
     try {
       if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-      await drive(env, {
+      const receipt = await drive(env, {
         jobId,
         repo: bumped.repo,
         installationId: bumped.installationId,
         labels: bumped.labels,
         ...(reservation ? { credential_source: "installation-only" as const } : {}),
+        bindProviderIdentity: spawnClaim.bindProvider,
       });
+      if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
       // Re-driven ⇒ do NOT delete the record here.
       //
       // This used to delete it, which was correct only while "drive returned" meant
