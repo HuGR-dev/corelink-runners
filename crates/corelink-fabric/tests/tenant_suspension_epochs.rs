@@ -1,11 +1,38 @@
 //! F008 producer checks against a real disposable PostgreSQL database.
+//!
+//! The ordinary workspace suite has no database dependency, so these tests
+//! return successfully when no URL is configured. The dedicated PostgreSQL
+//! lane sets `CORELINK_PG_CI_REQUIRED=1`; in that mode a missing URL (or a
+//! malformed arming value) fails closed before any test can be skipped.
 
 use corelink_fabric::{LeaseLedger, PgLedger, PgTlsMode, TenantSuspensionEvent};
 use tokio_postgres::NoTls;
 
-fn url() -> anyhow::Result<String> {
-    std::env::var("TEST_DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("TEST_DATABASE_URL is required; tests cannot run"))
+fn url() -> anyhow::Result<Option<String>> {
+    let required = match std::env::var("CORELINK_PG_CI_REQUIRED") {
+        Ok(value) => {
+            anyhow::ensure!(
+                value == "1",
+                "CORELINK_PG_CI_REQUIRED must be the exact arming value 1"
+            );
+            true
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("CORELINK_PG_CI_REQUIRED must be valid UTF-8")
+        }
+    };
+
+    match std::env::var("TEST_DATABASE_URL") {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) if required => {
+            anyhow::bail!("TEST_DATABASE_URL is required when CORELINK_PG_CI_REQUIRED=1")
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("TEST_DATABASE_URL must be valid UTF-8")
+        }
+    }
 }
 
 fn tenant(label: &str) -> String {
@@ -28,14 +55,16 @@ fn event(tenant_id: &str, id: &str, clock: u64) -> TenantSuspensionEvent {
     }
 }
 
-async fn open() -> anyhow::Result<(PgLedger, tokio_postgres::Client)> {
-    let database_url = url()?;
+async fn open() -> anyhow::Result<Option<(PgLedger, tokio_postgres::Client)>> {
+    let Some(database_url) = url()? else {
+        return Ok(None);
+    };
     let ledger = PgLedger::connect(&database_url, 4, PgTlsMode::Disable).await?;
     let (db, connection) = tokio_postgres::connect(&database_url, NoTls).await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    Ok((ledger, db))
+    Ok(Some((ledger, db)))
 }
 
 #[test]
@@ -44,7 +73,9 @@ fn repeat_restart_unsuspend_resuspend_same_clock_gets_new_epoch() -> anyhow::Res
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let (ledger, db) = open().await?;
+        let Some((ledger, db)) = open().await? else {
+            return Ok(());
+        };
         let tenant_id = tenant("cycle");
         ledger.record_tenant_suspension(event(&tenant_id, "admin-a", 7_000))?;
         ledger.record_tenant_suspension(event(&tenant_id, "admin-b", 7_000))?;
@@ -56,7 +87,9 @@ fn repeat_restart_unsuspend_resuspend_same_clock_gets_new_epoch() -> anyhow::Res
             .await?;
         let first: String = first_row.get(0);
         drop(ledger);
-        let (ledger, db) = open().await?;
+        let Some((ledger, db)) = open().await? else {
+            return Ok(());
+        };
         ledger.set_tenant_suspended(&tenant_id, false)?;
         ledger.record_tenant_suspension(event(&tenant_id, "admin-c", 7_000))?;
         let second: String = db
@@ -85,7 +118,9 @@ fn legacy_pointer_repairs_and_corrupt_pointer_rolls_back() -> anyhow::Result<()>
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let (ledger, db) = open().await?;
+        let Some((ledger, db)) = open().await? else {
+            return Ok(());
+        };
         let legacy = tenant("legacy");
         db.execute("INSERT INTO fabric_suspended_tenants (tenant_id, suspension_event_id) VALUES ($1, NULL)", &[&legacy]).await?;
         ledger.record_tenant_suspension(event(&legacy, "legacy-admin", 8_000))?;
