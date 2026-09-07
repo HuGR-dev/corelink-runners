@@ -72,8 +72,8 @@
         "T3-W1": "source_done and predecessor-ready (81 focused checks); global dispatch gate still blocks action",
         "T3-W2": "source_done; F007 is resolved by the authoritative fenced ContainmentDO redrive and three lifecycle permutations. T3-W16 remains Sprint 3 preventive hardening, not a B2 predecessor; live qualification is not claimed",
         "T8-W1": "source_done and predecessor-composed (15/15); global sprint/live qualification remains",
-        "T8-W3": "partial; real remaining work is atomic claim plus required-mint proof",
-        "T3-W14": "source_done; RetryEpochAuthority and focused tests are in baseline (21/21), pending predecessor composition",
+        "T8-W3": "source_done; atomic claim and required-mint source acceptance are complete. O-MINTKEY and the required live artifact remain external blockers; no live PASS is claimed",
+        "T3-W14": "source_done and predecessor-composed; RetryEpochAuthority focused proof is 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21, with no live credit",
         "T3-W9": "backlog; real remaining work is spawn durability and O-APP",
         "T8-W5": "source_done (18/18); blocked by T3-W9, F006/F008 and live qualification",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
@@ -85,8 +85,8 @@
   },
   "item_count_summary": {
     "historical_recorded_delivered": 16,
-    "nonhistorical_implementation_complete": 21,
-    "partial": 2,
+    "nonhistorical_implementation_complete": 22,
+    "partial": 1,
     "unknown_backlog": 31,
     "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
   },
@@ -1073,7 +1073,7 @@
       "id": "T8-W3",
       "sprint": 2,
       "state": "prepared",
-      "implementation": "partial",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "T8-W1",
@@ -1081,18 +1081,26 @@
         "T6-W9",
         "T7-W4b"
       ],
-      "next_action": "Root local A3.17/A3.18 evidence exists, but the remaining real work is atomic claim behavior and required-mint proof; then complete prerequisite composition and version-bound worker10of10. No fabric readiness credit.",
-      "blockers": ["T8-W1", "O-MINTKEY", "atomic claim gap", "required-mint proof gap"],
+      "next_action": "Source acceptance is complete for atomic claim behavior and required-mint handling. Obtain the O-MINTKEY external prerequisite and required live artifact before any fabric/live qualification; no PASS is recorded here.",
+      "blockers": ["O-MINTKEY", "required-mint live artifact"],
       "commits": [
-        "d278569cb5a9b29803588c61058b0110d17e3c33"
+        "d278569cb5a9b29803588c61058b0110d17e3c33",
+        "7477ed9fd67e0fa2562b3d8cb6b77b23ebe497bd",
+        "29b831d0a8373254ed992421e8f295ba508a0403"
       ],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "29b831d0a8373254ed992421e8f295ba508a0403",
+        "evidence": [
+          "Concurrency reviewer APPROVE at 29b831d: 239/239 focused checks plus typecheck PASS.",
+          "A3.17 reviewer APPROVE: 40/40 focused checks plus typecheck PASS. Both are source acceptance only."
+        ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json",
+        "Author acceptance at 29b831d: 239/239 focused checks plus typecheck PASS.",
+        "Reviewer APPROVE concurrency: 239/239 focused checks plus typecheck PASS; reviewer APPROVE A3.17: 40/40 focused checks plus typecheck PASS.",
+        "deploy/cloudflare/test/spawn-claim-atomic.test.ts"
       ],
       "historical_sprint": 2
     },
@@ -1105,13 +1113,15 @@
       "dependencies": [
         "T8-W3"
       ],
-      "next_action": "RetryEpochAuthority, client wiring and focused retry-epoch tests are present at the B2 baseline (source 28683b347c119b90fed8da4c40e770853786c43d); focused source proof is 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21. Pending predecessor composition; no delivery credit.",
+      "next_action": "RetryEpochAuthority, client wiring and focused retry-epoch tests are source accepted: 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21. Preserve prepared state pending global/live qualification; no delivery credit.",
       "blockers": [],
       "commits": ["28683b347c119b90fed8da4c40e770853786c43d"],
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "28683b347c119b90fed8da4c40e770853786c43d",
+        "evidence": [
+          "Focused source proof 21/21 mapped AU3.19/AU4.14/AU3.20/AU3.21; predecessor T8-W3 is source-complete. No live qualification is claimed."
+        ]
       },
       "evidence": ["deploy/cloudflare/src/lib/retry_epoch_authority.ts", "deploy/cloudflare/src/lib/retry_epoch_client.ts", "deploy/cloudflare/test/retry-epoch.test.ts", "deploy/cloudflare/test/retry-epoch-integration.test.ts"],
       "historical_sprint": 2
@@ -2992,6 +3002,30 @@
         "Author: 43/43 focused lifecycle checks plus typecheck PASS.",
         "Independent reviewer APPROVE: 155/155 focused checks plus tsc PASS.",
         "T8-W1 focused source proof: 15/15 PASS at 265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7."
+      ]
+    },
+    {
+      "at": "2026-09-07T20:00:05+00:00",
+      "task": "T8-W3 source acceptance and T3-W14 predecessor composition",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "deploy/cloudflare/src/containment_effect_route.ts",
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/test/spawn-claim-atomic.test.ts",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T8-W3",
+      "role": "integrator",
+      "source_commits": [
+        "7477ed9fd67e0fa2562b3d8cb6b77b23ebe497bd",
+        "29b831d0a8373254ed992421e8f295ba508a0403"
+      ],
+      "conclusion": "T8-W3 implementation complete and review approved; T3-W14 source/review approved after predecessor composition. O-MINTKEY and required live artifact remain external blockers, and neither row claims live qualification.",
+      "evidence": [
+        "T8-W3 author: 239/239 focused checks plus typecheck PASS.",
+        "T8-W3 concurrency reviewer APPROVE: 239/239 focused checks plus typecheck PASS; A3.17 reviewer APPROVE: 40/40 focused checks plus typecheck PASS.",
+        "T3-W14: 21/21 focused checks mapped AU3.19/AU4.14/AU3.20/AU3.21."
       ]
     }
   ],
