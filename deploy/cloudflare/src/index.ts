@@ -461,6 +461,28 @@ export type SpawnClaimResult =
 
 export type SpawnClaimRelease = "released" | "stale" | "missing";
 
+/**
+ * Durable post-start ownership.  This lives beside the generation claim rather
+ * than in KV: KV is a projection with a TTL and is therefore never evidence
+ * that a provider start may be repeated or that a slot may be released.
+ */
+export interface ActiveSpawnAttempt {
+  schemaVersion: 1;
+  jobId: string;
+  generation: number;
+  ownerToken: string;
+  handle: string;
+  runnerName: string;
+  runnerId?: number;
+  repo: string;
+  installationId: string;
+  jitAttempt: number;
+  preparationId?: string;
+  createdAtMs: number;
+  /** Written before start; retained until exact teardown is confirmed. */
+  teardownIntent: true;
+}
+
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
 // One instance per lease_id (= GH jobId). The autoscaler stashes the per-job CAS
 // PAT here and injects only a CLW_CRED_TICKET into the untrusted container; clw
@@ -593,6 +615,60 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     });
   }
 
+  private attemptKey(jobId: string): string { return `spawn-active-attempt:v1:${jobId}`; }
+
+  /**
+   * Commit the exact handle, JIT runner identity and cleanup intent before the
+   * provider start RPC.  A second delivery can only see this durable record and
+   * cannot mint another JIT/slot/start after KV has expired.
+   */
+  async persistActiveAttempt(
+    jobId: string, handle: string, runnerName: string, runnerId: number | undefined,
+    jitAttempt: number, repo: string, installationId: string, preparationId?: string,
+  ): Promise<boolean> {
+    if (!jobId || !handle || !runnerName || !Number.isSafeInteger(jitAttempt) || jitAttempt < 1) return false;
+    return this.spawnClaimTx(async storage => {
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      if (!claim || claim.phase !== "active" || claim.providerIdentity !== runnerName) return false;
+      const key = this.attemptKey(jobId);
+      const prior = await storage.get<ActiveSpawnAttempt>(key);
+      if (prior) {
+        return prior.generation === claim.generation && prior.ownerToken === claim.ownerToken
+          && prior.handle === handle && prior.runnerName === runnerName && prior.jitAttempt === jitAttempt;
+      }
+      await storage.put(key, {
+        schemaVersion: 1, jobId, generation: claim.generation, ownerToken: claim.ownerToken,
+        handle, runnerName, ...(typeof runnerId === "number" ? { runnerId } : {}), jitAttempt,
+        repo, installationId, ...(preparationId ? { preparationId } : {}), createdAtMs: Date.now(), teardownIntent: true,
+      } satisfies ActiveSpawnAttempt);
+      return true;
+    });
+  }
+
+  async readActiveAttempt(jobId: string): Promise<ActiveSpawnAttempt | null> {
+    return (await this.ctx.storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) ?? null;
+  }
+
+  async pendingActiveAttempts(limit = 25): Promise<ActiveSpawnAttempt[]> {
+    const page = await this.ctx.storage.list<ActiveSpawnAttempt>({ prefix: "spawn-active-attempt:v1:", limit });
+    return [...page.values()];
+  }
+
+  /** Terminalize only the generation that owns this exact provider handle. */
+  async confirmAttemptTeardown(jobId: string, generation: number, ownerToken: string, handle: string): Promise<ActiveSpawnAttempt | null> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return null;
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      // A replacement generation is never harmed by a stale cleanup callback.
+      if (claim && (claim.generation !== generation || claim.ownerToken !== ownerToken)) return null;
+      await storage.delete(key);
+      if (claim) await storage.delete(`spawn-claim:${jobId}`);
+      return attempt;
+    });
+  }
+
   /**
    * Completion deliberately accepts a provider identity, never an unqualified
    * job id. A stale completion for runner A therefore cannot release a later
@@ -605,6 +681,13 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       const current = await storage.get<SpawnClaimRecord>(key);
       if (!current) return "missing";
       if (current.phase !== "active" || current.providerIdentity !== providerIdentity) return "stale";
+      const attempt = await storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId));
+      // The completion caller reaches this only after exact-handle teardown has
+      // been confirmed.  Require the durable start identity too, then retire the
+      // terminal tombstone and claim together.  A mismatched completion cannot
+      // remove a replacement attempt.
+      if (attempt && (attempt.generation !== current.generation || attempt.ownerToken !== current.ownerToken || attempt.runnerName !== providerIdentity)) return "stale";
+      if (attempt) await storage.delete(this.attemptKey(jobId));
       await storage.delete(key);
       return "released";
     });
@@ -616,6 +699,10 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       const current = await storage.get<SpawnClaimRecord>(key);
       if (!current) return "missing";
       if (current.generation !== generation || current.ownerToken !== ownerToken) return "stale";
+      // An active provider attempt is released only by confirmAttemptTeardown.
+      // This permits pre-start preparation failures to release normally while
+      // making a post-start projection failure durable and retryable.
+      if (await storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) return "stale";
       await storage.delete(key);
       return "released";
     });
@@ -746,6 +833,14 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
+  }
+
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict"> {
+    return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
+  }
+
+  async installationTombstoned(installationId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).installationTombstoned(installationId);
   }
 
   async getEvent(eventId: string): Promise<ContainmentEvent | null> {
@@ -1766,6 +1861,11 @@ function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
   return env.CONTAINMENT.get(env.CONTAINMENT.idFromName("global"));
 }
 
+async function installationIsTombstoned(env: Env, installationId: string): Promise<boolean> {
+  if (!installationId || !env.CONTAINMENT) return false;
+  return containmentAuthority(env).installationTombstoned(installationId);
+}
+
 // T4-W2 consumes T4-W1's immutable ContainmentDO attribution authority. The
 // cast keeps this commit compatible with the pre-W1 local class; the ordered
 // W1 integration supplies the RPC method and its exact validation.
@@ -2347,7 +2447,7 @@ async function spawnRunner(
   opts: ContainmentDriveOpts,
 ): Promise<{ handle: string; runnerName: string; attempt: number }> {
   const { repo, installationId, labels } = opts;
-  const { handle, provisioned, attempt } = await startWithRetry<MintedJit>(
+  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number }>(
     async (attempt) => {
       const minted = await mintJit(env, repo, labels, installationId);
       // Persist the exact GitHub runner identity before its container can start.
@@ -2365,21 +2465,29 @@ async function spawnRunner(
         runnerName: minted.runnerName,
         attempt,
       });
-      return minted;
+      return { minted, attempt };
     },
-    async (h, minted) => {
+    async (h, provisioned) => {
+      const minted = provisioned.minted;
+      // This is deliberately before both the provider RPC and every KV
+      // projection below.  A timeout/crash at any later point therefore leaves
+      // a generation-bound exact-handle teardown obligation in the singleton
+      // authority, not an expiring best-effort KV hint.
+      if (!(await concurrencySlots(env).persistActiveAttempt(
+        jobId, h, minted.runnerName, minted.runnerId, provisioned.attempt, repo, installationId, mint.preparationId,
+      ))) throw new Error("active spawn attempt was not durably recorded");
       if (mint.computeReservationId) await containmentAuthority(env).claimComputeProvider(mint.computeReservationId, jobId);
       await getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
         CORELINK_RUNNER_JITCONFIG: minted.jit,
         ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
       });
     },
-    (h, minted, reason) =>
-      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted, reason }),
+    (h, provisioned, reason) =>
+      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, reason }),
     // A fresh provider attempt needs its own independently funded reservation.
     mint.computeReservationId ? 1 : SPAWN_MAX_ATTEMPTS,
   );
-  const runnerName = provisioned.runnerName;
+  const runnerName = provisioned.minted.runnerName;
   if (isContainmentDrive(opts)) {
     // The retry helper returned only after this JIT candidate's start completed.
     // Timed-out/abandoned candidates never get a reusable DO witness.
@@ -2388,7 +2496,7 @@ async function spawnRunner(
       opts,
       "attempt",
       "github:generate-jitconfig",
-      JSON.stringify({ runner_name: runnerName, runner_id: provisioned.runnerId, attempt }),
+      JSON.stringify({ runner_name: runnerName, runner_id: provisioned.minted.runnerId, attempt }),
       { attempt_count: attempt },
     );
   }
@@ -2397,18 +2505,17 @@ async function spawnRunner(
   // Intentionally NOT re-written here.)
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
-    await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
+    try { await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant); }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
     // Cache the tenant's monthly compute allowance (server #975) so COMPLETION —
     // a separate Worker invocation that never talks to the mint — can tell how
     // close this tenant is to it. Keyed per TENANT, not per job: the allowance is
     // a property of the subscription, so one key refreshed on every spawn beats a
     // write per job. Absent ⇒ no metered ceiling ⇒ nothing to warn about.
     if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
-      await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
+      try { await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
         expirationTtl: VCPU_KEY_TTL_S,
-      }).catch((e) =>
-        logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }),
-      );
+      }); } catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
     }
   }
   if (env.RUNNER_JOB_PATS) {
@@ -2426,9 +2533,9 @@ async function spawnRunner(
       const storedHandle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
       if (storedHandle !== handle) throw new Error("containment lease source was not durably written");
     } else {
-      await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
+      try { await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
         expirationTtl: JOB_PAT_TTL_S,
-      }).catch((e) => logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }));
+      }); } catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
     }
     // …and stash it under the RUNNER NAME, which is what completion tears down by.
     // This is the binding that survives GitHub's job→runner permutation; the
@@ -2441,11 +2548,11 @@ async function spawnRunner(
     // registration: `generate-jitconfig` creates the runner entity and returns its
     // id immediately, so waiting for a registration that may never happen would
     // leave the un-registered box — the exact one that leaks — unverifiable.
-    await env.RUNNER_JOB_PATS.put(
+    try { await env.RUNNER_JOB_PATS.put(
       runnerHandleKey(runnerName),
       encodeRunnerBinding({
         h: handle,
-        rid: provisioned.runnerId,
+        rid: provisioned.minted.runnerId,
         repo,
         inst: installationId,
         // The job this box was started FOR — a CANDIDATE for the stranded sweep,
@@ -2456,35 +2563,63 @@ async function spawnRunner(
       {
         expirationTtl: JOB_PAT_TTL_S,
       },
-    ).catch((e) =>
-      logEvent("error", "kv_put_runner_handle_failed", {
-        jobId,
-        runnerName,
-        error: (e as Error).message,
-      }),
-    );
+    ); } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
     // …and the reaper's durable twin, which deliberately OUTLIVES the binding
     // above. Same facts, longer TTL: this is what lets the sweep find a box that
     // has outlived its own keep-alive record instead of trusting `sleepAfter`.
-    await env.RUNNER_JOB_PATS.put(
+    try { await env.RUNNER_JOB_PATS.put(
       spawnedBoxKey(runnerName),
       JSON.stringify({
         h: handle,
-        rid: provisioned.runnerId,
+        rid: provisioned.minted.runnerId,
         repo,
         inst: installationId,
         t: Date.now(),
       }),
       { expirationTtl: SPAWNED_BOX_TTL_S },
-    ).catch((e) =>
-      logEvent("error", "kv_put_spawned_box_failed", {
-        jobId,
-        runnerName,
-        error: (e as Error).message,
-      }),
-    );
+    ); } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
   }
   return { handle, runnerName, attempt };
+}
+
+/**
+ * Drive the durable teardown intent.  This intentionally never clears a tenant
+ * vCPU key: it is tenant-wide subscription state, not an attempt projection.
+ */
+async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boolean> {
+  let attempt: ActiveSpawnAttempt | null;
+  try { attempt = await concurrencySlots(env).readActiveAttempt(jobId); }
+  catch { return false; }
+  if (!attempt) return false;
+  // Revoke exactly the JIT registration recorded for this handle before a late
+  // provider boot can claim unrelated queued work.  This is idempotent (404 is
+  // success) and uses the installation captured at mint time.
+  await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId);
+  const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
+  try { await container.teardown(); } catch { /* confirm below; an early destroy may race provisioning */ }
+  let alive: boolean;
+  try { alive = await container.isAlive(); } catch { alive = false; }
+  if (alive) return false;
+  // Retain the intent until EVERY local release has acknowledged.  A release
+  // outage remains in the cron retry set instead of becoming an unowned leak.
+  if (attempt.preparationId) {
+    try { await concurrencySlots(env).releasePreparation(jobId, attempt.preparationId); } catch { return false; }
+  }
+  if (!await releaseConcurrencySlot(env, jobId)) return false;
+  let confirmed: ActiveSpawnAttempt | null;
+  try {
+    confirmed = await concurrencySlots(env).confirmAttemptTeardown(jobId, attempt.generation, attempt.ownerToken, attempt.handle);
+  } catch { return false; }
+  if (!confirmed) return false;
+  return true;
+}
+
+export async function retryActiveSpawnTeardowns(env: Env): Promise<number> {
+  let attempts: ActiveSpawnAttempt[];
+  try { attempts = await concurrencySlots(env).pendingActiveAttempts(25); } catch { return 0; }
+  let settled = 0;
+  for (const attempt of attempts) if (await recoverActiveSpawnAttempt(env, attempt.jobId)) settled++;
+  return settled;
 }
 
 export async function revokeCompletedJob(env: Env, jobId: string, derivedTenant?: string): Promise<boolean> {
@@ -2906,11 +3041,13 @@ async function retryOwnerEpochId(effectId: string, owner: string, epoch: number)
 // Fully guarded: swallows BOTH a synchronous throw (an unbound binding in a
 // partial/test env) AND an async DO error — a missed release self-heals at the
 // slot TTL, so a release failure must NEVER break the webhook / spawn-fail path.
-async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
+async function releaseConcurrencySlot(env: Env, jobId: string): Promise<boolean> {
   try {
     await concurrencySlots(env).release(jobId);
+    return true;
   } catch (e) {
     logEvent("error", "concurrency_slot_release_failed", { jobId, error: (e as Error).message });
+    return false;
   }
 }
 
@@ -3013,6 +3150,12 @@ async function prepareSpawn(
   opts: ContainmentDriveOpts,
 ): Promise<ContainerEnvResult> {
   const { jobId, repo, installationId, labels } = opts;
+  // A deleted App installation is a durable terminal fence.  Check at the last
+  // point before authorization/mint too: an event may have entered an inbox
+  // before its deletion delivery was processed.
+  if (installationId && await installationIsTombstoned(env, installationId)) {
+    throw new SpawnRefusedError("installation_deleted");
+  }
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
   const env0 = env.SPAWN_WORKER_PUBLIC_URL
@@ -3199,10 +3342,17 @@ async function driveSpawn(
       try { await containmentAuthority(env).abandonUnusedCompute(mint.computeReservationId); }
       catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
     }
-    // Release the concurrency slot on a spawn failure (the guard releases the claim).
-    // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
-    // (a miss self-heals at the slot TTL). Fully guarded: never mask the spawn error.
-    await releaseConcurrencySlot(env, jobId);
+    // A failure after the provider start has an ActiveSpawnAttempt.  Its exact
+    // handle must be confirmed down before this generation's preparation/claim/
+    // slot can be released; a replay must therefore remain deduped even after
+    // every KV projection expires.  Pre-start failures have no record and retain
+    // the historical guarded release behaviour.
+    const recovered = await recoverActiveSpawnAttempt(env, jobId);
+    if (!recovered) {
+      let outstanding = false;
+      try { outstanding = Boolean(await concurrencySlots(env).readActiveAttempt(jobId)); } catch { outstanding = true; }
+      if (!outstanding) await releaseConcurrencySlot(env, jobId);
+    }
     // Revoke this exact issued credential after the attempt fails. The durable
     // authority retains a retry obligation if remote revoke or local wipe fails;
     // a later attempt's credential and the job's admission remain independent.
@@ -4786,6 +4936,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
+      if (await authority.installationTombstoned(event.installation_id)) break;
       if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
         && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
       if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
@@ -4833,6 +4984,10 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
   for (const event of await authority.normalIntakePending(25)) {
     if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
     if ((await authority.snapshot()).backlog_count !== 0) return;
+    if (await authority.installationTombstoned(event.installation_id)) {
+      await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
+      continue;
+    }
     if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
       && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
@@ -4900,6 +5055,9 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Reuse the existing cron: post-start projection failures retain an exact
+    // teardown intent in ConcurrencySlotsDO until the provider confirms down.
+    ctx.waitUntil(retryActiveSpawnTeardowns(env));
     if (env.FABRIC_COMPUTE_URL && env.CONTAINMENT) {
       ctx.waitUntil(containmentAuthority(env).drainUnusedCompute().catch(() => logEvent("error", "compute_cleanup_pending", {})));
     }
@@ -5126,20 +5284,26 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────
     // A queued workflow_job with our label ⇒ mint a JIT + spawn a runner. This
-    // is the all-Cloudflare autoscaler: no external fabric. Opt-in (disabled
-    // unless both the webhook secret and the mint token are configured).
+    // is the all-Cloudflare autoscaler: no external fabric.  Installation
+    // deletion is an App lifecycle event and deliberately does not require the
+    // runner-mint token, so configuration is split below by event family.
     if (request.method === "POST" && pathname === "/webhook") {
-      const webhookSecrets = [env.GITHUB_WEBHOOK_SECRET, env.GITHUB_WEBHOOK_REPO_SECRET]
-        .filter((secret): secret is string => Boolean(secret));
-      if (webhookSecrets.length === 0 || !env.GITHUB_MINT_TOKEN) {
+      const appSecret = env.GITHUB_WEBHOOK_SECRET;
+      const repoSecret = env.GITHUB_WEBHOOK_REPO_SECRET;
+      if (!appSecret && !repoSecret) {
         return json({ error: "autoscaler not configured" }, 503);
       }
       const rawBytes = await request.arrayBuffer();
       const sig = request.headers.get("x-hub-signature-256") ?? "";
-      const signatureValid = await Promise.all(
-        webhookSecrets.map((secret) => verifyGithubHmacBytes(secret, sig, rawBytes)),
-      );
-      if (!signatureValid.some(Boolean)) {
+      const [appValid, repoValid] = await Promise.all([
+        appSecret ? verifyGithubHmacBytes(appSecret, sig, rawBytes) : Promise.resolve(false),
+        repoSecret ? verifyGithubHmacBytes(repoSecret, sig, rawBytes) : Promise.resolve(false),
+      ]);
+      if (!appValid && !repoValid) {
+        // Metrics are an intentional side effect only of an actually configured
+        // bad HMAC (not a malformed/missing signature header). Missing
+        // configuration and valid ignored events stay quiet.
+        if (/^sha256=[0-9a-f]{64}$/i.test(sig.trim())) ctx.waitUntil(bumpMetrics(env, "webhook_auth_failed"));
         return unauthorized();
       }
       let raw: string;
@@ -5148,10 +5312,36 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       } catch {
         return json({ error: "invalid UTF-8 body" }, 400);
       }
-      // Only act on workflow_job:queued carrying our managed label.
-      if (request.headers.get("x-github-event") !== "workflow_job") {
+      const githubEvent = request.headers.get("x-github-event");
+      // Installation deletion is handled before workflow parsing.  A repository
+      // hook secret cannot authorize this branch: only the GitHub App secret has
+      // authority to retire an App installation.
+      if (githubEvent === "installation") {
+        if (!appValid) return unauthorized();
+        let installation: { action?: unknown; installation?: { id?: unknown } };
+        try { installation = JSON.parse(raw) as typeof installation; }
+        catch { return json({ error: "invalid installation payload" }, 400); }
+        if (installation.action !== "deleted" || !/^\d{1,20}$/.test(String(installation.installation?.id ?? ""))) {
+          return json({ error: "invalid installation deletion" }, 400);
+        }
+        const installationId = String(installation.installation!.id);
+        try {
+          const bodySha = await sha256Hex(raw);
+          const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
+            || await sha256Hex(`installation.deleted:v1\n${installationId}\n${bodySha}`);
+          const result = await containmentAuthority(env).tombstoneInstallation(installationId, delivery, bodySha);
+          if (result === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+          return json({ ok: true, installation_deleted: true, duplicate: result === "duplicate", installation_id: installationId }, 202);
+        } catch {
+          return json({ error: "installation tombstone unavailable", retryable: true }, 503);
+        }
+      }
+      // Only workflow_job needs runner-mint configuration.  Other valid GitHub
+      // events remain harmless acknowledgements even in lifecycle-only deploys.
+      if (githubEvent !== "workflow_job") {
         return json({ ok: true, ignored: "not workflow_job" }, 200);
       }
+      if (!env.GITHUB_MINT_TOKEN) return json({ error: "autoscaler not configured" }, 503);
       let evt: {
         action?: string;
         workflow_job?: {
@@ -5455,6 +5645,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           repo, installation_id: installationId, labels: mintLabels, received_at_ms: Date.now(),
         }, admitted ? 0 : 60_000);
         if (result.status === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+        if (result.status === "tombstoned") return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
         if (result.status === "full") return json({ error: "intake capacity unavailable", retryable: true }, 503);
         if (admitted) ctx.waitUntil(runNormalIntakeDrain(env, eventId));
         else ctx.waitUntil(bumpMetrics(env, "webhook_rate_limited"));

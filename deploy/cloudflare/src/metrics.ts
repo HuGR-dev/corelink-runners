@@ -123,6 +123,9 @@ export const COUNTER_NAMES = [
   // `bumpOnce(signalId, name)`, so a misconfigured switch fires this counter
   // exactly once regardless of how many independent paths observe it.
   "containment_config_invalid",
+  // Authentication failure is intentionally a fixed golden signal.  It is
+  // emitted only after webhook configuration exists and HMAC verification ran.
+  "webhook_auth_failed",
 ] as const;
 
 export type CounterName = (typeof COUNTER_NAMES)[number];
