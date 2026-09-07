@@ -123,4 +123,31 @@ describe("compute budget admission integration", () => {
     expect(fetcher.mock.calls.map(call => String(call[0])).filter(url => url.endsWith("/settle"))).toHaveLength(1);
     expect((await first.storage.get<{ phase: string; actualVcpuMs?: string }>(`compute:obligation:${reservationId}`))?.actualVcpuMs).toBe("0");
   });
+
+  it("retains a failed final-page cleanup retry across the scheduled sweep", async () => {
+    let unavailable = true;
+    const fetcher = vi.fn(async (url: string) => unavailable
+      ? new Response("unavailable", { status: 503 })
+      : receipt("cancelled"));
+    const { containment, storage } = fixture(fetcher);
+    const expiredBinding = { ...binding(), token: token(Date.now() - 120_000) };
+    await storage.put(`compute:obligation:${reservationId}`, {
+      binding: expiredBinding, phase: "preparing", deadlineMs: Date.now() - 60_000,
+    });
+
+    await containment.drainUnusedCompute();
+    expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "abandoning" });
+    expect(storage.values.get("compute:drain-retry")).toBe(true);
+    expect(storage.values.has("compute:drain-cursor")).toBe(false);
+
+    unavailable = false;
+    await containment.drainUnusedCompute();
+    // The first failed attempt leaves an abandoning record; the next sweep
+    // must finish it before retiring the retry marker.
+    expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "terminal" });
+    expect(storage.values.has("compute:drain-retry")).toBe(false);
+    expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({
+      phase: "terminal", terminalKind: "cancelled",
+    });
+  });
 });
