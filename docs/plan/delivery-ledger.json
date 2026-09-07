@@ -706,7 +706,7 @@
         "T6-W8",
         "T7-W4"
       ],
-      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip.",
+      "next_action": "T2-W3 acceptance is accepted and complete at d57096d0403ae8d1e43a476c0160b0a360197f01; retain the record and run full CI only at the complete Sprint 1 bundle tip.",
       "blockers": [],
       "commits": [
         "2171dd91034e46d18cce6d6e50624a6d44879858"
@@ -719,9 +719,21 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-action-pins.json"
+        "docs/plan/execution/2026-09-05-action-pins.json",
+        "Acceptance artifact integrated from 640403f930da77d313d63d1b93ddca5df46cdd04 as d5a6230a196cbfd6ea43bc0c40cda1ded209de85: 24 workflows, 37 remote action references, 0 mutable references."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "target_commit": "d57096d0403ae8d1e43a476c0160b0a360197f01",
+        "source_commit": "640403f930da77d313d63d1b93ddca5df46cdd04",
+        "integration_commit": "d5a6230a196cbfd6ea43bc0c40cda1ded209de85",
+        "evidence": [
+          "docs/plan/execution/2026-09-06-t2-w3-acceptance.md",
+          "24 canonical workflows, 37 remote action references, and 0 mutable remote references at the recorded target."
+        ]
+      }
     },
     {
       "id": "T4-W1",
