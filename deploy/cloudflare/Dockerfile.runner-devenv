@@ -195,10 +195,16 @@ COPY --from=bin-downloader /out/code-server /opt/code-server
 COPY entrypoint.sh /entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-RUN private_key_files="$(grep -RIlE -- '-----BEGIN [A-Z0-9][A-Z0-9 ]*PRIVATE KEY-----' /opt/code-server || true)" \
- && if [ -n "${private_key_files}" ]; then \
+RUN set +e; \
+    private_key_files="$(grep -RIlE -- '-----BEGIN [A-Z0-9][A-Z0-9 ]*PRIVATE KEY-----' /opt/code-server)"; \
+    scan_rc=$?; \
+    set -e; \
+    if [ "${scan_rc}" -eq 0 ]; then \
       echo "private-key material found in /opt/code-server:" >&2; \
       printf '%s\n' "${private_key_files}" >&2; \
+      exit 1; \
+    elif [ "${scan_rc}" -ne 1 ]; then \
+      echo "private-key scanner failed (grep rc=${scan_rc})" >&2; \
       exit 1; \
     fi \
  && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
