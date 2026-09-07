@@ -444,6 +444,22 @@ export interface Env {
   CLOUDFLARE_API_TOKEN?: string;
 }
 
+export interface SpawnClaimRecord {
+  jobId: string;
+  generation: number;
+  ownerToken: string;
+  phase: "claimed" | "active";
+  claimedAtMs: number;
+  expiresAtMs: number;
+}
+
+export type SpawnClaimResult =
+  | { status: "acquired"; generation: number; ownerToken: string }
+  | { status: "held"; generation: number }
+  | { status: "invalid" };
+
+export type SpawnClaimRelease = "released" | "stale" | "missing";
+
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
 // One instance per lease_id (= GH jobId). The autoscaler stashes the per-job CAS
 // PAT here and injects only a CLW_CRED_TICKET into the untrusted container; clw
@@ -502,6 +518,73 @@ export class CredStashDO extends DurableObject<Env> {
 // tested); this wrapper only persists the resulting slot list.
 export class ConcurrencySlotsDO extends DurableObject<Env> {
   private authority(): ConcurrencyAuthority { return new ConcurrencyAuthority(this.ctx.storage); }
+  private async spawnClaimTx<T>(fn: (storage: DurableObjectTransaction) => Promise<T>): Promise<T> {
+    return this.ctx.storage.transaction(fn);
+  }
+
+  /**
+   * The spawn claim is separate from capacity slots.  A generation and owner
+   * token make every release conditional, so a late failed attempt cannot
+   * release a claim acquired by a later retry.
+   */
+  async acquireSpawnClaim(jobId: string, ttlMs: number): Promise<SpawnClaimResult> {
+    if (!jobId || !Number.isFinite(ttlMs) || ttlMs <= 0) return { status: "invalid" };
+    return this.spawnClaimTx(async storage => {
+      const now = Date.now();
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (current && current.expiresAtMs > now) return { status: "held", generation: current.generation };
+      const generation = (current?.generation ?? 0) + 1;
+      const record: SpawnClaimRecord = {
+        jobId,
+        generation,
+        ownerToken: crypto.randomUUID(),
+        phase: "claimed",
+        claimedAtMs: now,
+        expiresAtMs: now + ttlMs,
+      };
+      await storage.put(key, record);
+      return { status: "acquired", generation, ownerToken: record.ownerToken };
+    });
+  }
+
+  async renewSpawnClaim(jobId: string, generation: number, ownerToken: string, ttlMs: number): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken) return false;
+      await storage.put(key, { ...current, expiresAtMs: Date.now() + ttlMs });
+      return true;
+    });
+  }
+
+  async markSpawnClaimActive(jobId: string, generation: number, ownerToken: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken) return false;
+      // Once provider dispatch is fenced, the claim lives until the matching
+      // completion/teardown releases this exact generation. A wall-clock TTL
+      // here would permit a duplicate spawn during a long running job.
+      await storage.put(key, { ...current, phase: "active", expiresAtMs: Number.MAX_SAFE_INTEGER });
+      return true;
+    });
+  }
+
+  async releaseSpawnClaim(jobId: string, generation: number, ownerToken: string): Promise<SpawnClaimRelease> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current) return "missing";
+      if (current.generation !== generation || current.ownerToken !== ownerToken) return "stale";
+      await storage.delete(key);
+      return "released";
+    });
+  }
+
+  async readSpawnClaim(jobId: string): Promise<SpawnClaimRecord | null> {
+    return (await this.ctx.storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`)) ?? null;
+  }
   // ATOMIC acquire: prune-expired → decide (per-key cap THEN fleet cap; idempotent
   // per jobId) → persist. Returns the clean admit/refuse decision — the caller
   // fail-opens ONLY on a THROWN error (infra hiccup), never on a `{admitted:false}`.
@@ -2652,6 +2735,87 @@ function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
   return env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
 }
 
+type SpawnClaimLease = Pick<SpawnClaimRecord, "generation" | "ownerToken">;
+
+async function acquireSpawnClaimAtomic(env: Env, jobId: string): Promise<SpawnClaimLease | null> {
+  let acquired: SpawnClaimLease | null = null;
+  try {
+    if (!env.CONCURRENCY_SLOTS) return null;
+    const result = await concurrencySlots(env).acquireSpawnClaim(jobId, SPAWN_CLAIM_TTL_S * 1000);
+    if (result.status !== "acquired") return null;
+    const lease = { generation: result.generation, ownerToken: result.ownerToken };
+    acquired = lease;
+    // Containment evidence still reads the historical marker.  Publish only a
+    // self-describing marker owned by this lease; an old literal/timestamp is
+    // treated as occupied and is never adopted or deleted by this path.
+    if (env.RUNNER_JOB_PATS) {
+      const key = `spawn:${jobId}`;
+      const existing = await env.RUNNER_JOB_PATS.get(key);
+      if (existing) {
+        await concurrencySlots(env).releaseSpawnClaim(jobId, lease.generation, lease.ownerToken);
+        return null;
+      }
+      await env.RUNNER_JOB_PATS.put(key, JSON.stringify({
+        schema_version: 2,
+        generation: lease.generation,
+        owner_token: lease.ownerToken,
+        claimed_at_ms: Date.now(),
+      }), { expirationTtl: SPAWN_CLAIM_TTL_S });
+      const stored = await env.RUNNER_JOB_PATS.get(key);
+      if (!stored || !stored.includes(lease.ownerToken)) throw new Error("spawn claim marker was not durably bound");
+    }
+    return lease;
+  } catch (error) {
+    if (acquired && env.CONCURRENCY_SLOTS) {
+      await concurrencySlots(env).releaseSpawnClaim(jobId, acquired.generation, acquired.ownerToken).catch(() => undefined);
+    }
+    logEvent("error", "spawn_claim_authority_unavailable", { jobId, error: (error as Error).message });
+    return null;
+  }
+}
+
+async function releaseSpawnClaimAtomic(env: Env, jobId: string, lease: SpawnClaimLease | null): Promise<void> {
+  if (!lease) return;
+  try {
+    const released = await concurrencySlots(env).releaseSpawnClaim(jobId, lease.generation, lease.ownerToken);
+    if (released === "released" && env.RUNNER_JOB_PATS) {
+      const key = `spawn:${jobId}`;
+      const raw = await env.RUNNER_JOB_PATS.get(key);
+      try {
+        const marker = raw ? JSON.parse(raw) as { generation?: number; owner_token?: string } : null;
+        if (marker?.generation === lease.generation && marker.owner_token === lease.ownerToken) {
+          await env.RUNNER_JOB_PATS.delete(key);
+        }
+      } catch { /* legacy marker: conservative adoption leaves it untouched */ }
+    }
+  } catch (error) {
+    logEvent("error", "spawn_claim_release_failed", { jobId, error: (error as Error).message });
+  }
+}
+
+function spawnClaimCallbacks(env: Env, jobId: string): {
+  claim: () => Promise<boolean>;
+  release: () => Promise<void>;
+  active: () => Promise<boolean>;
+} {
+  let lease: SpawnClaimLease | null = null;
+  return {
+    claim: async () => {
+      lease = await acquireSpawnClaimAtomic(env, jobId);
+      return lease !== null;
+    },
+    release: async () => {
+      await releaseSpawnClaimAtomic(env, jobId, lease);
+      lease = null;
+    },
+    active: async () => {
+      if (!lease || !env.CONCURRENCY_SLOTS) return false;
+      try { return await concurrencySlots(env).markSpawnClaimActive(jobId, lease.generation, lease.ownerToken); }
+      catch { return false; }
+    },
+  };
+}
+
 function retryEpochAuthority(env: Env): RetryEpochAuthorityRpc | null {
   if (!env.CONCURRENCY_SLOTS) return null;
   return retryEpochClient(() => concurrencySlots(env));
@@ -4372,10 +4536,13 @@ async function driveSpawnGuarded(
   env: Env,
   opts: ContainmentDriveOpts,
 ): Promise<void> {
+  const spawnClaim = spawnClaimCallbacks(env, opts.jobId);
+  if (!(await spawnClaim.claim())) return;
   try {
+    if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
     await driveSpawn(env, opts);
   } catch (e) {
-    await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
+    await spawnClaim.release();
     // A ceiling REFUSAL still needs the dead-letter (that is the whole point —
     // otherwise the job is lost forever), but it is not an error and must not be
     // counted or logged as one: `spawn_at_ceiling` was already emitted at the
@@ -4582,6 +4749,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
       const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
       let prepared: ContainerEnvResult | undefined;
+      const spawnClaim = spawnClaimCallbacks(env, event.job_id);
       const routeResult = await runCanonicalEffect({
         ledger: authority,
         tuple,
@@ -4594,11 +4762,13 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
         abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
-        claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
-        release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
+        claim: dependencies.claimSpawn ? () => claim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.claim,
+        release: dependencies.claimSpawn ? () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.release,
+        beforeDrive: async () => dependencies.claimSpawn ? true : spawnClaim.active(),
         drive: async driveOpts => {
           const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
+          if (!dependencies.claimSpawn && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
           return drive(env, typed, prepared);
         },
         beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
@@ -4632,6 +4802,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
     const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo,
       installationId: event.installation_id, labels: event.labels };
     let prepared: ContainerEnvResult | undefined;
+    const spawnClaim = spawnClaimCallbacks(env, event.job_id);
     const result = await runCanonicalEffect({
       ledger: authority,
       tuple: await intakeOwnerTuple(event.repo, event.job_id, `containment:v1:${event.event_id}`, event.event_id),
@@ -4641,10 +4812,12 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
         && (await authority.snapshot()).backlog_count === 0,
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
       abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
-      claim: () => claimSpawn(env.RUNNER_JOB_PATS, event.job_id),
-      release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, event.job_id),
+      claim: spawnClaim.claim,
+      release: spawnClaim.release,
+      beforeDrive: spawnClaim.active,
       drive: async opts => {
         await bindContainmentSpawnClaim(env, opts);
+        if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
         return driveSpawn(env, opts, prepared);
       },
     });
@@ -5140,6 +5313,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (tornDown || teardownPending === false) await releaseConcurrencySlot(env, jobId);
         else if (teardownPending === true || teardownPending === null) {
           logEvent("error", "concurrency_slot_release_deferred", { jobId });
+        }
+        if (tornDown || teardownPending === false) {
+          try {
+            const marker = env.RUNNER_JOB_PATS ? await env.RUNNER_JOB_PATS.get(`spawn:${jobId}`) : null;
+            const parsed = marker ? JSON.parse(marker) as { generation?: number; owner_token?: string } : null;
+            if (parsed?.generation && parsed.owner_token) {
+              await releaseSpawnClaimAtomic(env, jobId, { generation: parsed.generation, ownerToken: parsed.owner_token });
+            }
+          } catch (e) {
+            logEvent("error", "spawn_claim_release_deferred", { jobId, error: (e as Error).message });
+          }
         }
         // Exact PAT leases are closed by the durable revocation authority above.
         // Also clean the historical job-scoped stash during migration.
@@ -5741,6 +5925,8 @@ export async function redriveOrphanedJobs(
           const effect = ownedReservation.effect_id;
           const spawnOpts: ContainmentDriveOpts = { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" };
           let prepared: ContainerEnvResult | undefined;
+          const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
+          const useInjectedClaim = !!dependencies.claimSpawn;
           const result = await runCanonicalEffect({
             ledger: ownedAuthority,
             tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
@@ -5750,14 +5936,16 @@ export async function redriveOrphanedJobs(
             idempotency_key: effect,
             admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
             beforeClaim: async () => {
-              await release(env.RUNNER_JOB_PATS, redriveJobId);
+              if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
             },
             abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, redriveJobId, prepared),
-            claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
-            release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
+            claim: useInjectedClaim ? () => claim(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.claim,
+            release: useInjectedClaim ? () => release(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.release,
+            beforeDrive: async () => useInjectedClaim ? true : spawnClaim.active(),
             drive: async driveOpts => {
               await bindContainmentSpawnClaim(env, driveOpts);
+              if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
               return drive(env, driveOpts, prepared);
             },
             finalize: async () => {
@@ -5769,7 +5957,6 @@ export async function redriveOrphanedJobs(
         })());
         continue;
       }
-      await release(env.RUNNER_JOB_PATS, redriveJobId);
       const handoff = await claimReconcileHandoff(env.RUNNER_JOB_PATS, {
         schema_version: 1,
         repo: redriveRepo,
@@ -5783,7 +5970,9 @@ export async function redriveOrphanedJobs(
         await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
         continue;
       }
-      if (await claim(env.RUNNER_JOB_PATS, redriveJobId)) {
+      const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
+      const useInjectedClaim = !!dependencies.claimSpawn;
+      if (useInjectedClaim ? await claim(env.RUNNER_JOB_PATS!, redriveJobId) : await spawnClaim.claim()) {
         logEvent("info", "reconciler_redrive", {
           jobId: redriveJobId,
           repo: redriveRepo,
@@ -5791,9 +5980,11 @@ export async function redriveOrphanedJobs(
         });
         ctx.waitUntil((async () => {
           try {
+            if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
             await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
           } catch (e) {
-            await releaseSpawnClaim(env.RUNNER_JOB_PATS, redriveJobId);
+            if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
+            else await spawnClaim.release();
             if (!(e instanceof SpawnRefusedError)) {
               await bumpMetrics(env, "spawn_failed");
               logEvent("error", "spawn_drive_failed", { jobId: redriveJobId, error: (e as Error).message });
@@ -6026,6 +6217,7 @@ export async function retryOrphanedSpawns(
       const effect = ownedReservation.effect_id;
       const spawnOpts: ContainmentDriveOpts = { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" };
       let prepared: ContainerEnvResult | undefined;
+      const spawnClaim = spawnClaimCallbacks(env, ownedReservation.job_id);
       const result = await runCanonicalEffect({
         ledger: ownedAuthority,
         tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
@@ -6043,10 +6235,12 @@ export async function retryOrphanedSpawns(
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
         abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, ownedReservation.job_id, prepared),
-        claim: () => claimSpawn(kv, ownedReservation.job_id),
-        release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
+        claim: spawnClaim.claim,
+        release: spawnClaim.release,
+        beforeDrive: spawnClaim.active,
         drive: async driveOpts => {
           await bindContainmentSpawnClaim(env, driveOpts);
+          if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
           return drive(env, driveOpts, prepared);
         },
         finalize: async () => {
@@ -6064,8 +6258,10 @@ export async function retryOrphanedSpawns(
       });
     // Idempotent: if the job is already claimed (a live path / another tick won
     // it), skip this tick and LEAVE the record for later.
-    if (!(await claimSpawn(kv, jobId))) continue;
+    const spawnClaim = spawnClaimCallbacks(env, jobId);
+    if (!(await spawnClaim.claim())) continue;
     try {
+      if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
       await drive(env, {
         jobId,
         repo: bumped.repo,
@@ -6094,7 +6290,7 @@ export async function retryOrphanedSpawns(
       });
     } catch (e) {
       // Release the claim either way so a later tick (or the live path) can re-drive.
-      await releaseSpawnClaim(kv, jobId);
+      await spawnClaim.release();
       if (e instanceof SpawnRefusedError) {
         // BACKPRESSURE, not failure — the fleet was full again this tick. Do NOT
         // consume the 3-strike budget: that budget bounds genuine errors, and
