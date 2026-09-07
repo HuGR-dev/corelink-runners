@@ -268,7 +268,7 @@
         "D1",
         "R1"
       ],
-      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance.",
+      "next_action": "T4-W4 acceptance is accepted and complete at observed tip 2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51; retain the admission evidence and run complete Sprint 1 validation at its composed bundle tip. Applicable production deployment evidence remains bound to that sprint process.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566"
@@ -281,9 +281,22 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-admission-review.json"
+        "docs/plan/execution/2026-09-05-admission-review.json",
+        "Acceptance artifact ca7df5f recorded 5/5 capacity and 9/9 admission-arm focused vectors, with reviewed source bb165bad reachable from the observed tip."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "observed_commit": "2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51",
+        "reviewed_source": "bb165bad54125460ebae213e405df3a75baa6566",
+        "source_commit": "ca7df5f591ec317d68978b833a5074fdbaf1151a",
+        "integration_commit": "ca7df5f591ec317d68978b833a5074fdbaf1151a",
+        "evidence": [
+          "docs/plan/evidence/T4-W4-admission.json",
+          "acceptance_infra_capacity: 5/5 passed; corelink_admission_arms: 9/9 passed."
+        ]
+      }
     },
     {
       "id": "T3-W10",
