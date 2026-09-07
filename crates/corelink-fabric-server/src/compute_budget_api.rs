@@ -84,7 +84,7 @@ pub fn router(
 async fn reserve(State(state): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {
     let grant = match authenticate(&state, &headers, false) {
         Ok(grant) => grant,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if parse_empty(&body).is_err() {
         return bad_request("invalid compute request");
@@ -140,7 +140,7 @@ where
 {
     let grant = match authenticate(&state, &headers, allow_expired) {
         Ok(grant) => grant,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if parse_empty(&body).is_err() {
         return bad_request("invalid compute request");
@@ -156,7 +156,7 @@ where
 async fn settle(State(state): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {
     let grant = match authenticate(&state, &headers, true) {
         Ok(grant) => grant,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let parsed: SettleBody = match serde_json::from_slice(&body) {
         Ok(value) => value,
@@ -222,23 +222,25 @@ fn authenticate(
     state: &ApiState,
     headers: &HeaderMap,
     allow_expired: bool,
-) -> Result<VerifiedGrant, Response> {
+) -> Result<VerifiedGrant, Box<Response>> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix(AUTH_HEADER))
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+        .ok_or_else(|| Box::new(StatusCode::UNAUTHORIZED.into_response()))?;
     state
         .verifier
         .verify(token, now_ms(), allow_expired)
-        .map_err(|error| match error {
-            GrantError::Malformed => bad_request("invalid compute grant"),
-            GrantError::InvalidSignature | GrantError::Expired => (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error":"invalid_compute_grant"})),
-            )
-                .into_response(),
+        .map_err(|error| {
+            Box::new(match error {
+                GrantError::Malformed => bad_request("invalid compute grant"),
+                GrantError::InvalidSignature | GrantError::Expired => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error":"invalid_compute_grant"})),
+                )
+                    .into_response(),
+            })
         })
 }
 
