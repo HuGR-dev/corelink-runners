@@ -60,7 +60,8 @@ fn cf(http: Http, domain: &str) -> Arc<dyn BoxProvisioner> {
     Arc::new(CloudflareBoxProvisioner::new(
         Arc::new(CloudflareEngine::new(
             http,
-            CloudflareConfig::new(domain, "secret-auth"),
+            CloudflareConfig::new(domain, "spawn-auth")
+                .with_scoped_tokens("exec-auth", "lifecycle-auth"),
         )),
         BoxRegistry::new(),
     ))
