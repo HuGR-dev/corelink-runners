@@ -190,6 +190,52 @@
       },
       "external_action_required": "Billing owner must confirm or clear the historical Actions budget in the GitHub billing UI/API after migration; infrastructure owner must provide an approved non-host runner target plus secret-channel registry/spawn credential. No local mutation was applied."
     },
+    "aws_ephemeral_bootstrap_attempt": {
+      "status": "TARGET_PROVEN; GITHUB_SCHEDULING_BLOCKED",
+      "official_image": {
+        "registry": "registry.cloudflare.com",
+        "pull_mechanism": "wrangler containers registries credentials --pull",
+        "manifest_http_status": 200,
+        "requested_digest": "sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+        "pulled_repo_digest": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029"
+      },
+      "aws_resources": {
+        "account": "046797548582",
+        "region": "us-east-1",
+        "ami": "ami-025d99823a4caad37",
+        "subnet": "subnet-05dea5944392940e4",
+        "security_group": "sg-09a0e5c5bbff0941e",
+        "ingress_rules": 0,
+        "egress": ["tcp/80 0.0.0.0/0", "tcp/443 0.0.0.0/0", "tcp/53 0.0.0.0/0", "udp/53 0.0.0.0/0"],
+        "instances": [
+          {"id": "i-00c0b2d537ef946f8", "type": "t3.micro", "state": "terminated"},
+          {"id": "i-055bd8ebea98f6f79", "type": "t3.small", "state": "terminated"}
+        ],
+        "ephemeral_s3_bundle": "deleted",
+        "ephemeral_ssm_iam": "deleted",
+        "security_group_final": "deleted",
+        "running_resources_final": 0,
+        "cost_posture": "bounded below US$1 by two short-lived instances, 20-GiB delete-on-termination volumes, one 21-KiB temporary bundle, and no persistent IP"
+      },
+      "runner_proof": {
+        "runner_name": "t3-w18-aws-11",
+        "runner_id": 139043,
+        "labels": ["corelink"],
+        "online_observation": "runner image log reached Listening for Jobs at 2026-09-07T02:04:52Z",
+        "registration_final": 0
+      },
+      "live_dispatch_probe": {
+        "attempts": 1,
+        "run_id": 34075127603,
+        "run_status": "completed",
+        "run_conclusion": "startup_failure",
+        "run_created_at": "2026-09-07T02:05:47Z",
+        "jobs": 0,
+        "workflow_job_deliveries": 0,
+        "interpretation": "GitHub rejected the run before job creation even while one eligible corelink runner was online; target/image/auth/label path is proven, but the upstream scheduling or spending gate remains opaque"
+      },
+      "matrix_policy": "No 10/10 rerun was attempted because the prerequisite queued workflow_job was absent; no live resume claim is made from this target attempt"
+    },
     "reversal": {
       "mode": "FORWARD_ONLY",
       "current_version_id": "d04aa4ea-80a3-481e-9f2e-e785e8824480",
@@ -200,9 +246,9 @@
     "acceptance": {
       "verdict": "BLOCKED-TARGET",
       "fix_status": "FIXED_IN_SCOPE; external target remains blocked",
-      "cause_root": "The original 401 ping was corrected by aligning the repository-hook secret binding and deploying the fallback verifier. The remaining blocker is GitHub scheduling: no online runner with the corelink label means no workflow_job event is emitted.",
-      "required_external_action": "Bring an authorized GitHub runner registration/scale-set target with the corelink label online, or have the GitHub App/Actions integration emit a queued workflow_job for this repository. Then rerun the same version-bound matrix.",
-      "why_not_accept": "The live nonempty ordered-resume and spawn side effects cannot be proven without a real workflow_job target; empty controls and local tests do not substitute for that event."
+      "cause_root": "The original 401 ping was corrected by aligning the repository-hook secret binding and deploying the fallback verifier. An authorized AWS target then pulled the pinned image and reached Listening for Jobs with the corelink label, but GitHub still completed the dispatch as startup_failure with zero jobs and emitted no workflow_job delivery. Current Actions permissions are enabled and the migrated billing API shows no budget object, so the active upstream scheduling/spending gate is external and not identifiable from this repository.",
+      "required_external_action": "The GitHub organization billing owner must inspect the migrated Budgets and alerts UI at https://github.com/organizations/HuGR-Labs/settings/billing and clear or raise the historical Actions spending stop, or obtain GitHub support confirmation that the account-level gate is removed. Then dispatch once and require a queued workflow_job before rerunning the same version-bound 10/10 matrix.",
+      "why_not_accept": "The live workflow_job, 10/10 execution, and nonempty ordered-resume side effects cannot be proven because GitHub rejects the dispatch before creating a job even with a real online corelink runner. Empty controls and local tests do not substitute for that event."
     }
   },
   "notes": "The Worker fix, signed repository ingress, three live switch configurations, authenticated 10/10 controls, local ordered-resume 10/10, image/config comparisons, and zero-running inventory are recorded. Production ends with both containment pauses enabled. Final disposition is BLOCKED-TARGET due to an irreducible external GitHub bootstrap condition, not an unresolved product defect."
