@@ -1,4 +1,4 @@
-import { ComputeBudgetClientError, type ComputeReceipt } from "./compute_budget_client";
+import { type AuthenticatedTerminalReceipt, type ComputeReceipt, validateAuthenticatedTerminalReceipt } from "./compute_budget_client";
 
 export interface ComputeBinding {
   token: string; reservationId: string; tenantId: string;
@@ -13,14 +13,14 @@ export interface ComputeObligationStorage {
 export interface ComputeTransport {
   reserve(token: string, reservationId: string): Promise<ComputeReceipt>;
   activate(token: string, reservationId: string): Promise<ComputeReceipt>;
-  cancel(token: string, reservationId: string): Promise<ComputeReceipt>;
-  settle(token: string, reservationId: string, actualVcpuMs: string, evidence: string): Promise<ComputeReceipt>;
+  cancel(token: string, reservationId: string): Promise<AuthenticatedTerminalReceipt>;
+  settle(token: string, reservationId: string, actualVcpuMs: string, evidence: string): Promise<AuthenticatedTerminalReceipt>;
 }
 type Phase = "preparing" | "active" | "dispatched" | "abandoning" | "settling" | "terminal";
 interface StoredObligation {
   binding: ComputeBinding; phase: Phase; deadlineMs: number;
   priorPhase?: "preparing" | "active"; actualVcpuMs?: string; evidenceDigest?: string;
-  terminalKind?: "cancelled" | "settled";
+  terminalKind?: "cancelled" | "settled"; providerReceipt?: AuthenticatedTerminalReceipt;
 }
 
 export class ComputeObligations {
@@ -50,6 +50,12 @@ export class ComputeObligations {
       if (typeof row.actualVcpuMs !== "string" || !/^(0|[1-9][0-9]{0,18})$/.test(row.actualVcpuMs) ||
           BigInt(row.actualVcpuMs) > I64_MAX || typeof row.evidenceDigest !== "string" || !/^[0-9a-f]{64}$/i.test(row.evidenceDigest)) throw new Error("corrupt compute obligation");
     }
+    if (row.providerReceipt !== undefined) {
+      const receipt = validateAuthenticatedTerminalReceipt(row.providerReceipt, binding.reservationId);
+      if (row.terminalKind !== receipt.state || row.actualVcpuMs !== receipt.actual_vcpu_ms || row.evidenceDigest !== receipt.evidence_digest) throw new Error("corrupt compute obligation");
+    }
+    if (row.phase === "terminal" && row.terminalKind !== "cancelled" && row.terminalKind !== "settled") throw new Error("corrupt compute obligation");
+    if (row.phase === "terminal" && row.providerReceipt === undefined) throw new Error("compute terminal receipt missing");
     return raw as StoredObligation;
   }
 
@@ -116,38 +122,23 @@ export class ComputeObligations {
     const prior = row.phase === "abandoning" ? row.priorPhase : row.phase;
     if (prior !== "preparing" && prior !== "active") throw new Error("compute obligation abandonment refused");
     if (row.phase !== "abandoning") await this.storage.put(this.key(reservationId), { ...row, phase: "abandoning", priorPhase: prior });
-    let receipt: ComputeReceipt;
-    let proof = row.actualVcpuMs && row.evidenceDigest ? { actualVcpuMs: row.actualVcpuMs, evidenceDigest: row.evidenceDigest } : undefined;
-    try {
-      if (proof) throw new ComputeBudgetClientError("conflict", "retry settlement");
-      receipt = await this.client.cancel(row.binding.token, reservationId);
-    } catch (error) {
-      if (!(error instanceof ComputeBudgetClientError) || error.code !== "conflict") throw error;
-      proof ??= { actualVcpuMs: "0", evidenceDigest: await this.neverDispatchedDigest(reservationId) };
-      await this.storage.put(this.key(reservationId), { ...row, phase: "abandoning", priorPhase: prior, ...proof });
-      receipt = await this.client.settle(row.binding.token, reservationId, proof.actualVcpuMs, proof.evidenceDigest);
-    }
-    if (receipt.reservation_id !== reservationId || (receipt.state !== "cancelled" && receipt.state !== "settled")) throw new Error("invalid compute cleanup receipt");
-    await this.storage.put(this.key(reservationId), { ...row, phase: "terminal", terminalKind: receipt.state, priorPhase: prior, ...proof });
+    const receipt = validateAuthenticatedTerminalReceipt(await this.client.cancel(row.binding.token, reservationId), reservationId, "cancelled");
+    const proof = { actualVcpuMs: receipt.actual_vcpu_ms, evidenceDigest: receipt.evidence_digest };
+    await this.storage.put(this.key(reservationId), { ...row, phase: "terminal", terminalKind: "cancelled", priorPhase: prior, ...proof, providerReceipt: receipt });
   }
 
-  private async neverDispatchedDigest(reservationId: string): Promise<string> {
-    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`corelink:compute:never-dispatched:${reservationId}`));
-    return [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-  }
-
-  async settleProven(reservationId: string, actualVcpuMs: string, evidenceDigest: string): Promise<void> {
-    if (typeof actualVcpuMs !== "string" || actualVcpuMs.length > 19 || !/^(0|[1-9][0-9]*)$/.test(actualVcpuMs) || BigInt(actualVcpuMs) > I64_MAX || !/^[0-9a-f]{64}$/i.test(evidenceDigest)) throw new Error("invalid compute settlement");
+  async settleProven(reservationId: string, providerReceipt: AuthenticatedTerminalReceipt): Promise<void> {
+    const proven = validateAuthenticatedTerminalReceipt(providerReceipt, reservationId, "settled");
     const row = await this.read(reservationId);
     if (!row) throw new Error("compute settlement refused");
-    if (row.phase === "terminal") { if (row.actualVcpuMs === actualVcpuMs && row.evidenceDigest === evidenceDigest) return; throw new Error("compute settlement conflict"); }
+    if (row.phase === "terminal") { if (row.providerReceipt && sameReceipt(row.providerReceipt, proven)) return; throw new Error("compute settlement conflict"); }
     if (row.phase !== "dispatched" && row.phase !== "settling") throw new Error("compute settlement refused");
-    if (row.phase === "settling" && (row.actualVcpuMs !== actualVcpuMs || row.evidenceDigest !== evidenceDigest)) throw new Error("compute settlement conflict");
-    const next = { ...row, phase: "settling" as const, actualVcpuMs, evidenceDigest };
+    if (row.phase === "settling" && (!row.providerReceipt || !sameReceipt(row.providerReceipt, proven))) throw new Error("compute settlement conflict");
+    const next = { ...row, phase: "settling" as const, actualVcpuMs: proven.actual_vcpu_ms, evidenceDigest: proven.evidence_digest, providerReceipt: proven };
     if (row.phase !== "settling") await this.storage.put(this.key(reservationId), next);
-    const receipt = await this.client.settle(row.binding.token, reservationId, actualVcpuMs, evidenceDigest);
-    if (receipt.reservation_id !== reservationId || receipt.state !== "settled") throw new Error("invalid compute settlement receipt");
-    await this.storage.put(this.key(reservationId), { ...next, phase: "terminal" as const, terminalKind: "settled" });
+    const receipt = validateAuthenticatedTerminalReceipt(await this.client.settle(row.binding.token, reservationId, proven.actual_vcpu_ms, proven.evidence_digest), reservationId, "settled");
+    if (!sameReceipt(receipt, proven)) throw new Error("compute settlement receipt conflict");
+    await this.storage.put(this.key(reservationId), { ...next, phase: "terminal" as const, terminalKind: "settled", providerReceipt: receipt });
   }
 
   async drainUnused(nowMs: number, cursor?: string): Promise<{ cursor?: string; pending: boolean; retryRequired: boolean }> {
@@ -178,6 +169,9 @@ export class ComputeObligations {
 
 function sameBinding(a: ComputeBinding, b: ComputeBinding): boolean {
   return a.token === b.token && a.reservationId === b.reservationId && a.tenantId === b.tenantId && a.workloadKind === b.workloadKind && a.workloadId === b.workloadId && a.vcpuCount === b.vcpuCount && a.maximumWallMs === b.maximumWallMs;
+}
+function sameReceipt(a: AuthenticatedTerminalReceipt, b: AuthenticatedTerminalReceipt): boolean {
+  return a.reservation_id === b.reservation_id && a.state === b.state && a.materialized === b.materialized && a.actual_vcpu_ms === b.actual_vcpu_ms && a.evidence_digest === b.evidence_digest && a.future_materialization_fence === b.future_materialization_fence && a.terminal_authority === b.terminal_authority && a.authority_signature === b.authority_signature;
 }
 function validPeriod(period: number): boolean { const month = period % 100; return period >= 197001 && period <= 999912 && month >= 1 && month <= 12; }
 const WORKLOAD_ID = /^[A-Za-z0-9:_./-]{1,256}$/;

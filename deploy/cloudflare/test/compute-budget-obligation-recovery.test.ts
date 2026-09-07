@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { ComputeBudgetClient, ComputeBudgetClientError } from "../src/lib/compute_budget_client";
+import { ComputeBudgetClient, ComputeBudgetClientError, type AuthenticatedTerminalReceipt } from "../src/lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding, type ComputeObligationStorage, type ComputeTransport } from "../src/lib/compute_budget_obligation";
 
 const tenantId = "22222222-2222-4222-8222-222222222222";
 const firstId = "11111111-1111-4111-8111-111111111111";
 const digest = "a".repeat(64);
+function terminal(state: "cancelled" | "settled", id = firstId, actualVcpuMs = state === "settled" ? "12" : "0"): AuthenticatedTerminalReceipt {
+  return { reservation_id: id, state, materialized: state === "settled", actual_vcpu_ms: actualVcpuMs, evidence_digest: digest, future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86) };
+}
 function clone<T>(value: T): T { return value === undefined ? value : structuredClone(value); }
 class Storage implements ComputeObligationStorage {
   readonly values = new Map<string, unknown>();
@@ -37,18 +40,18 @@ describe("compute obligation recovery integration", () => {
   it("keeps terminal cancellation idempotent and accepts only the same settlement proof", async () => {
     const storage = new Storage();
     let settleCalls = 0;
-    const fetcher = vi.fn(async (url: string) => url.endsWith("/reserve") ? ok("prepared") : url.endsWith("/activate") ? ok("active") : url.endsWith("/cancel") ? new Response("conflict", { status: 409 }) : (settleCalls++, ok("settled", settleCalls === 1 ? firstId : "11111111-1111-4111-8111-111111111112")));
+    const fetcher = vi.fn(async (url: string) => url.endsWith("/reserve") ? ok("prepared") : url.endsWith("/activate") ? ok("active") : url.endsWith("/cancel") ? new Response("conflict", { status: 409 }) : (settleCalls++, new Response(JSON.stringify(terminal("settled", "11111111-1111-4111-8111-111111111112")), { status: 200 })));
     const obligations = new ComputeObligations(storage, client(fetcher));
     await obligations.prepare(binding(), 1_000_500);
-    await obligations.abandonUnused(firstId);
-    await obligations.abandonUnused(firstId);
-    expect(settleCalls).toBe(1);
+    await expect(obligations.abandonUnused(firstId)).rejects.toThrow("compute request rejected");
+    await expect(obligations.abandonUnused(firstId)).rejects.toThrow("compute request rejected");
+    expect(settleCalls).toBe(0);
     const dispatched = new ComputeObligations(storage, client(fetcher));
     const secondId = "11111111-1111-4111-8111-111111111112";
     await storage.put(`compute:obligation:${secondId}`, { binding: binding(secondId, "job-2"), phase: "dispatched", deadlineMs: 1_060_000 });
-    await dispatched.settleProven(secondId, "12", digest);
-    await dispatched.settleProven(secondId, "12", digest);
-    await expect(dispatched.settleProven(secondId, "13", digest)).rejects.toThrow("conflict");
+    await dispatched.settleProven(secondId, terminal("settled", secondId));
+    await dispatched.settleProven(secondId, terminal("settled", secondId));
+    await expect(dispatched.settleProven(secondId, terminal("settled", secondId, "13"))).rejects.toThrow("conflict");
   });
 
   it("drains pages fairly with a two-effect budget and skips corrupt records", async () => {
@@ -58,8 +61,8 @@ describe("compute obligation recovery integration", () => {
     const failures = new Set(["11111111-1111-4111-8111-000000000001", "11111111-1111-4111-8111-000000000002"]);
     const transport: ComputeTransport = {
       reserve: async (_t, id) => ({ reservation_id: id, state: "prepared" }), activate: async (_t, id) => ({ reservation_id: id, state: "active" }),
-      settle: async (_t, id) => ({ reservation_id: id, state: "settled" }),
-      cancel: async (_t, id) => { attempted.push(id); if (failures.has(id)) throw new ComputeBudgetClientError("baseline_or_unavailable", "temporary"); return { reservation_id: id, state: "cancelled" }; },
+      settle: async (_t, id, actual) => terminal("settled", id, actual),
+      cancel: async (_t, id) => { attempted.push(id); if (failures.has(id)) throw new ComputeBudgetClientError("baseline_or_unavailable", "temporary"); return terminal("cancelled", id); },
     };
     await storage.put("compute:obligation:00000000-bad", { broken: true });
     for (let n = 1; n <= 28; n++) {

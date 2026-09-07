@@ -46,7 +46,25 @@ function fixture(fetcher: typeof fetch) {
   return { storage, containment };
 }
 
-function receipt(state: string, id = reservationId) { return new Response(JSON.stringify({ reservation_id: id, state }), { status: 200 }); }
+function receipt(state: string, id = reservationId) {
+  const terminal = state === "cancelled" || state === "settled";
+  return new Response(JSON.stringify(terminal ? {
+    reservation_id: id, state, materialized: state === "settled", actual_vcpu_ms: state === "settled" ? "1" : "0",
+    evidence_digest: "a".repeat(64), future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } : { reservation_id: id, state }), { status: 200 });
+}
+function cancelledEvidence(id: string) {
+  return { terminalKind: "cancelled", actualVcpuMs: "0", evidenceDigest: "a".repeat(64), providerReceipt: {
+    reservation_id: id, state: "cancelled", materialized: false, actual_vcpu_ms: "0", evidence_digest: "a".repeat(64),
+    future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } };
+}
+function receiptForRequest(state: string, init?: RequestInit) {
+  const authorization = new Headers(init?.headers).get("authorization") ?? "";
+  const encoded = authorization.slice("ComputeGrant ".length).split(".")[0] ?? "";
+  const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/"))) as { reservation_id: string };
+  return receipt(state, payload.reservation_id);
+}
 
 beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-06T12:00:00Z")));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -87,17 +105,13 @@ describe("compute budget admission integration", () => {
     await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
   });
 
-  it("recovers an activation committed remotely whose HTTP reply was lost", async () => {
+  it("retains an activation with a lost HTTP reply until terminal provider proof", async () => {
     let remotelyActive = false;
-    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+    const fetcher = vi.fn(async (url: string) => {
       if (url.endsWith("/activate")) { remotelyActive = true; throw new Error("lost reply"); }
       if (url.endsWith("/cancel")) {
         expect(remotelyActive).toBe(true);
         return new Response("conflict", { status: 409 });
-      }
-      if (url.endsWith("/settle")) {
-        expect(JSON.parse(String(init.body)).actual_vcpu_ms).toBe("0");
-        return receipt("settled");
       }
       return receipt("prepared");
     });
@@ -105,23 +119,23 @@ describe("compute budget admission integration", () => {
     await expect(first.containment.prepareCompute(binding())).rejects.toThrow("ambiguous");
     const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never,
       { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
-    await restarted.abandonUnusedCompute(reservationId);
+    await expect(restarted.abandonUnusedCompute(reservationId)).rejects.toThrow("compute request rejected");
     await expect(restarted.claimComputeProvider(reservationId, "job-1")).rejects.toThrow("claim refused");
-    expect(await first.storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "terminal", actualVcpuMs: "0" });
+    expect(await first.storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "abandoning" });
   });
 
-  it("keeps a lost activation acknowledgement recoverable and settles zero use on cancel conflict", async () => {
+  it("keeps a lost activation acknowledgement recoverable without fabricating usage", async () => {
     let puts = 0;
-    const fetcher = vi.fn(async (url: string) => url.endsWith("/cancel") ? new Response("conflict", { status: 409 }) : url.endsWith("/settle") ? receipt("settled") : receipt(url.endsWith("/reserve") ? "prepared" : "active"));
+    const fetcher = vi.fn(async (url: string) => url.endsWith("/cancel") ? new Response("conflict", { status: 409 }) : receipt(url.endsWith("/reserve") ? "prepared" : "active"));
     const first = fixture(fetcher);
     const originalPut = first.storage.put.bind(first.storage);
     first.storage.put = async (key, value) => { puts++; if (puts === 2) throw new Error("activation acknowledgement lost"); return originalPut(key, value); };
     await expect(first.containment.prepareCompute(binding())).rejects.toThrow("activation acknowledgement lost");
     expect((await first.storage.get<{ phase: string }>(`compute:obligation:${reservationId}`))?.phase).toBe("preparing");
     first.storage.put = originalPut;
-    await first.containment.abandonUnusedCompute(reservationId);
-    expect(fetcher.mock.calls.map(call => String(call[0])).filter(url => url.endsWith("/settle"))).toHaveLength(1);
-    expect((await first.storage.get<{ phase: string; actualVcpuMs?: string }>(`compute:obligation:${reservationId}`))?.actualVcpuMs).toBe("0");
+    await expect(first.containment.abandonUnusedCompute(reservationId)).rejects.toThrow("compute request rejected");
+    expect(fetcher.mock.calls.map(call => String(call[0])).filter(url => url.endsWith("/settle"))).toHaveLength(0);
+    expect((await first.storage.get<{ phase: string }>(`compute:obligation:${reservationId}`))?.phase).toBe("abandoning");
   });
 
   it("retains a failed final-page cleanup retry across the scheduled sweep", async () => {
@@ -146,8 +160,59 @@ describe("compute budget admission integration", () => {
     // must finish it before retiring the retry marker.
     expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({ phase: "terminal" });
     expect(storage.values.has("compute:drain-retry")).toBe(false);
+    expect(storage.values.has("compute:drain-state")).toBe(false);
     expect(await storage.get(`compute:obligation:${reservationId}`)).toMatchObject({
       phase: "terminal", terminalKind: "cancelled",
     });
+  });
+
+  it("recovers a cursor after a crash between durable state and mirror writes", async () => {
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => receiptForRequest(url.endsWith("/cancel") ? "cancelled" : "active", init));
+    const first = fixture(fetcher);
+    for (let n = 1; n <= 26; n++) {
+      const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
+      await first.storage.put(`compute:obligation:${id}`, n === 26 ? {
+        binding: { ...binding(id, id), token: token(Date.now() - 120_000, id, id) }, phase: "preparing", deadlineMs: Date.now() - 60_000,
+      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...cancelledEvidence(id) });
+    }
+    const originalPut = first.storage.put.bind(first.storage);
+    let failMirror = true;
+    first.storage.put = async (key, value) => {
+      if (key === "compute:drain-cursor" && failMirror) { failMirror = false; throw new Error("cursor mirror crash"); }
+      return originalPut(key, value);
+    };
+    await expect(first.containment.drainUnusedCompute()).rejects.toThrow("cursor mirror crash");
+    expect(first.storage.values.get("compute:drain-state")).toMatchObject({ retryRequired: false, cursor: expect.stringContaining("compute:obligation:") });
+    first.storage.put = originalPut;
+
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    await restarted.drainUnusedCompute();
+    expect(await first.storage.get(`compute:obligation:11111111-1111-4111-8111-000000000026`)).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
+    expect(first.storage.values.has("compute:drain-state")).toBe(false);
+  });
+
+  it("retains an earlier-page 503 through the tail page and retries it after restart", async () => {
+    let unavailable = true;
+    const failedId = "11111111-1111-4111-8111-000000000001";
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => unavailable && url.endsWith("/cancel")
+      ? new Response("unavailable", { status: 503 }) : receiptForRequest("cancelled", init));
+    const first = fixture(fetcher);
+    for (let n = 1; n <= 26; n++) {
+      const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
+      await first.storage.put(`compute:obligation:${id}`, n === 1 || n === 26 ? {
+        binding: { ...binding(id, id), token: token(Date.now() - 120_000, id, id) }, phase: "preparing", deadlineMs: Date.now() - 60_000,
+      } : { binding: binding(id, id), phase: "terminal", deadlineMs: Date.now() + 60_000, ...cancelledEvidence(id) });
+    }
+    await first.containment.drainUnusedCompute();
+    expect(first.storage.values.get("compute:drain-state")).toMatchObject({ retryRequired: true, cursor: expect.stringContaining("000000000025") });
+    unavailable = false;
+    const restarted = new ContainmentDO({ storage: first.storage, blockConcurrencyWhile: gate() } as never, { FABRIC_COMPUTE_URL: "https://fabric.example" } as never);
+    await restarted.drainUnusedCompute();
+    expect(await first.storage.get(`compute:obligation:11111111-1111-4111-8111-000000000026`)).toMatchObject({ phase: "terminal" });
+    expect(first.storage.values.get("compute:drain-retry")).toBe(true);
+    await restarted.drainUnusedCompute();
+    expect(await first.storage.get(`compute:obligation:${failedId}`)).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
+    await restarted.drainUnusedCompute();
+    expect(first.storage.values.has("compute:drain-state")).toBe(false);
   });
 });
