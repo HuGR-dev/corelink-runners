@@ -6,7 +6,7 @@
   "observed_at": "2026-09-07T01:15:00Z",
   "source": {
     "repository": "corelink-runners",
-    "commit_sha": "d1539be4fad9caf8c62ce36d05ce5405644f33dd",
+    "commit_sha": "b3e8618f14aebb9e43988fb62ce80054a2624f6d",
     "path": "docs/plan/evidence/T3-W18-containment-live.json"
   },
   "claims": ["A3.30", "T3-W18"],
