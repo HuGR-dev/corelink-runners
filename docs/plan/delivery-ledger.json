@@ -2024,7 +2024,7 @@
         "T3-W17",
         "T7-W4b"
       ],
-      "next_action": "Source review and focused checks complete. Acceptance pending: Version-bound three-state live10/10 matrix, nonempty ordered resume, side effects and running-instance observations remain RED.",
+      "next_action": "T3-W18 code acceptance is complete: signed ingress is restored, containment intake/redrive remains paused, and the reviewed evidence/configuration stack is incorporated. The shared Sprint 1 gate retains GitHub startup/spending resolution and fresh version-bound workflow_job/runner/completion 10/10 evidence.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -2039,9 +2039,19 @@
       },
       "evidence": [
         "docs/plan/evidence/T3-W18-containment-live.json",
-        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json",
+        "T3-W18 evidence/config stack d1539be4 through d661a658 is integrated; the minor teardown evidence limitation is retained and does not imply a live teardown claim."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "source_commits": ["d1539be4", "6effb201", "44cc3d56", "d661a6584dbcbed83b5d8fc6aed4c2b900c35ca4"],
+        "integration_tip": "84a7d77",
+        "evidence": ["Signed repository webhook ingress restored.", "Containment intake and redrive are explicitly paused.", "Evidence JSON parses and the integration diff is clean."],
+        "teardown_evidence_limitation": "Retained as a limited source-evidence qualification; it is not asserted as live teardown proof.",
+        "shared_bundle_gate": ["GitHub startup/spending resolution", "fresh version-bound workflow_job/runner/completion matrix: 10/10", "nonempty ordered resume, side-effect, and running-instance observations"]
+      }
     },
     {
       "id": "T6-W13",
