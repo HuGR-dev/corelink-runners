@@ -507,6 +507,10 @@ function fakeSlots(mode: "admit" | "refuse" | "throw") {
   const markSpawnClaimActive = vi.fn(async (jobId: string, generation: number, ownerToken: string) =>
     claims.get(jobId)?.generation === generation && claims.get(jobId)?.ownerToken === ownerToken);
   const bindSpawnClaimProvider = vi.fn(async () => true);
+  // The production start path fences the exact provider handle before start.
+  // This slot-selection double does not model attempt recovery, but it must
+  // acknowledge that fence so the admission journey can reach its happy path.
+  const persistActiveAttempt = vi.fn(async () => true);
   const releaseSpawnClaim = vi.fn(async (jobId: string, generation: number, ownerToken: string) => {
     const claim = claims.get(jobId);
     if (!claim) return "missing";
@@ -515,7 +519,7 @@ function fakeSlots(mode: "admit" | "refuse" | "throw") {
   });
   const recordRetry = vi.fn(async () => ({ attempts: 1, recorded: true }));
   const readRetry = vi.fn(async () => 1);
-  const stub = { acquire, release, acquireSpawnClaim, markSpawnClaimActive, bindSpawnClaimProvider, releaseSpawnClaim, recordRetry, readRetry };
+  const stub = { acquire, release, acquireSpawnClaim, markSpawnClaimActive, bindSpawnClaimProvider, persistActiveAttempt, releaseSpawnClaim, recordRetry, readRetry };
   return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), _stub: stub, setMode: (next: typeof mode) => { currentMode = next; } };
 }
 

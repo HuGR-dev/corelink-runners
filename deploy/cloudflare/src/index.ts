@@ -691,6 +691,27 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
   }
 
   /**
+   * Retire one confirmed-dead start attempt so the same claim may mint a fresh
+   * JIT runner and retry. The slot and claim belong to the workflow job; the
+   * provider identity belongs only to the single-use runner just destroyed.
+   */
+  async retireActiveAttemptForRetry(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return false;
+      const claimKey = `spawn-claim:${jobId}`;
+      const claim = await storage.get<SpawnClaimRecord>(claimKey);
+      if (!claim || claim.generation !== generation || claim.ownerToken !== ownerToken || claim.phase !== "active") return false;
+      await storage.delete(key);
+      // Clear only the retired runner identity, so attempt B can bind its own
+      // JIT identity without weakening the generation/owner fence.
+      await storage.put(claimKey, { ...claim, providerIdentity: undefined });
+      return true;
+    });
+  }
+
+  /**
    * Completion deliberately accepts a provider identity, never an unqualified
    * job id. A stale completion for runner A therefore cannot release a later
    * generation B for the same job.
@@ -2280,20 +2301,31 @@ async function abandonContainer(
   handle: string,
   ns: GhostNs,
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   await recordGhostContainer(env, handle, ns, reason);
+  let container: { teardown(): Promise<void>; isAlive(): Promise<boolean> } | undefined;
+  let teardownSucceeded = false;
   try {
-    const c =
+    container = (
       ns === "check"
         ? getContainer(env.CHECK_HOST_CONTAINER, handle)
-        : getContainer(env.RUNNER_CONTAINER, handle);
-    await c.teardown();
+        : getContainer(env.RUNNER_CONTAINER, handle)
+    ) as unknown as { teardown(): Promise<void>; isAlive(): Promise<boolean> };
+    await container.teardown();
+    teardownSucceeded = true;
   } catch (e) {
     // Expected when the DO never materialised. The `ghost:` record above is what
     // makes this survivable: the cron re-destroys and confirms.
     logEvent("info", "abandon_teardown_threw", { handle, error: (e as Error).message });
   }
   await bumpMetrics(env, "container_start_abandoned");
+  if (!teardownSucceeded || !container) return false;
+  try {
+    return !(await container.isAlive());
+  } catch (e) {
+    logEvent("info", "abandon_liveness_threw", { handle, error: (e as Error).message });
+    return false;
+  }
 }
 
 /**
@@ -2391,7 +2423,7 @@ export async function sweepGhostContainers(env: Env): Promise<number> {
 async function startWithRetry<T>(
   provision: (attempt: number) => Promise<T>,
   start: (handle: string, provisioned: T) => Promise<void>,
-  abandon: (handle: string, provisioned: T, reason: string) => Promise<void>,
+  abandon: (handle: string, provisioned: T, reason: string) => Promise<boolean | void>,
   maxAttempts = SPAWN_MAX_ATTEMPTS,
 ): Promise<{ handle: string; provisioned: T; attempt: number }> {
   let lastErr: unknown;
@@ -2420,7 +2452,11 @@ async function startWithRetry<T>(
       // Cancel it. Losing the race to a timeout does NOT mean nothing started —
       // see the ghost-container note above. This runs on EVERY failed attempt,
       // including the last one, so an exhausted spawn leaves no box behind either.
-      await abandon(handle, provisioned, (e as Error).message);
+      // Fabric callers retain their established best-effort ghost cleanup. The
+      // autoscaler returns false when it cannot prove its exact attempt is down;
+      // in that case a replacement JIT must never be minted.
+      const safeToRetry = await abandon(handle, provisioned, (e as Error).message);
+      if (safeToRetry === false) break;
       if (attempt < maxAttempts) {
         await new Promise((r) => setTimeout(r, 300 * attempt));
       }
@@ -2448,10 +2484,14 @@ async function cancelSpawnAttempt(
     installationId: string;
     handle: string;
     minted?: MintedJit;
+    // `startWithEnv` is issued only after this durable fence resolves. If the
+    // fence itself failed, no provider start occurred and a fresh retry does
+    // not depend on proving a container liveness result.
+    activeAttemptPersisted?: boolean;
     reason: string;
   },
-): Promise<void> {
-  const { jobId, repo, installationId, handle, minted, reason } = opts;
+): Promise<boolean> {
+  const { jobId, repo, installationId, handle, minted, activeAttemptPersisted, reason } = opts;
   let registrationDeleted = false;
   try {
     if (minted) {
@@ -2462,7 +2502,22 @@ async function cancelSpawnAttempt(
         installationId,
       );
     }
-    await abandonContainer(env, handle, "runner", reason);
+    const tornDown = await abandonContainer(env, handle, "runner", reason);
+    if (!activeAttemptPersisted) return true;
+    if (!tornDown) {
+      logEvent("error", "container_start_abandon_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
+    // The start callback records this handle before issuing its provider RPC.
+    // Retire only the matching attempt after liveness says it is down, retaining
+    // the same slot/claim for attempt B. Any stale or replacement record blocks
+    // the retry rather than clearing a newer runner's ownership proof.
+    const active = await concurrencySlots(env).readActiveAttempt(jobId);
+    if (!active || active.handle !== handle || active.runnerName !== minted?.runnerName
+      || !(await concurrencySlots(env).retireActiveAttemptForRetry(jobId, active.generation, active.ownerToken, handle))) {
+      logEvent("error", "container_start_attempt_retire_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
     logEvent("error", "container_start_abandoned", {
       jobId,
       repo,
@@ -2471,8 +2526,10 @@ async function cancelSpawnAttempt(
       registrationDeleted,
       reason,
     });
+    return true;
   } catch (e) {
     logEvent("error", "abandon_failed", { jobId, handle, error: (e as Error).message });
+    return false;
   }
 }
 
@@ -2498,7 +2555,7 @@ async function spawnRunner(
   opts: ContainmentDriveOpts,
 ): Promise<{ handle: string; runnerName: string; attempt: number }> {
   const { repo, installationId, labels } = opts;
-  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number }>(
+  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number; activeAttemptPersisted?: boolean }>(
     async (attempt) => {
       const minted = await mintJit(env, repo, labels, installationId);
       // Persist the exact GitHub runner identity before its container can start.
@@ -2527,6 +2584,7 @@ async function spawnRunner(
       if (!(await concurrencySlots(env).persistActiveAttempt(
         jobId, h, minted.runnerName, minted.runnerId, provisioned.attempt, repo, installationId, mint.preparationId,
       ))) throw new Error("active spawn attempt was not durably recorded");
+      provisioned.activeAttemptPersisted = true;
       if (mint.computeReservationId) await containmentAuthority(env).claimComputeProvider(mint.computeReservationId, jobId);
       await getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
         CORELINK_RUNNER_JITCONFIG: minted.jit,
@@ -2534,7 +2592,7 @@ async function spawnRunner(
       });
     },
     (h, provisioned, reason) =>
-      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, reason }),
+      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, activeAttemptPersisted: provisioned.activeAttemptPersisted, reason }),
     // A fresh provider attempt needs its own independently funded reservation.
     mint.computeReservationId ? 1 : SPAWN_MAX_ATTEMPTS,
   );
