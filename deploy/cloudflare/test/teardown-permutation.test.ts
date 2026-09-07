@@ -189,7 +189,9 @@ const completed = (jobId: number, runnerName?: string) => ({
   installation: { id: INSTALLATION },
 });
 
-function baseEnv(kv: ReturnType<typeof fakeKv>): Env {
+type TeardownTestEnv = Env & { releaseCalls: unknown[][] };
+
+function baseEnv(kv: ReturnType<typeof fakeKv>): TeardownTestEnv {
   const env = {
     RUNNER_CONTAINER: { _ns: "runner" },
     CHECK_HOST_CONTAINER: { _ns: "check" },
@@ -213,7 +215,7 @@ function baseEnv(kv: ReturnType<typeof fakeKv>): Env {
   const authorities = makeWorkerAuthorities(kv);
   env.CONTAINMENT = authorities.CONTAINMENT as never;
   env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
-  return env;
+  return Object.assign(env, { releaseCalls: authorities.releaseCalls });
 }
 
 /** Spawn one box for `jobId`; returns its container and the name minted for it. */
@@ -323,5 +325,57 @@ describe("teardown correlates on runner_name, not the spawn-request job id", () 
     // B is still running and must be untouched.
     expect(b.box.teardown).not.toHaveBeenCalled();
     expect(a.box.teardown).toHaveBeenCalledTimes(1); // not double-torn-down
+  });
+
+  it("retains the teardown obligation when teardown throws and the provider remains alive", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9006);
+    a.box.teardown.mockRejectedValueOnce(new Error("provider unavailable"));
+    a.box.isAlive.mockResolvedValue(true);
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9006, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(true);
+    expect(kv.store.has("jhandle:9006")).toBe(true);
+    expect(env.releaseCalls).toEqual([]);
+  });
+
+  it("retains the teardown obligation when provider liveness cannot be confirmed", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9007);
+    a.box.isAlive.mockRejectedValueOnce(new Error("liveness unavailable"));
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9007, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(true);
+    expect(kv.store.has("jhandle:9007")).toBe(true);
+    expect(env.releaseCalls).toEqual([]);
+  });
+
+  it("cleans both bindings after teardown confirms the provider is down", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9008);
+    a.box.isAlive.mockResolvedValue(false);
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9008, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(false);
+    expect(kv.store.has("jhandle:9008")).toBe(false);
+    expect(env.releaseCalls).toEqual([["9008"]]);
   });
 });
