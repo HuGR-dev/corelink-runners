@@ -1,0 +1,9 @@
+{
+  "name": "corelink-t9-w1-acceptance-authority",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  }
+}
