@@ -79,20 +79,20 @@
   "sprints": [
     {
       "id": 1,
-      "state": "implementation",
-      "tip_commit": null,
+      "state": "acceptance",
+      "tip_commit": "42435da0ebb9a37f23689ce7a8f44739e71273b3",
       "ci": {
         "status": "not_run",
         "commit": null,
         "evidence": []
       },
       "acceptance": {
-        "status": "pending",
-        "evidence": [],
+        "status": "pending_shared_b1_gate",
+        "evidence": ["Sprint 1 implementation closure: 12/12 work packages are implementation-complete and code-accepted at the composed candidate."],
         "shared_bundle_gate": {
           "status": "pending",
           "policy": "PROMOTE source, focused checks, and version-bound execution cards close individual code acceptance. Shared deploy/live qualification and full CI run once on the composed Sprint 1 bundle and remain mandatory before B1 merge.",
-          "requirements": ["version-bound deployment/runtime/configuration", "applicable live receipts", "full Sprint 1 CI"]
+          "requirements": ["version-bound deployment/runtime/configuration", "applicable live receipts", "full Sprint 1 CI", "T6-W2 signing, publication, and self-hosted Windows availability"]
         }
       },
       "merge_commit": null
@@ -378,7 +378,7 @@
       "dependencies": [
         "D11"
       ],
-      "next_action": "Source review and focused checks complete. Acceptance pending: Signed0.1.12 publication, verified immutable consumer pins and actual authenticated HIT/restore remain absent.",
+      "next_action": "T6-W2 code acceptance is complete. The shared Sprint 1 gate retains signing and publication of v0.1.12, immutable consumer pins, authenticated HIT/restore, and self-hosted Windows availability against the routed corelink-workspaces release.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -396,9 +396,19 @@
       },
       "evidence": [
         "docs/adr/0011-memoize-miss-contract.md",
-        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json",
+        "docs/plan/execution/2026-09-07-t6-w2-workspaces-routing.md"
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "workspace_repository": "https://github.com/HuGR-Labs/corelink-workspaces.git",
+        "package_evidence_commits": ["4644606d658636f060210e4c79c7549bfeb2d71d", "ea53a72d82b4ed547d66b9686b9f41243de3706c"],
+        "release_guard_commits": ["c4c822cc6829c6064be31f0be285f28c661c77d3", "7f77f4a3d1188732aab5135109a24e507abecd6e", "89c6c97df51987162c517962557b7ae0d1518145", "edeeec8c165a4f24573b4256597ae816c9cad5c6", "d3a3e19291b9377e63fd70b19fb65f43d6dfe6b0"],
+        "routing_record": "docs/plan/execution/2026-09-07-t6-w2-workspaces-routing.md",
+        "shared_bundle_gate": ["signed v0.1.12 publication", "verified immutable consumer pins", "actual authenticated HIT/restore", "self-hosted Windows availability"]
+      }
     },
     {
       "id": "T6-W3",
