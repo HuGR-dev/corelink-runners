@@ -1307,18 +1307,18 @@
     {
       "id": "T9-W1",
       "sprint": 1,
-      "state": "active",
-      "implementation": "partial",
+      "state": "ready",
+      "implementation": "complete",
       "owner": "root",
       "dependencies": [
         "D2",
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "Keep T9-W1 partial and active. Resolve the BLOCKED-TARGET inputs recorded in docs/plan/execution/2026-09-06-t9-w1-live-acceptance-card.md, then execute the version-bound live receipt process under the T9-W1 authority/D2 contract.",
+      "next_action": "T9-W1 implementation is complete and its bounded authority is ready. Keep acceptance unaccepted until the Sprint 1 bundle gate records the version-bound R2/R3/R5 receipts and closes the F005/F007 provider-terminal dependencies.",
       "blockers": [
-        "Qualified provider terminal/cancellation and actual usage remain F005/F007; configured8h reservation does not by itself prove provider hard-stop.",
-        "Production signing/public keys and reconciled external baseline are not provisioned; paired server migration and live acceptance remain."
+        "Authority remains partial: executor protocol is unpromoted and provider materialization is disabled.",
+        "Version-bound R2/R3/R5 live receipts and F005/F007 qualified provider terminal/cancellation and actual usage remain required at the Sprint 1 bundle gate."
       ],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
@@ -1343,7 +1343,8 @@
         "docs/plan/execution/2026-09-06-shared-compute-verification.json",
         "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate.",
         "Decision contract integrated from 97d6dd33f1a8e34b78cd242f068aa5b9384d839b as 6489f31; documentary authority only, no completion credit.",
-        "BLOCKED-TARGET preflight card integrated from 8c79db47752f72786857258adc8c29ff3a7061af as 062debf6b99b2a1bf90f618231bdbd9a31186086; documentary preparation only, no acceptance or live mutation."
+        "BLOCKED-TARGET preflight card integrated from 8c79db47752f72786857258adc8c29ff3a7061af as 062debf6b99b2a1bf90f618231bdbd9a31186086; documentary preparation only, no acceptance or live mutation.",
+        "Promoted Runner and authority composition: terminal receipt signature verification rejects noncanonical encodings and effective-byte mutations. Focused suite: 66/66 passed; Runner typecheck and composed authority typecheck passed; authority evidence JSON parsed."
       ],
       "historical_sprint": 1,
       "decision_contract": {
@@ -1358,7 +1359,18 @@
         "source_commit": "8c79db47752f72786857258adc8c29ff3a7061af",
         "integration_commit": "062debf6b99b2a1bf90f618231bdbd9a31186086",
         "path": "docs/plan/execution/2026-09-06-t9-w1-live-acceptance-card.md",
-        "reason": "No qualified non-production compute origin, deployed authority binding, grant-key configuration, bounded tenant/grants, or durable non-production ledger baseline is available. The card authorizes no live mutation."
+        "reason": "The earlier card did not qualify a target. The bounded non-production authority is now recorded below; it does not satisfy the remaining version-bound R2/R3/R5 or F005/F007 bundle-gate requirements."
+      },
+      "acceptance": {
+        "status": "ready",
+        "complete": false,
+        "runner_source_commits": ["e27d714", "9985c251", "33d1b76", "fbbf956", "d7eb858bc5ebbf3709b1e9ea2680549ef46b36a5"],
+        "authority_source_commits": ["f73c218", "7267ffb", "391b1c8"],
+        "integration_tip": "a6a6688ce4be8d5d1eb4abbdaf3682663558aa12",
+        "authority_evidence": "docs/plan/execution/2026-09-07-t9-w1-nonprod-authority.json",
+        "public_binding": "workers.dev binding, authority version 5d7fe5f5-14f3-43ba-a605-3c685cdd4076, source SHA-256 1aaf0b179941bd3395ad7c1514bd305fc49ac69420df4c66fe89e8fd266b019f",
+        "evidence": ["T9 focused Worker suite: 66/66 passed.", "deploy/cloudflare typecheck passed.", "authority composed tsc and authority evidence JSON parsing passed."],
+        "residual": ["authority is partial: executor protocol remains unpromoted and compute materialization disabled", "live R2/R3/R5 receipts remain", "F005/F007 provider-terminal dependencies remain"]
       }
     },
     {
