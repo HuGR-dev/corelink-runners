@@ -1933,11 +1933,12 @@
         "O-CANARY",
         "T7-W4b"
       ],
-      "next_action": "Source review and focused checks complete. Acceptance pending: Deployed current/stale metrics-key cycles, page delivery and authenticated acknowledgement remain absent.",
+      "next_action": "T6-W13 implementation is complete and acceptance is ready. Bind and prove the version-bound live current/stale metrics-key cycle, provider page delivery, and authenticated acknowledgement; retain the Miniflare -88 infrastructure signal separately from product acceptance.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
-        "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae"
+        "2d2930ac7fb0ebdcc5c76291fa12f94abb586dae",
+        "1932a81a5b9b530980678fb02d3661e812de1f48"
       ],
       "review": {
         "status": "approved",
@@ -1947,9 +1948,25 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
+        "docs/plan/execution/2026-09-06-sprint1-source-closure.json",
+        "PROMOTE 539facc replayed as 1932a81. Re-review reports 17 focused checks plus typecheck; conflict-composition rerun passed page-ack 4/4 plus typecheck. Miniflare -88 is retained as infrastructure signal only."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "ready",
+        "complete": false,
+        "source_commit": "539facc4ff893db79d9465c9a50a5fcb13cf7638",
+        "integration_commit": "1932a81a5b9b530980678fb02d3661e812de1f48",
+        "evidence": [
+          "PROMOTE re-review: 17 focused checks and package typecheck passed.",
+          "Conflict-composition rerun: page-ack.test.ts 4/4 and package typecheck passed."
+        ],
+        "residual": [
+          "Version-bound live metrics-key binding (current/stale) remains required.",
+          "Provider page delivery and authenticated acknowledgement remain required.",
+          "Miniflare -88 remains an infrastructure signal, not a product failure."
+        ]
+      }
     },
     {
       "id": "T6-W14",
