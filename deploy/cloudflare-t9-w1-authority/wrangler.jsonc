@@ -13,7 +13,8 @@
     "T9_MAX_VCPU_MS": "1000",
     "T9_MAX_WALL_MS": "1000",
     "T9_EXPIRES_AT_MS": "1788785252000",
-    "T9_EXECUTOR_PROTOCOL": "unpromoted"
+    "T9_EXECUTOR_PROTOCOL": "unpromoted",
+    "T9_SOURCE_SHA256": "784d57229fcf6f4186b00e7ae6725e638ab9244f934651a0cf8926efa5653576"
   },
   "d1_databases": [
     {
@@ -22,5 +23,7 @@
       "database_id": "6011a014-718d-4901-928a-1c9ac3acb558",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "durable_objects": { "bindings": [{ "name": "T9_TENANT_ADMISSION", "class_name": "TenantAdmission" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TenantAdmission"] }]
 }

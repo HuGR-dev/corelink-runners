@@ -3,12 +3,13 @@
   "work_packet": "T9-W1",
   "decision_anchor": "97d6dd33f1a8e34b78cd242f068aa5b9384d839b",
   "acceptance_card": "8c79db47752f72786857258adc8c29ff3a7061af",
-  "status": "PARTIAL_PROVIDER_AUTHORITY_READY",
+  "status": "PARTIAL_PROVIDER_AUTHORITY_READY_STRICT_V2",
   "deployed_at": "2026-09-07T00:55:00Z",
   "authority": {
     "origin": "https://corelink-t9w1-authority-20260907-0047.gmhelmold.workers.dev",
     "worker": "corelink-t9w1-authority-20260907-0047",
-    "version_id": "846571dc-f50b-4a44-a7e0-0b14cbeeb3fa",
+    "version_id": "3ea20357-84f4-4eca-8cf3-099930f73749",
+    "deployment_source_sha256": "784d57229fcf6f4186b00e7ae6725e638ab9244f934651a0cf8926efa5653576",
     "workers_dev_only": true,
     "custom_routes": false,
     "provider_compute_binding": false,
@@ -20,7 +21,8 @@
     "kind": "Cloudflare D1",
     "name": "corelink-t9w1-authority-20260907-0047",
     "id": "6011a014-718d-4901-928a-1c9ac3acb558",
-    "migration": "deploy/cloudflare-t9-w1-authority/migrations/0001_reservations.sql",
+    "migrations": ["deploy/cloudflare-t9-w1-authority/migrations/0001_reservations.sql", "deploy/cloudflare-t9-w1-authority/migrations/0002_tenant_atomic_receipts.sql"],
+    "tenant_serialization": "one Cloudflare Durable Object identity per tenant serializes aggregate-ceiling read, replay detection, and reservation insert",
     "remote_state_after_preflight": {
       "prepared": 1,
       "cancelled": 1,
@@ -35,12 +37,19 @@
     "grant_public_key": "Drsq7xkgGdecepNgba2zk2zPMkCCK5JS4USbOgYbQPQ",
     "terminal_public_key": "UeNT1GDmd63N5hwyH86xTY7LSgcSSEg_QvfQPgfsUD4",
     "maximum_vcpu_ms": "1000",
-    "maximum_wall_ms": "1000"
+    "maximum_wall_ms": "1000",
+    "deployment_source_sha256": "784d57229fcf6f4186b00e7ae6725e638ab9244f934651a0cf8926efa5653576"
   },
   "key_handling": {
     "issuer_private_key": "generated outside Git with mode 0600; not committed, logged, sent, or published",
     "terminal_private_key": "Cloudflare Worker secret T9_TERMINAL_SIGNING_PRIVATE_KEY; not committed, logged, sent, or published",
     "published_material": "only the two public keys above and the public binding endpoint"
+  },
+  "strict_runner_compatibility": {
+    "runner_commit": "9985c251",
+    "wire_receipt_fields": ["reservation_id", "state", "materialized", "actual_vcpu_ms", "evidence_digest", "future_materialization_fence", "terminal_authority", "authority_signature"],
+    "canonical_signed_envelope": ["receipt_version", "reservation_id", "tenant_id", "grant_digest", "generation", "state", "materialized", "actual_vcpu_ms", "evidence_digest", "future_materialization_fence", "authority", "key_id", "alg", "signed_at_ms", "expires_at_ms", "signature"],
+    "binding": "The strict eight-field response remains byte-compatible with 9985c251. authority_signature signs the persisted versioned canonical envelope, which binds tenant, grant digest, generation and expiry without adding fields the strict client rejects."
   },
   "focused_live_preflight": {
     "binding_get": { "status": 200 },
@@ -63,6 +72,10 @@
     },
     "late_activate_after_cancel": { "status": 409, "error": "reservation_cancelled" },
     "hard_stop_before_materialization": { "status": 429, "error": "monthly_compute_refused" },
+    "two_concurrent_reservations_same_tenant": { "statuses": [200, 429], "meaning": "per-tenant Durable Object serialization admits at most one 600-vCPU-ms reservation below the 1000-vCPU-ms ceiling" },
+    "idempotent_replay": { "status": 200, "meaning": "same reservation and grant digest returns prepared without a second budget effect" },
+    "restart_replay": { "before_redeploy": 200, "after_worker_redeploy": 200, "cancel_after_redeploy": { "status": 200, "materialized": false }, "version_after_redeploy": "3ea20357-84f4-4eca-8cf3-099930f73749" },
+    "expiry": { "implementation": "the expiry check is the first branch, before the public binding and every route; all routes return 410 after T9_EXPIRES_AT_MS", "live_wait": "not performed because the target is bounded to 12 hours" },
     "executor_start_or_settlement": { "status": 503, "error": "executor_protocol_unpromoted" }
   },
   "non_claims": [
