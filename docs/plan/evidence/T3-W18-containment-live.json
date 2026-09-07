@@ -3,89 +3,111 @@
   "artifact_id": "t3-w18-containment-live",
   "kind": "probe",
   "status": "RED",
-  "observed_at": "2026-09-05T19:12:50.003Z",
+  "observed_at": "2026-09-07T00:47:58Z",
   "source": {
     "repository": "corelink-runners",
     "commit_sha": "e89f9a7c289bb8069ac266d4c94b8649f291a73c",
     "path": "docs/plan/evidence/T3-W18-containment-live.json"
   },
   "claims": ["A3.30", "T3-W18"],
-  "version": { "id": "95b39a6a-cf7e-4c5b-95fd-53dc290498f9" },
+  "version": { "id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4" },
   "evidence": {
-    "scope": "Production containment deployment and bounded smoke; incomplete live acceptance",
-    "deployment": {
-      "status": "PASS",
+    "scope": "Version-bound production three-state containment probe; final safety posture retained",
+    "target_proof": {
       "worker": "corelink-spawn-worker",
-      "deployment_id": "f091a0a1-9ba1-407c-9f61-b2425c2eafae",
-      "created_at": "2026-09-05T19:12:20.294705Z",
-      "traffic_percentage": 100,
-      "previous_version_id": "9cd10dac-b239-4fd7-84de-34abf9c9968e",
-      "AUTOSCALER_REDRIVE_PAUSED": "1",
-      "AUTOSCALER_INTAKE_PAUSED": null,
-      "intake_binding_state": "absent",
+      "source_commit_sha": "e89f9a7c289bb8069ac266d4c94b8649f291a73c",
+      "source_tree": "fc7d4052eefa27c5c2f2cbd5212f987e444523c2",
+      "original_config_sha256": "88eea2c09c776d75d0747242814b396221d51579a3aa8b72a997af6504e3f188",
       "containment_namespace_id": "4915d895460b4db8b1eb634770286efe",
-      "containment_admin_binding_present": true,
-      "prior_binding_names_retained": true,
-      "prior_namespace_ids_unchanged": true,
-      "container_application_changes": "Wrangler reported no changes for RunnerContainer and CheckHostContainer; this is not a running-instance inventory proof"
+      "migrations_retained": ["v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+      "runner_container_application": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "check_host_container_application": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
+      "traffic": "100%",
+      "fault_injection": "none; no authorized production job or webhook payload was fabricated"
     },
-    "preflight": {
-      "rhandle_kv_prefix": "rhandle:",
-      "pagination_complete": true,
-      "handle_count": 0,
-      "github_runner_registrations": "All registered runners in corelink-runners and corelink-server were offline and not busy; read-only inspection",
-      "provider_instance_inventory": "NOT_COLLECTED"
+    "three_state_live_deployments": [
+      {
+        "state": "intake_paused_redrive_enabled",
+        "deployment_id": "e81e4396-685b-4100-be95-02ab4018d8d3",
+        "version_id": "70715de6-54e1-4ed8-bdfd-c3754b86eb6d",
+        "created_at": "2026-09-07T00:36:59.451254Z",
+        "config_sha256": "82616ffa1d7557692b3e9ab1cdb57ccbdcf5915c3642fcecc0548fa98cb2f71e",
+        "config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "0"},
+        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": true, "backlog_count": 0, "drain_cursor": 0}
+      },
+      {
+        "state": "intake_enabled_redrive_paused",
+        "deployment_id": "cd43dcd4-fc2e-4170-a3e4-9ada628b1f38",
+        "version_id": "23075dc7-eaa1-4223-a777-628889356ff3",
+        "created_at": "2026-09-07T00:39:52.687876Z",
+        "config_sha256": "88eea2c09c776d75d0747242814b396221d51579a3aa8b72a997af6504e3f188",
+        "config": {"AUTOSCALER_INTAKE_PAUSED": "0/absent", "AUTOSCALER_REDRIVE_PAUSED": "1"},
+        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": false, "backlog_count": 0, "drain_cursor": 0}
+      },
+      {
+        "state": "both_paused_final_recovery_posture",
+        "deployment_id": "df6a469c-164b-4f8e-b91c-b36a21304e34",
+        "version_id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4",
+        "created_at": "2026-09-07T00:40:35.041487Z",
+        "config_sha256": "aeba9554a7357d717d26b7a04a981cadbe3f9d6a71003d4210322bf83bbca400",
+        "config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"},
+        "control_response": {"http_status": 200, "schema_version": 1, "drain_requested": false, "intake_paused": true, "backlog_count": 0, "drain_cursor": 0}
+      }
+    ],
+    "authenticated_controls": {
+      "unauthenticated_drain_http_status": 401,
+      "authenticated_nonempty_body_http_status": 400,
+      "authenticated_nonempty_body_response": {"error": "body must be empty"},
+      "credentials": "admin key loaded from the authorized local 0600 file; value excluded"
     },
-    "smoke": {
-      "status": "PASS",
-      "passed": 4,
-      "failed": 0,
-      "probes": [
-        { "name": "unauthenticated webhook", "method": "POST", "path": "/webhook", "status": 401 },
-        { "name": "unauthenticated drain", "method": "POST", "path": "/internal/v1/containment/drain", "status": 401 },
-        { "name": "authenticated nonempty drain body", "method": "POST", "path": "/internal/v1/containment/drain", "status": 400 },
-        {
-          "name": "authenticated empty drain",
-          "method": "POST",
-          "path": "/internal/v1/containment/drain",
-          "status": 200,
-          "response": { "schema_version": 1, "drain_requested": false, "intake_paused": false, "backlog_count": 0, "drain_cursor": 0 }
-        }
-      ]
+    "focused_matrix": {
+      "status": "PASS_LOCAL_ONLY",
+      "runs": 10,
+      "command": "npm exec vitest run -- test/containment-intake.test.ts test/containment-redrive.test.ts",
+      "test_files_per_run": 2,
+      "tests_per_run": 29,
+      "passed_per_run": 29,
+      "failed_per_run": 0,
+      "log_sha256": "0bc72deb0baf8ab97e74a3f9e92924df64b63e023313583690b6d104aca8e23f",
+      "coverage_note": "Local deterministic switch, HMAC, identity, storage-failure, append, and redrive matrix; not a live event credit"
     },
-    "post_deploy_inventory": {
-      "observed_at": "2026-09-05T19:37:18.655Z",
-      "worker_version": "95b39a6a-cf7e-4c5b-95fd-53dc290498f9",
-      "prior_plaintext_var_drift": [],
-      "applications": [
-        { "name": "corelink-spawn-worker-runnercontainer", "id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4", "pagination_complete": true, "container_instances": 0, "durable_object_records": 426 },
-        { "name": "corelink-spawn-worker-checkhostcontainer", "id": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5", "pagination_complete": true, "container_instances": 0, "durable_object_records": 0 },
-        { "name": "corelink-fabricd-fabricdcontainer", "id": "a0337af9-26db-42c0-a816-0a63ba0e58a3", "pagination_complete": true, "container_instances": 0, "durable_object_records": 3 }
-      ],
-      "scope": "Read-only exact-application inventory with actual pagination metadata. Point-in-time absence of container instances, not invoice savings, continuous no-wake proof, or before/after running-box preservation. Durable Object records are not running containers."
+    "ordered_resume_nonempty": {
+      "status": "PASS_LOCAL_ONLY",
+      "runs": 10,
+      "command": "npm exec vitest run -- test/containment-redrive-drain.test.ts -t 'real drain|clears drain_requested'",
+      "tests_selected_per_run": 2,
+      "passed_per_run": 2,
+      "skipped_per_run": 13,
+      "log_sha256": "e285b0b197343c5c1280aefaea43d95597b6bb4077e3d8f62b41d52f99c2fc8",
+      "coverage_note": "Ordered nonempty resume and final-ACK semantics pass deterministically in local DO tests; no live nonempty backlog was available"
+    },
+    "authorized_live_stimulus_attempt": {
+      "status": "BLOCKED_TARGET",
+      "github_workflow": "corelink-smoke.yml",
+      "dispatch_count": 10,
+      "run_ids": ["34070435982", "34070437650", "34070439138", "34070444351", "34070445850", "34070447339", "34070448906", "34070450417", "34070451931", "34070453580"],
+      "run_conclusion": "startup_failure",
+      "jobs_created": 0,
+      "reason": "The authorized workflow dispatch target failed at startup before creating a job; repository HTTP hook inventory was empty, so no valid signed webhook stimulus existed. No synthetic HMAC or production job was fabricated."
+    },
+    "provider_inventory": {
+      "before": {"runner": {"durable_object_records": 426, "running": [], "states": {"inactive": 426}}, "check_host": {"durable_object_records": 0, "running": [], "states": {}}},
+      "after": {"runner": {"durable_object_records": 426, "running": [], "states": {"inactive": 426}}, "check_host": {"durable_object_records": 0, "running": [], "states": {}}},
+      "effect": "No running-box delta or unintended container wake was observed; a live nonempty job was unavailable, so preservation under load is not claimed"
     },
     "acceptance": {
-      "status": "RED",
-      "intake_only_10_of_10": "NOT_RUN",
-      "redrive_only_10_of_10": "NOT_RUN",
-      "both_paused_10_of_10": "NOT_RUN",
-      "nonempty_ordered_resume_10_of_10": "NOT_RUN",
-      "existing_running_boxes_unchanged": "NOT_PROVEN",
-      "side_effect_counts": "NOT_MEASURED",
-      "reason": "Authenticated fresh-job and pre-existing redrive stimuli, ordered pause/drain observations, and before/after instance evidence remain required. Empty backlog and auth refusal are not substitutes."
+      "verdict": "BLOCKED-TARGET",
+      "matrix": {"intake_paused_10_of_10": "BLOCKED_TARGET", "redrive_paused_10_of_10": "BLOCKED_TARGET", "both_paused_10_of_10": "BLOCKED_TARGET", "nonempty_ordered_resume_10_of_10": "PASS_LOCAL_ONLY"},
+      "cause": "Target limitation, not a source-code failure: no authorized live event/backlog could be produced after the workflow dispatch path failed before job creation and no repository webhook hook was available.",
+      "next_required_observation": "Run the same version-bound three-state matrix against one authorized real queued workflow event or existing queued+labeled orphan, then capture nonempty drain responses, ordered ACKs, side-effect counts, and before/after running-instance inventory."
     },
-    "recovery": {
+    "reversal": {
       "mode": "FORWARD_ONLY",
-      "emergency_config": { "AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1" },
-      "preserve": ["ContainmentDO export", "CONTAINMENT binding", "v1-v7 migrations", "existing durable storage"],
-      "warning": "Do not roll back directly across the newly deployed Durable Object migration. Disarming intake permits automatic scheduled/fresh-arrival drain; drain_requested is not an execution interlock."
-    },
-    "log_provenance": [
-      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/preflight.log", "sha256": "f0869bb9b499971fc310421806055a4da786cf03fabcc57961fad42a5d0f6095" },
-      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/deploy.log", "sha256": "f6b4b1bc0f38ff10e4b89f2c22c622c1a1a55a84ac80a890b8452b1396a00fd2" },
-      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/post-deploy.json", "sha256": "899f8181cc2677d258838e9a9e424d0366435379486a8e18c0b08da29e9825fb" },
-      { "path": "/private/tmp/corelink-deploy-ops.V1KGSC/provider-state.json", "sha256": "f9a251c1ac4628eec105f0e0e59fc38b6c2158c68ea6b0a8eb9a59107ae87c18" }
-    ]
+      "current_version_id": "1f5f1958-6f3f-44ef-b095-3facade2c4c4",
+      "current_config": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"},
+      "mechanism": "Deploy a reviewed forward version preserving ContainmentDO, namespace, and migrations v1-v7; do not roll back directly across the v7 Durable Object migration.",
+      "preserve": ["ContainmentDO export", "CONTAINMENT binding", "v1-v7 migrations", "existing durable storage"]
+    }
   },
-  "notes": "Deployment and four smoke probes succeeded, but this artifact intentionally remains RED for A3.30/T3-W18. No full three-state, nonempty-drain, unchanged-running-box, durable-PG, go-live, or descendant integration/deployment credit. Credentials and raw webhook payloads are excluded. Full CI remains a final stacked-sprint-tip gate."
+  "notes": "Three production configurations were version-bound by deployment ID, version ID, and config digest. Authenticated controls and local deterministic 10/10 matrices passed. The requested live nonempty ordered-resume proof remains BLOCKED-TARGET because the only authorized stimulus path created zero jobs; final production posture is both pauses enabled. No code fix was indicated, so this is not FIX or ACCEPT."
 }
