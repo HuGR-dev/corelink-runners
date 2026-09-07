@@ -97,6 +97,25 @@
       "github_runner_inventory": {"registered": 1, "online": 0, "busy": 0, "corelink_labeled_online": 0},
       "effect": "No live job was created, no runner was woken, and no unintended side effect was observed"
     },
+    "bootstrap_package": {
+      "status": "BLOCKED_EXTERNAL_AUTHORITY",
+      "official_image_digest": "sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      "cloudflare_runner_application": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "github_registration_authority": "POST /repos/HuGR-Labs/corelink-runners/actions/runners/registration-token returned HTTP 201; token was not persisted or logged",
+      "missing_inputs": [
+        "An authorized non-host compute target capable of running the official pinned image with CORELINK_RUNNER_JITCONFIG and label corelink",
+        "The nonsecret routing identity for that target (Cloudflare Container app/Worker path is known; the bearer value CLOUDFLARE_SPAWN_AUTH_TOKEN is intentionally unavailable locally)",
+        "GitHub Actions organization budget/runner scheduling authority must permit a queued corelink workflow; current startup_failure occurs before workflow_job creation"
+      ],
+      "ready_sequence": [
+        "POST GitHub registration-token or generateRunnerJitconfig using the authorized GitHub token without printing the response",
+        "POST the JIT environment to the pinned Cloudflare RunnerContainer through the authorized /v1/spawn bearer path",
+        "Confirm exactly one online runner with label corelink, dispatch the workflow 10 times sequentially, and capture queued/in_progress/completed deliveries",
+        "Teardown the bootstrap handle and verify GitHub runner registration is gone plus Cloudflare running instances are zero"
+      ],
+      "teardown": "POST /v1/teardown with the returned handle, then verify GET /v1/status/{handle}=404 and the provider inventory has zero running instances",
+      "safety": "No runner was started on the shared developer host; production remains both-paused"
+    },
     "reversal": {
       "mode": "FORWARD_ONLY",
       "current_version_id": "d04aa4ea-80a3-481e-9f2e-e785e8824480",
