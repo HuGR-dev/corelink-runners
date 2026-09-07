@@ -53,4 +53,25 @@ describe("spawn claim authority", () => {
     expect(await doInst.renewSpawnClaim("job-3", claim.generation, claim.ownerToken, 60_000)).toBe(true);
     expect(await doInst.markSpawnClaimActive("job-3", claim.generation + 1, claim.ownerToken)).toBe(false);
   });
+
+  it("does not let stale completion A release replacement B", async () => {
+    const { doInst } = authority();
+    const a = await doInst.acquireSpawnClaim("job-4", 60_000);
+    expect(a.status).toBe("acquired");
+    if (a.status !== "acquired") return;
+    expect(await doInst.markSpawnClaimActive("job-4", a.generation, a.ownerToken)).toBe(true);
+    expect(await doInst.bindSpawnClaimProvider("job-4", a.generation, a.ownerToken, "runner-a")).toBe(true);
+    expect(await doInst.releaseSpawnClaim("job-4", a.generation, a.ownerToken)).toBe("released");
+
+    const b = await doInst.acquireSpawnClaim("job-4", 60_000);
+    expect(b.status).toBe("acquired");
+    if (b.status !== "acquired") return;
+    expect(b.generation).toBe(a.generation + 1);
+    expect(await doInst.markSpawnClaimActive("job-4", b.generation, b.ownerToken)).toBe(true);
+    expect(await doInst.bindSpawnClaimProvider("job-4", b.generation, b.ownerToken, "runner-b")).toBe(true);
+
+    expect(await doInst.releaseSpawnClaimForCompletion("job-4", "runner-a")).toBe("stale");
+    expect((await doInst.readSpawnClaim("job-4"))?.ownerToken).toBe(b.ownerToken);
+    expect(await doInst.releaseSpawnClaimForCompletion("job-4", "runner-b")).toBe("released");
+  });
 });

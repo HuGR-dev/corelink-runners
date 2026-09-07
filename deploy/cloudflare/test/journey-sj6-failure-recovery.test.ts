@@ -469,15 +469,16 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
     expect(kv.store.has("spawn:4101")).toBe(false);
   });
 
-  it("retry + claim-lost (a live path already holds the claim) ⇒ bump but SKIP the drive, LEAVE the record", async () => {
+  it("retry + legacy claim projection skips the drive without mutating the retry record", async () => {
     const kv = fakeKv({
       "orphan:4102": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:4102": "1", // the live path / another tick won the claim
+      "spawn:4102": "legacy-opaque-claim",
     });
     const drive = vi.fn(async () => {});
     await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
     expect(drive).not.toHaveBeenCalled(); // claimSpawn returned false
-    expect(JSON.parse(kv.store.get("orphan:4102")!).attempts).toBe(2); // bumped, but left
+    expect(JSON.parse(kv.store.get("orphan:4102")!).attempts).toBe(1);
+    expect(kv.store.get("spawn:4102")).toBe("legacy-opaque-claim");
   });
 
   it("retry + drive SUCCESS ⇒ claim, drive WARM, KEEP the record (placement unconfirmed)", async () => {
@@ -492,9 +493,9 @@ describe("SJ-6 · cell 4 — retryOrphanedSpawns (bump→claim→drive→delete|
       installationId: "44556677",
       labels: ["corelink"],
     }), undefined);
-    // The claim VALUE is a timestamp now (the reconciler ages it); what the
-    // contract has always been is that a claim EXISTS.
-    expect(Number(kv.store.get("spawn:4103"))).toBeGreaterThan(0); // claimed (dedup vs the live path)
+    expect(JSON.parse(kv.store.get("spawn:4103")!)).toMatchObject({
+      schema_version: 2, generation: expect.any(Number), owner_token: expect.any(String),
+    });
     // A returned drive means a CONTAINER STARTED, not that the job is placed — so
     // the reconciler no longer deletes here. `driveSpawn` re-stamps the record as a
     // provisional placement; confirmation (or the grace window) resolves it.
@@ -571,7 +572,7 @@ describe("SJ-6 · cell 6 — a retry FAILURE does not re-record (throwing driveS
   it("claimSpawn dedups vs a concurrent LIVE path — a held claim skips the retry drive", async () => {
     const kv = fakeKv({
       "orphan:4108": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:4108": "1", // the live webhook path already claimed this job
+      "spawn:4108": "legacy-opaque-claim",
     });
     const drive = vi.fn(async () => {});
     await retryOrphanedSpawns(recoveryEnv(kv), CTX, Date.now(), drive);
@@ -660,23 +661,23 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     expect(jitCalls()).toHaveLength(1);
     expect(containers).toHaveLength(1);
     expect(containers[0].ns).toBe(RUNNER_NS);
-    expect(Number(kv.store.get("spawn:8001"))).toBeGreaterThan(0); // claimed
+    expect(JSON.parse(kv.store.get("spawn:8001")!)).toMatchObject({
+      schema_version: 2, generation: expect.any(Number), owner_token: expect.any(String),
+    });
   });
 
-  it("a LEAKED spawn-claim is cleared then re-claimed (the 2026-07-05 deadlock fix) — redrive still spawns", async () => {
+  it("an opaque legacy projection is never force-released into a replacement drive", async () => {
     ghRuns = [{ id: 901, createdMsAgo: 300_000 }];
     ghJobsByRun[901] = [{ id: 8002, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
-    // A stale claim from a killed background drive would block the reconciler forever
-    // if it did not release-then-reclaim.
-    const kv = fakeKv({ "spawn:8002": "1" });
+    const kv = fakeKv({ "spawn:8002": "legacy-opaque-claim" });
     const env = reconcilerEnv(kv);
     const ctx = makeCtx();
 
     await worker.scheduled(EVENT, env, ctx as never);
     await drain(ctx);
 
-    expect(containers).toHaveLength(1); // spawned despite the pre-existing stale claim
-    expect(Number(kv.store.get("spawn:8002"))).toBeGreaterThan(0); // re-claimed fresh
+    expect(containers).toHaveLength(0);
+    expect(kv.store.get("spawn:8002")).toBe("legacy-opaque-claim");
   });
 
   // ── The claim-age guard (2026-08-25). ─────────────────────────────────────
@@ -691,7 +692,7 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     ghRuns = [{ id: 905, createdMsAgo: 300_000 }]; // job is old...
     ghJobsByRun[905] = [{ id: 8005, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
     // ...but the claim was written seconds ago: a spawn is still in flight.
-    const kv = fakeKv({ "spawn:8005": String(Date.now() - 5_000) });
+    const kv = fakeKv({ "spawn:8005": JSON.stringify({ schema_version: 2, generation: 1, owner_token: "opaque", claimed_at_ms: Date.now() - 5_000 }) });
     const claimBefore = kv.store.get("spawn:8005");
     const ctx = makeCtx();
 
@@ -702,16 +703,17 @@ describe("SJ-6 · cell 8 — redriveOrphanedJobs (first-party GitHub scan, via w
     expect(kv.store.get("spawn:8005")).toBe(claimBefore); // claim untouched
   });
 
-  it("a claim older than PLACEMENT_CONFIRM_GRACE_MS IS force-released and re-driven", async () => {
+  it("an old KV-only projection remains blocked until its authoritative owner resolves it", async () => {
     ghRuns = [{ id: 906, createdMsAgo: 300_000 }];
     ghJobsByRun[906] = [{ id: 8006, status: "queued", runner_id: null, labels: ["corelink-dogfood"] }];
-    const kv = fakeKv({ "spawn:8006": String(Date.now() - 240_000) }); // 4 min > 180 s
+    const kv = fakeKv({ "spawn:8006": JSON.stringify({ schema_version: 2, generation: 1, owner_token: "opaque", claimed_at_ms: Date.now() - 240_000 }) });
     const ctx = makeCtx();
 
     await worker.scheduled(EVENT, reconcilerEnv(kv), ctx as never);
     await drain(ctx);
 
-    expect(containers).toHaveLength(1); // recovery still works
+    expect(containers).toHaveLength(0);
+    expect(kv.store.get("spawn:8006")).toContain("opaque");
   });
 
   it("RECONCILER_REPOS empty ⇒ the scan is OFF (no GitHub fetch, no spawn)", async () => {
@@ -786,7 +788,9 @@ describe("SJ-6 · cell 9 — dead-letter + GitHub-scan see the SAME job: no doub
     // redriveOrphanedJobs claims spawn:7001 synchronously BEFORE retryOrphanedSpawns
     // runs, so the dead-letter retry sees the claim and skips ⇒ NO double spawn.
     expect(containers).toHaveLength(1);
-    expect(Number(kv.store.get("spawn:7001"))).toBeGreaterThan(0);
+    expect(JSON.parse(kv.store.get("spawn:7001")!)).toMatchObject({
+      schema_version: 2, generation: expect.any(Number), owner_token: expect.any(String),
+    });
     // No double-record: recordOrphan only fires on a NEW failure; neither recovery
     // path records, so the single original orphan key is all there is.
     expect(orphanKeys(kv)).toHaveLength(1);
