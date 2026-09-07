@@ -1,5 +1,6 @@
 import { normalizeRedriveIdentity } from "../containment_authority_helpers";
 import type { AuthorityStorage, AuthorityTransaction } from "./authority_storage";
+import { canonicalInstallationId } from "./repo_config_lookup";
 
 export type NormalIntakeState = "pending" | "uncertain" | "complete";
 export interface NormalIntakeRecord {
@@ -29,6 +30,7 @@ const text = (value: unknown, max = MAX_TEXT, empty = false): value is string =>
   typeof value === "string" && value.length <= max && (empty || value.length > 0) && !/[\u0000-\u001f\u007f]/.test(value);
 const safeTime = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const eventKey = (id: string) => `${EVENT}${encodeURIComponent(id)}`;
+export const installationTombstoneKey = (installationId: string) => `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
 const validCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX;
 
@@ -39,6 +41,9 @@ function validateInput(input: NormalIntakeInput): NormalIntakeInput {
     || input.labels.some((label) => !text(label, 128))) throw new Error("invalid normal intake record");
   const identity = normalizeRedriveIdentity(input.repo, input.job_id);
   if (!identity) throw new Error("invalid normal intake identity");
+  if (input.installation_id !== "" && canonicalInstallationId(input.installation_id) !== input.installation_id) {
+    throw new Error("invalid normal intake installation");
+  }
   return { schema_version: 1, event_id: input.event_id, body_sha256: input.body_sha256, job_id: identity.job_id,
     repo: identity.repo, installation_id: input.installation_id, labels: [...input.labels], received_at_ms: input.received_at_ms };
 }
@@ -49,7 +54,8 @@ function validRecord(value: unknown, expectedEventId?: string): value is NormalI
   if (Object.keys(value).sort().join(",") !== fields.join(",")) return false;
   const identity = normalizeRedriveIdentity(r.repo, r.job_id);
   return r.schema_version === 1 && text(r.event_id) && (!expectedEventId || r.event_id === expectedEventId) && typeof r.body_sha256 === "string" && SHA.test(r.body_sha256)
-    && !!identity && identity.repo === r.repo && identity.job_id === r.job_id && text(r.installation_id, MAX_TEXT, true) && Array.isArray(r.labels)
+    && !!identity && identity.repo === r.repo && identity.job_id === r.job_id && text(r.installation_id, MAX_TEXT, true)
+    && (r.installation_id === "" || canonicalInstallationId(r.installation_id) === r.installation_id) && Array.isArray(r.labels)
     && r.labels.length <= 32 && r.labels.every((x) => text(x, 128)) && safeTime(r.received_at_ms)
     && (r.state === "pending" || r.state === "uncertain" || r.state === "complete") && safeTime(r.next_attempt_ms);
 }
@@ -64,7 +70,7 @@ export class NormalIntakeInbox {
     validateNow(now);
     if (!Number.isSafeInteger(delayMs) || delayMs < 0 || now > Number.MAX_SAFE_INTEGER - delayMs) throw new Error("invalid normal intake delay");
     return this.storage.transaction(async (tx: AuthorityTransaction) => {
-      if (await tx.get(`${INSTALLATION_TOMBSTONE}${encodeURIComponent(normalized.installation_id)}`) !== undefined) return { status: "tombstoned" };
+      if (await tx.get(installationTombstoneKey(normalized.installation_id)) !== undefined) return { status: "tombstoned" };
       const key = eventKey(normalized.event_id);
       const old = await tx.get<unknown>(key);
       if (old !== undefined) {
@@ -93,10 +99,10 @@ export class NormalIntakeInbox {
 
   /** Installation deletion is durable authority, not a KV TTL hint. */
   async tombstoneInstallation(installationId: string, eventId: string, bodySha: string, now = Date.now()): Promise<"accepted" | "duplicate" | "conflict"> {
-    if (!/^\d{1,20}$/.test(installationId) || !text(eventId) || !SHA.test(bodySha)) throw new Error("invalid installation tombstone");
+    if (canonicalInstallationId(installationId) !== installationId || !text(eventId) || !SHA.test(bodySha)) throw new Error("invalid installation tombstone");
     validateNow(now);
     return this.storage.transaction(async tx => {
-      const key = `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
+      const key = installationTombstoneKey(installationId);
       const deliveryKey = `${INSTALLATION_TOMBSTONE_DELIVERY}${encodeURIComponent(eventId)}`;
       const priorDelivery = await tx.get<{ installation_id?: unknown; body_sha256?: unknown }>(deliveryKey);
       if (priorDelivery !== undefined) {
@@ -134,8 +140,8 @@ export class NormalIntakeInbox {
     // Historical repository-hook mappings may use a non-numeric synthetic
     // installation id.  They can never equal an App deletion tombstone, so they
     // remain compatible while the deletion ingress itself validates strictly.
-    if (!/^\d{1,20}$/.test(installationId)) return false;
-    return (await this.storage.get(`${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`)) !== undefined;
+    if (canonicalInstallationId(installationId) !== installationId) return false;
+    return (await this.storage.get(installationTombstoneKey(installationId))) !== undefined;
   }
 
   async pending(now: number, limit = 25): Promise<NormalIntakeRecord[]> {

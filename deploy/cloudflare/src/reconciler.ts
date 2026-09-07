@@ -5,6 +5,7 @@
 // the next reconciliation stage.
 
 import type { KvLike } from "./lib";
+import { canonicalInstallationId } from "./repo_config_lookup";
 
 export interface ReconcilerRepository {
   repo: string;
@@ -25,13 +26,6 @@ const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Z
 function validRepo(value: unknown): string | null {
   if (typeof value !== "string") return null;
   return REPO_RE.test(value) ? value : null;
-}
-
-function installationId(value: unknown): string | null {
-  const id = typeof value === "number" && Number.isSafeInteger(value)
-    ? String(value)
-    : typeof value === "string" ? value : "";
-  return /^[1-9][0-9]*$/.test(id) ? id : null;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -127,7 +121,7 @@ export async function discoverAuthorizationCandidates(
           || typeof entry.repo_full_name !== "string"
           || (typeof entry.installation_id !== "string" && typeof entry.installation_id !== "number")) return null;
         const repo = validRepo(entry.repo_full_name);
-        const install = installationId(entry.installation_id);
+        const install = canonicalInstallationId(entry.installation_id);
         if (!repo || !install) return null;
         found.set(`${repo}\u0000${install}`, { repo, installationId: install });
       }
