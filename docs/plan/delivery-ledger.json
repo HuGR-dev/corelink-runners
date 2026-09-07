@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "local fail-closed preflight approved; external/live blocked by O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
+        "T2-W2b": "local fail-closed preflight approved; O-FLEETBUSY is now bound and proven; external/live remains blocked by O1, O-DEVENV-PIN and deploy evidence",
         "T2-W4": "external/live blocked: T2-W2b and latest-image ship evidence absent",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,8 +1643,8 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Local fail-closed preflight is approved at 20d1eb5. Bind O1, O-DEVENV-PIN and O-FLEETBUSY, then collect the version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json; do not claim implementation or live completion.",
-      "blockers": ["O1", "O-DEVENV-PIN", "O-FLEETBUSY", "deploy evidence absent"],
+      "next_action": "Local fail-closed preflight is approved at 20d1eb5 and O-FLEETBUSY is proven. Bind O1 and O-DEVENV-PIN, then collect version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json; do not claim implementation or live completion.",
+      "blockers": ["O1", "O-DEVENV-PIN", "deploy evidence absent"],
       "commits": ["20d1eb5d40f10ba949e16ba72a75048ae10d61b0"],
       "review": {
         "status": "pending",
@@ -1652,7 +1652,8 @@
         "evidence": []
       },
       "evidence": [
-        "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not remove O1, O-DEVENV-PIN, O-FLEETBUSY, deploy-evidence, implementation, or live blockers."
+        "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not remove O1, O-DEVENV-PIN, deploy-evidence, implementation, or live blockers.",
+        "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false."
       ],
       "historical_sprint": 2
     },
