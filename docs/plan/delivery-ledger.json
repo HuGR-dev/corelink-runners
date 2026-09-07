@@ -450,7 +450,7 @@
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Single executor at /private/tmp/corelink-t6-w15-owner-20260906 composes the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime for r2_pair_acceptance (Luna). Ingest, three codecs, the witness runtime, and verifier prefix template are integrated. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Use the frozen service contracts at docs/plan/execution/2026-09-06-t6-w15-services-decision.md to complete the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. T6-W15 remains partial; keep UNKNOWN fail-closed and retain all qualification criteria.",
       "blockers": [
         "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
       ],
@@ -523,9 +523,16 @@
       },
       "evidence": [
         "docs/handoff/2026-09-06-techlead-takeover.md",
-        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md",
+        "Service contract decision integrated from 7fa6efe9ee0b1112fa3b937fbc92f950cd705eba as 75f928453b0c981b3faaa767e3e03393ebb45ed0; documentary contract only, no completion credit."
       ],
-      "historical_sprint": 1
+      "historical_sprint": 1,
+      "decision_contract": {
+        "path": "docs/plan/execution/2026-09-06-t6-w15-services-decision.md",
+        "source_commit": "7fa6efe9ee0b1112fa3b937fbc92f950cd705eba",
+        "integration_commit": "75f928453b0c981b3faaa767e3e03393ebb45ed0",
+        "disposition": "Freezes the service contracts for the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. It does not complete T6-W15 or waive qualification, review, acceptance, or deployment criteria."
+      }
     },
     {
       "id": "T5-W1",
