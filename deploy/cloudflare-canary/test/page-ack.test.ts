@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { sendPageDelivery } from "../src/page_ack";
+import { formatAlertEmail } from "../src/notify";
 import type { Alert } from "../src/rules";
 
 const alert: Alert = { key: "spawn:auth", severity: "warn", title: "spawn metrics unauthorized", detail: "current credential rejected" };
@@ -22,6 +23,7 @@ describe("T6-W13 human page boundary", () => {
     for (const PAGE_URL of [config.PAGE_URL.replace("https:", "http:"), "https://evil.example/collect"]) {
       const result = await sendPageDelivery({ ...config, PAGE_URL }, [alert], 1_700_000_000_000);
       expect(result).toEqual({ attempted: true, sent: false, reason: "invalid-config" });
+      expect(formatAlertEmail([alert], 1_700_000_000_000).text).not.toContain(PAGE_URL);
     }
     expect(memory.store.size).toBe(0);
   });

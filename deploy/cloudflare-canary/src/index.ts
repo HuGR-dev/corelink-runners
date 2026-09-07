@@ -14,7 +14,7 @@
 import type { FabricStatusJson, SpawnMetricsJson, Snapshot, SurfaceSnapshot, HealthSnapshot } from "./types";
 import { evaluate, applyCooldown, type Alert, type RulesConfig } from "./rules";
 import { sendAlert } from "./notify";
-import { sendPageDelivery } from "./page_ack";
+import { preparePageDelivery, recordPageDelivery } from "./page_ack";
 import { parseProbeFlag } from "./config";
 export { CanaryTickOutboxAdapter } from "./tick_adapter";
 
@@ -265,12 +265,13 @@ export async function runCycle(env: Env, now: number): Promise<string> {
 
   let sendSummary = "no alerts";
   if (toSend.length > 0) {
-    const res = await sendAlert(env, toSend);
+    const page = await preparePageDelivery(env, toSend, now);
+    const res = await sendAlert(page.delivery ? { ...env, PAGE_DELIVERY: page.delivery } : env, toSend);
     sendSummary = `${toSend.length} alert(s), sent=${res.sent}${res.reason ? ` (${res.reason})` : ""}`;
-    if (res.sent) {
-      const page = await sendPageDelivery(env, toSend, now);
-      if (page.attempted) {
-        sendSummary += `, page_delivery=${page.sent ? "recorded" : "failed"}`;
+    if (res.sent && page.delivery) {
+      const recorded = await recordPageDelivery(env, page.delivery);
+      if (recorded.attempted) {
+        sendSummary += `, page_delivery=${recorded.sent ? "recorded" : "failed"}`;
       }
     }
   }
