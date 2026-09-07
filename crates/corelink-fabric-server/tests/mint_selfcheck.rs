@@ -3,9 +3,11 @@ use std::sync::{Arc, Mutex};
 use corelink_fabric_server::mint_readiness::{MintReadiness, accepts_probe_response};
 use corelink_fabric_server::{MintHttp, MintHttpResponse};
 
+type RecordedCall = (String, String, Option<String>, String);
+
 #[derive(Default)]
 struct Recording {
-    calls: Mutex<Vec<(String, String, Option<String>, String)>>,
+    calls: Mutex<Vec<RecordedCall>>,
     responses: Mutex<Vec<anyhow::Result<MintHttpResponse>>>,
 }
 
