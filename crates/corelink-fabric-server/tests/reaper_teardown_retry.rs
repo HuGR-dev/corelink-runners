@@ -290,7 +290,8 @@ async fn cloudflare_confirmed_delete_retries_same_handle_after_finish_failure_th
     let registry = corelink_fabric_server::BoxRegistry::new();
     let engine = Arc::new(CloudflareEngine::new(
         http.clone(),
-        CloudflareConfig::new("https://spawn.invalid", "test-token"),
+        CloudflareConfig::new("https://spawn.invalid", "spawn-token")
+            .with_scoped_tokens("exec-token", "lifecycle-token"),
     ));
     let provider = Arc::new(CloudflareBoxProvisioner::new(
         engine,
@@ -344,7 +345,8 @@ fn cloudflare_missing_registry_is_unconfirmed_without_provider_http() {
     let provisioner = CloudflareBoxProvisioner::new(
         Arc::new(CloudflareEngine::new(
             http.clone(),
-            CloudflareConfig::new("https://spawn.invalid", "test-token"),
+            CloudflareConfig::new("https://spawn.invalid", "spawn-token")
+                .with_scoped_tokens("exec-token", "lifecycle-token"),
         )),
         registry,
     );
@@ -368,7 +370,8 @@ async fn before_provision_rollback_finishes_without_provider_http() {
     let provider: Arc<dyn BoxProvisioner> = Arc::new(CloudflareBoxProvisioner::new(
         Arc::new(CloudflareEngine::new(
             http.clone(),
-            CloudflareConfig::new("https://spawn.invalid", "test-token"),
+            CloudflareConfig::new("https://spawn.invalid", "spawn-token")
+                .with_scoped_tokens("exec-token", "lifecycle-token"),
         )),
         corelink_fabric_server::BoxRegistry::new(),
     ));
