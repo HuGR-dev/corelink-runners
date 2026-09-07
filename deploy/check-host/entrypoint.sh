@@ -41,7 +41,7 @@ bridge_exec_auth_token() {
     if [ ! -e "$auth_dir" ]; then
         mkdir -p "$auth_dir"
     fi
-    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    resolved_auth_dir=$(CDPATH='' cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
     if [ -z "$resolved_auth_dir" ]; then
         echo "[check-host] FATAL: auth directory resolves through a symlink" >&2
         return 1
@@ -76,11 +76,13 @@ validate_auth_file() {
     auth_file="${EXEC_SERVER_AUTH_TOKEN_FILE:-/run/corelink/exec-server-auth-token}"
     auth_dir=${auth_file%/*}
     assert_no_symlink_components "$auth_dir" || return 1
-    resolved_auth_dir=$(CDPATH= cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
+    resolved_auth_dir=$(CDPATH='' cd -P "$auth_dir" 2>/dev/null && pwd -P) || resolved_auth_dir=
     mode=$(stat -c '%a' "$auth_file" 2>/dev/null) || mode=$(stat -f '%Lp' "$auth_file" 2>/dev/null) || mode=
+    owner_uid=$(stat -c '%u' "$auth_file" 2>/dev/null) || owner_uid=$(stat -f '%u' "$auth_file" 2>/dev/null) || owner_uid=
+    current_uid=$(id -u)
     if [ "${auth_file#/}" = "$auth_file" ] || [ -z "$resolved_auth_dir" ] \
         || [ -L "$auth_file" ] || [ ! -f "$auth_file" ] || [ "$mode" != 400 ] \
-        || [ ! -O "$auth_file" ]; then
+        || [ -z "$owner_uid" ] || [ "$owner_uid" != "$current_uid" ]; then
         echo "[check-host] FATAL: auth file is not a validated regular 0400 file" >&2
         return 1
     fi
