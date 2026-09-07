@@ -138,6 +138,10 @@ function containmentFixture(kv: ReturnType<typeof kvWith>) {
     ? instance.registerCredential({ jobId: JOB, tenant, patId })
     : Promise.resolve();
   const authority = {
+    async closeJobCredentials(jobId: string) {
+      await registered;
+      return instance.closeJobCredentials(jobId);
+    },
     async pendingCredentials(selection: { kind: "job"; jobId: string }, cursor?: string) {
       await registered;
       return instance.pendingCredentials(selection, cursor);
