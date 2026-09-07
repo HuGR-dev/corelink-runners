@@ -106,8 +106,9 @@ instance. Two failure modes were observed + closed on 2026-07-07/08:
 - **Single close wedged the plane** (2026-07-07): ONE off-box close black-holed
   `/v1/health` on the 1-vCPU box. Root cause: the close's `block_in_place` pg
   work (`pg_ledger.rs`) runs ON a runtime worker; on 1 vCPU (1 worker) the whole
-  runtime stalls. Closed by **`standard-2` (2 vCPU / 2 workers)**: the blocking
-  work pins one worker, the other keeps `/v1/health` alive. **Verified 2026-07-08:**
+  runtime stalls. The configured **`standard-2` provider shape is 1 vCPU / 6 GiB /
+  12 GB**; keep the `FABRIC_PROVISION_MAX_INFLIGHT` gate and the observed health
+  probe evidence tied to that shape. **Verified 2026-07-08:**
   health stayed `200` across all 30 polls (0.4–1.0s) through a 32s close.
 
 **Close latency — diagnosed, NOT a bug (2026-07-08).** A raw close (e.g. `curl`)
@@ -120,8 +121,8 @@ window to ~0 and the close returns in **~2.7s** (teardown + attestation + 3 pg
 writes). So the close is fast for real traffic — the "slow close" was a
 non-acking-test artifact, not pg latency. The pg work itself is ~2.7s; no offload
 needed at current scale. The real requirement — the plane staying UP during any
-long ack-wait — is handled (`close_ack_gate` bounds concurrent ack-waits +
-`standard-2` keeps a worker for health; verified).
+long ack-wait — is handled by `close_ack_gate`, which bounds concurrent ack-waits;
+the 2026-07-08 probe kept health at `200` across 30 polls during a 32s close.
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
 ledger. The **pg ledger has two gates**: a non-empty `DATABASE_URL` secret **and**
