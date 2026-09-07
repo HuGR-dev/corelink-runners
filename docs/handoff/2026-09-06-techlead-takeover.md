@@ -458,3 +458,14 @@ count 0`. The scope freeze does not waive it. At a later valid dispatch gate,
 read the ledger's exact D/O/R predecessors again; the first source-continuation
 candidate is T3-W2, while T2-W2b remains blocked by O1, O-DEVENV-PIN and
 O-FLEETBUSY.
+
+### B2 card reconciliation — source versus local versus external
+
+Source-done but not delivered: T4-W1, T4-W2, T3-W3, T3-W1, T8-W5 and T8-W2.
+T3-W14 has RetryEpochAuthority/client and focused tests at source
+`28683b347c119b90fed8da4c40e770853786c43d`, but still needs canonical
+ledger/evidence validation. Local product gaps remain T3-W2/F007, T8-W1,
+T8-W3 (atomic claim and required-mint proof) and T3-W9 (spawn durability).
+External/live gates remain T2-W2b, T2-W4 and T2-W6, plus the named live gates
+for source-done WPs. This reconciliation changes neither B2's 14-WP scope nor
+the canonical no-dispatch gate; it performs no freeze or promotion.
