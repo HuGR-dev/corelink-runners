@@ -11,7 +11,23 @@
     "b2_scope_freeze": {
       "work_packages": 14,
       "scope": ["T2-W2b", "T2-W4", "T2-W6", "T4-W1", "T4-W2", "T3-W3", "T3-W1", "T3-W2", "T8-W1", "T8-W3", "T3-W14", "T3-W9", "T8-W5", "T8-W2"],
-      "dispatchability": "blocked: canonical DAG remains NOT FROZEN / quiet count 0; scope freeze grants no dispatch authority"
+      "dispatchability": "blocked: canonical DAG remains NOT FROZEN / quiet count 0; scope freeze grants no dispatch authority",
+      "wp_status": {
+        "T4-W1": "source_done; external/live deployment, installation/PAT mapping and guard evidence remain",
+        "T4-W2": "source_done; paired billing composition is accepted; sprint and production gates remain",
+        "T3-W3": "source_done; live owner gate remains",
+        "T3-W1": "source_done and predecessor-ready; global dispatch gate still blocks action",
+        "T3-W2": "code_integrated; local lifecycle work remains RED on F007, including authoritative cancellation/generation and its later T3-W16 linkage",
+        "T8-W1": "partial; blocked by T3-W2/F007",
+        "T8-W3": "partial; real remaining work is atomic claim plus required-mint proof",
+        "T3-W14": "source_present; RetryEpochAuthority and focused tests are in baseline, but canonical ledger/evidence validation remains",
+        "T3-W9": "backlog; real remaining work is spawn durability and O-APP",
+        "T8-W5": "source_done; blocked by T3-W9, F006/F008 and live qualification",
+        "T8-W2": "source_done; blocked by T8-W5 and the T8-W6 live refusal proof",
+        "T2-W2b": "external/live blocked: O1, O-DEVENV-PIN and O-FLEETBUSY; deploy evidence absent",
+        "T2-W4": "external/live blocked: T2-W2b and latest-image ship evidence absent",
+        "T2-W6": "external/live blocked: O1/T2-W2b; runbook and evidence absent"
+      }
     }
   },
   "item_count_summary": {
@@ -949,13 +965,13 @@
     {
       "id": "T3-W1",
       "sprint": 2,
-      "state": "prepared",
+      "state": "ready",
       "implementation": "complete",
       "owner": "wp_t3_w1",
       "dependencies": [
         "T3-W3"
       ],
-      "next_action": "T3-W3 predecessor is now satisfied at source composition. Keep this prepared until the remaining Sprint and production gates allow delivery.",
+      "next_action": "Source implementation is ready after T3-W3. The global B2 dispatch gate still blocks action; retained live/deployment gates are not delivery credit.",
       "blockers": [],
       "commits": [
         "a6d04957d1b48b0f9a74e9a5fef4f13e7886d0ba",
@@ -985,8 +1001,8 @@
         "T3-W1",
         "T7-W4b"
       ],
-      "next_action": "Safe diagnostic repair reviewed: no KV-driven deletes/releases. F007 still blocks A3.12 authoritative recovery; other focused lifecycle/source components retained.",
-      "blockers": [],
+      "next_action": "Code is integrated, but this WP remains RED: close F007 authoritative cancellation/generation lifecycle behavior and preserve the later T3-W16 linkage; no ambiguous KV value may delete/release.",
+      "blockers": ["F-20260905-007", "T3-W16 later provider-cancellation linkage"],
       "commits": [
         "1ef55b33260fbb722c4094b89a859be9c1b0c406",
         "6496cb3578be0b5c127d248b5341aaa4146699f5"
@@ -1009,7 +1025,7 @@
         "T3-W2"
       ],
       "next_action": "Local A3.14/A3.15/A3.16 evidence is verified. Keep the whole work package partial pending T3-W2 and F007-dependent lifecycle authority; this is not whole-WP approval.",
-      "blockers": [],
+      "blockers": ["T3-W2", "F-20260905-007"],
       "commits": [
         "61cfc0435837c3fd16006566ab4cdc6b12b3fff4",
         "7b9fa1cd0baacb8e4d4e5cfdeb0e0cbedf6209ae",
@@ -1042,8 +1058,8 @@
         "T6-W9",
         "T7-W4b"
       ],
-      "next_action": "Root A3.17 local100-event required-key and unavailable-store matrix plus A3.18 duplicate-provider test passed. Complete prerequisite composition and version-bound live worker10of10; no fabric readiness credit.",
-      "blockers": [],
+      "next_action": "Root local A3.17/A3.18 evidence exists, but the remaining real work is atomic claim behavior and required-mint proof; then complete prerequisite composition and version-bound worker10of10. No fabric readiness credit.",
+      "blockers": ["T8-W1", "O-MINTKEY", "atomic claim gap", "required-mint proof gap"],
       "commits": [
         "d278569cb5a9b29803588c61058b0110d17e3c33"
       ],
@@ -1060,21 +1076,21 @@
     {
       "id": "T3-W14",
       "sprint": 2,
-      "state": "backlog",
-      "implementation": "unknown",
+      "state": "prepared",
+      "implementation": "partial",
       "owner": "root",
       "dependencies": [
         "T8-W3"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
+      "next_action": "RetryEpochAuthority, client wiring and focused retry-epoch tests are present at the B2 baseline (source 28683b347c119b90fed8da4c40e770853786c43d). Validate canonical ledger/evidence and focused acceptance only after predecessors; no delivery credit.",
       "blockers": [],
-      "commits": [],
+      "commits": ["28683b347c119b90fed8da4c40e770853786c43d"],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
-      "evidence": [],
+      "evidence": ["deploy/cloudflare/src/lib/retry_epoch_authority.ts", "deploy/cloudflare/src/lib/retry_epoch_client.ts", "deploy/cloudflare/test/retry-epoch.test.ts", "deploy/cloudflare/test/retry-epoch-integration.test.ts"],
       "historical_sprint": 2
     },
     {
@@ -1087,8 +1103,8 @@
         "T3-W14",
         "O-APP"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at deploy/cloudflare/src/index.ts; deploy/cloudflare/src/lib.ts.",
-      "blockers": [],
+      "next_action": "Implement and verify the canonical spawn-durability acceptance after T3-W14; O-APP remains a hard external token.",
+      "blockers": ["T3-W14", "O-APP", "spawn durability gap"],
       "commits": [],
       "review": {
         "status": "pending",
@@ -1108,7 +1124,7 @@
         "T3-W9"
       ],
       "next_action": "F008/T8-W5 source criteria are accepted; preserve prepared state and no delivery credit. Remaining production gates are three live 75-second CAS runs, private inventory qualification (137 active unknown and one invalid metadata row), and production migration/key qualification.",
-      "blockers": [],
+      "blockers": ["T3-W9", "F-20260905-006", "F-20260905-008", "live qualification"],
       "commits": [
         "50ab03667fe8d877321b6096439677938e0b3918",
         "5a1ab636a3e4cc1f96bdf559c16a02a0d2253147",
@@ -1148,8 +1164,8 @@
       "dependencies": [
         "T8-W5"
       ],
-      "next_action": "A3.13 source criteria accepted; retain prepared state and no delivery credit. Three live 75-second refusal proofs remain separately owned by T8-W6.",
-      "blockers": [],
+      "next_action": "A3.13 source criteria accepted; retain prepared state and no delivery credit. T8-W5 and the three live 75-second refusal proofs owned by T8-W6 remain blocking.",
+      "blockers": ["T8-W5", "T8-W6 live refusal proof"],
       "commits": [
         "68221dff4a65ef4b05c39ef094b735c7ec68e23b",
         "1e3d66381bead72b896ba7a7bba8a2204ebfcb67"
@@ -1565,8 +1581,8 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W2b-deploy.json.",
-      "blockers": [],
+      "next_action": "Blocked external/live: bind O1, O-DEVENV-PIN and O-FLEETBUSY, then collect the version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json.",
+      "blockers": ["O1", "O-DEVENV-PIN", "O-FLEETBUSY", "deploy evidence absent"],
       "commits": [],
       "review": {
         "status": "pending",
@@ -1588,8 +1604,8 @@
         "T8-W4b",
         "T7-W4b"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at docs/plan/evidence/T2-W4-image-ship.json.",
-      "blockers": [],
+      "next_action": "Blocked pending T2-W2b and a latest-image version-bound ship artifact at docs/plan/evidence/T2-W4-image-ship.json.",
+      "blockers": ["T2-W2b", "latest-image ship evidence absent"],
       "commits": [],
       "review": {
         "status": "pending",
@@ -1634,8 +1650,8 @@
         "T7-W4",
         "T7-W4b"
       ],
-      "next_action": "Implement and verify the canonical WP acceptance at docs/runbook/secret-rotation.md; docs/plan/evidence/au1.8-fabricd-secret-rotation.json.",
-      "blockers": [],
+      "next_action": "Blocked external/live pending O1 and T2-W2b; the secret-rotation runbook and AU1.8 evidence are absent.",
+      "blockers": ["O1", "T2-W2b", "runbook absent", "AU1.8 evidence absent"],
       "commits": [],
       "review": {
         "status": "pending",
