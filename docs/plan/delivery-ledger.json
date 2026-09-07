@@ -7,6 +7,13 @@
     "recorded_delivered": 16,
     "source": "docs/handoff/2026-09-05-session-state.md"
   },
+  "item_count_summary": {
+    "historical_recorded_delivered": 16,
+    "nonhistorical_implementation_complete": 16,
+    "partial": 6,
+    "unknown_backlog": 32,
+    "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
+  },
   "sprint_scope": {
     "1": [
       "T3-W18",
@@ -53,9 +60,7 @@
       "T4-W8",
       "T6-W5",
       "T6-W7",
-      "T8-W6"
-    ],
-    "4": [
+      "T8-W6",
       "T6-W14",
       "T6-W10",
       "T1-W4",
@@ -116,21 +121,6 @@
         "evidence": []
       },
       "merge_commit": null
-    },
-    {
-      "id": 4,
-      "state": "backlog",
-      "tip_commit": null,
-      "ci": {
-        "status": "not_run",
-        "commit": null,
-        "evidence": []
-      },
-      "acceptance": {
-        "status": "pending",
-        "evidence": []
-      },
-      "merge_commit": null
     }
   ],
   "items": [
@@ -149,7 +139,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T1-W1",
@@ -166,7 +157,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T2-W1a",
@@ -183,7 +175,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T2-W2a",
@@ -203,7 +196,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T9-W0",
@@ -220,7 +214,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T3-W17",
@@ -239,7 +234,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T3-W4",
@@ -258,7 +254,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T4-W4",
@@ -271,7 +268,7 @@
         "D1",
         "R1"
       ],
-      "next_action": "Include unchanged reviewed admission implementation in complete sprint validation, then applicable production configuration/deployment acceptance.",
+      "next_action": "T4-W4 acceptance is accepted and complete at observed tip 2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51; retain the admission evidence and run complete Sprint 1 validation at its composed bundle tip. Applicable production deployment evidence remains bound to that sprint process.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566"
@@ -284,8 +281,22 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-admission-review.json"
-      ]
+        "docs/plan/execution/2026-09-05-admission-review.json",
+        "Acceptance artifact ca7df5f recorded 5/5 capacity and 9/9 admission-arm focused vectors, with reviewed source bb165bad reachable from the observed tip."
+      ],
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "observed_commit": "2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51",
+        "reviewed_source": "bb165bad54125460ebae213e405df3a75baa6566",
+        "source_commit": "ca7df5f591ec317d68978b833a5074fdbaf1151a",
+        "integration_commit": "ca7df5f591ec317d68978b833a5074fdbaf1151a",
+        "evidence": [
+          "docs/plan/evidence/T4-W4-admission.json",
+          "acceptance_infra_capacity: 5/5 passed; corelink_admission_arms: 9/9 passed."
+        ]
+      }
     },
     {
       "id": "T3-W10",
@@ -297,7 +308,7 @@
         "T3-W4",
         "T4-W4"
       ],
-      "next_action": "Code and metadata checks complete. Execute runtime acceptance only in complete Sprint1 CI; discovery of unbound/historical identities is explicitly tracked as successor F-20260905-005.",
+      "next_action": "T3-W10 acceptance is accepted and complete at source tip 2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51; retain its teardown/reaper evidence and run complete Sprint 1 validation only at the composed bundle tip. F-20260905-005 remains separately tracked.",
       "blockers": [],
       "commits": [
         "bb165bad54125460ebae213e405df3a75baa6566",
@@ -319,8 +330,21 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-held-cleanup.json",
         "docs/plan/execution/2026-09-05-provider-binding.json",
-        "docs/plan/execution/2026-09-05-provider-recovery.json"
-      ]
+        "docs/plan/execution/2026-09-05-provider-recovery.json",
+        "PROMOTE acceptance artifact 524a704 replayed as cf921701; re-review evidence records held teardown 2/2 and reaper retry 8/8."
+      ],
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "source_tip": "2a3c49e773e47faa2715bf6aeb1f5a74cf2bed51",
+        "source_commit": "524a704ec71c11ee1850d82756c380eeeac3263c",
+        "integration_commit": "cf921701c69618792a1e6ad3304f9df1a4c5ae19",
+        "evidence": [
+          "docs/validation/evidence/2026-09-06-T3-W10-teardown-reaper-acceptance.json",
+          "held_teardown_confirmation: 2/2 passed; reaper_teardown_retry: 8/8 passed."
+        ]
+      }
     },
     {
       "id": "T6-W1",
@@ -337,7 +361,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T6-W2",
@@ -367,7 +392,8 @@
       "evidence": [
         "docs/adr/0011-memoize-miss-contract.md",
         "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T6-W3",
@@ -384,7 +410,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T6-W8",
@@ -401,7 +428,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T6-W4",
@@ -433,22 +461,26 @@
         "docs/plan/execution/2026-09-05-secret-scan.json",
         "docs/plan/execution/2026-09-05-tick-envelope.json",
         "docs/plan/execution/2026-09-05-tick-source-review.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T6-W15",
       "sprint": 1,
       "state": "prepared",
       "implementation": "partial",
-      "owner": "root",
+      "owner": "r2_pair_acceptance",
       "dependencies": [
         "T6-W4",
         "O-MONITORHOST",
         "T7-W4b"
       ],
-      "next_action": "Compose independently approved terminal-ingest, durable signer-registry, ACK-recovery, human page-acknowledgement, and concrete main-runtime packets. Keep UNKNOWN fail-closed and complete the remaining qualification before any work-package acceptance or deployment.",
+      "next_action": "Use the frozen service contracts at docs/plan/execution/2026-09-06-t6-w15-services-decision.md to complete the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. T6-W15 remains partial; keep UNKNOWN fail-closed and retain all qualification criteria.",
       "blockers": [
-        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and seven real observation days remain required before acceptance."
+        "Trusted time/TSA qualification, WORM and three-account independence qualification, crash/rotation/isolation tests, and the base A6.10 probe 3/3 remain required before base acceptance."
+      ],
+      "historical_post_delivery_obligations": [
+        "Historical trace: the continuous seven-day A6.17 observation was associated with T6-W12 and T6-W10. It remains a separately tracked post-delivery operational obligation and does not block any work package, sprint, promote, merge, or go-live."
       ],
       "commits": [
         "a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe",
@@ -470,11 +502,33 @@
         "5576b1d",
         "e68d343",
         "2819578",
-        "7ddfdcb"
+        "7ddfdcb",
+        "92837d5",
+        "4e5f270",
+        "a8283d2",
+        "54be7ac",
+        "1f1a527",
+        "1a9eb2a",
+        "4363dba",
+        "8a2303e",
+        "c2b43ee",
+        "786fb28",
+        "e23ce21",
+        "63d7f8d",
+        "b025351",
+        "ffaea8c",
+        "de13d45",
+        "c600bd4",
+        "1db850b542f11c9a966ec5017f868585f422142a",
+        "a5f6f4058b1c8a76d9a4b53420bb3ba3ed431142",
+        "b7710ec6590082ec481b43a5893566eba7714549",
+        "0fd5d51c5d663fa60ef1360d3bd34ad1af7e801e",
+        "81a5f44136a3c21cb6c3a5d8ec3b09b791647e9d",
+        "d718b412acac1f3d23f1a6482c8d474b0e383827"
       ],
       "review": {
         "status": "partial",
-        "commit": "7ddfdcb",
+        "commit": "c600bd4be9c3016ca85fd6533641468e74ea204b",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
@@ -486,17 +540,28 @@
           "Fresh independent witness-head composition review: witness 7/7, journal 10/10, and tsc; source 66037ec through a991435f with journal b734531f and integration c8e7a5e through 95d51f3. SignedWitnessHead has nine named fields before a separate signature. These results overlap module evidence and do not change delivery counts.",
           "Missing-source scheduler independent review: 10 focused tests and tsc --noEmit; source 521bda03 through 4b8b32f and integration 0e50daf through 5576b1d, where scheduler.test.ts and canary-missing-tick.test.ts passed 10/10 and typecheck passed. Source-only; no delivery credit.",
           "AWS source-secret and Lambda-witness adapters cold review: 5 focused tests and tsc --noEmit; source ebaf217 through b2404a9 and integration e68d343 through 7ddfdcb, where aws-adapters.test.ts passed 5/5 and typecheck passed. Adapter tests do not prove IAM isolation, three-account independence, deployment, or live capability.",
-          "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention."
+          "Atomic ingest Terra final review: source f0bd9f2 through aaa68154 and frozen acceptance paths. Integration 92837d5 through b025351 passed six suites/25 distinct tests (integrity6, transition4, periodic4, quarantine2, idempotency7, credential-isolation2) and tsc --noEmit. The duplicate 4a73 test was already present in source as e27276f and was not counted twice.",
+          "Signer-manifest, recovery-token, and page-ack codecs were independently approved by r2; integration ffaea8c through c600bd4 passed their three focused suites/9 tests and tsc --noEmit. Codecs do not satisfy their durable services or delivery acceptance.",
+          "Composed monitor source evidence: all 14 focused suites/89 tests completed exit 0 in bounded runs at 528f032; a prior 120-second aggregate process was not counted as an aggregate pass because of host Vitest contention.",
+          "PROMOTE runtime/infra composition: source cc9fa84c09cc4f654549db97403606620f719cc3 and eacd95a5337dd065181e30dffd87129a60d23f55 replayed as 1db850b through d718b412. Focused witness-runtime 4/4, verifier runtime policy assertions, and package typecheck passed."
         ]
       },
       "evidence": [
         "docs/handoff/2026-09-06-techlead-takeover.md",
-        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
-      ]
+        "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md",
+        "Service contract decision integrated from 7fa6efe9ee0b1112fa3b937fbc92f950cd705eba as 75f928453b0c981b3faaa767e3e03393ebb45ed0; documentary contract only, no completion credit."
+      ],
+      "historical_sprint": 1,
+      "decision_contract": {
+        "path": "docs/plan/execution/2026-09-06-t6-w15-services-decision.md",
+        "source_commit": "7fa6efe9ee0b1112fa3b937fbc92f950cd705eba",
+        "integration_commit": "75f928453b0c981b3faaa767e3e03393ebb45ed0",
+        "disposition": "Freezes the service contracts for the durable signer registry, ACK recovery, human page acknowledgement, and concrete main runtime. It does not complete T6-W15 or waive qualification, review, acceptance, or deployment criteria."
+      }
     },
     {
       "id": "T5-W1",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -511,11 +576,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T5-W2",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -531,11 +597,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T5-W3",
-      "sprint": 4,
+      "sprint": 3,
       "state": "prepared",
       "implementation": "partial",
       "owner": "root",
@@ -552,7 +619,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T7-W1",
@@ -571,7 +639,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T7-W2",
@@ -588,7 +657,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T7-W3",
@@ -605,7 +675,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T7-W4",
@@ -622,7 +693,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T7-W4b",
@@ -641,7 +713,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T2-W3",
@@ -658,7 +731,7 @@
         "T6-W8",
         "T7-W4"
       ],
-      "next_action": "All current workflow references are immutable; retain final inventory check after any further Sprint1 workflow edits and run full CI only at complete-sprint tip.",
+      "next_action": "T2-W3 acceptance is accepted and complete at d57096d0403ae8d1e43a476c0160b0a360197f01; retain the record and run full CI only at the complete Sprint 1 bundle tip.",
       "blockers": [],
       "commits": [
         "2171dd91034e46d18cce6d6e50624a6d44879858"
@@ -671,8 +744,21 @@
         ]
       },
       "evidence": [
-        "docs/plan/execution/2026-09-05-action-pins.json"
-      ]
+        "docs/plan/execution/2026-09-05-action-pins.json",
+        "Acceptance artifact integrated from 640403f930da77d313d63d1b93ddca5df46cdd04 as d5a6230a196cbfd6ea43bc0c40cda1ded209de85: 24 workflows, 37 remote action references, 0 mutable references."
+      ],
+      "historical_sprint": 1,
+      "acceptance": {
+        "status": "accepted",
+        "complete": true,
+        "target_commit": "d57096d0403ae8d1e43a476c0160b0a360197f01",
+        "source_commit": "640403f930da77d313d63d1b93ddca5df46cdd04",
+        "integration_commit": "d5a6230a196cbfd6ea43bc0c40cda1ded209de85",
+        "evidence": [
+          "docs/plan/execution/2026-09-06-t2-w3-acceptance.md",
+          "24 canonical workflows, 37 remote action references, and 0 mutable remote references at the recorded target."
+        ]
+      }
     },
     {
       "id": "T4-W1",
@@ -703,7 +789,7 @@
       ],
       "review": {
         "status": "approved",
-        "commit": "212d0ee",
+        "commit": "212d0eef88a3857b0ae72c3c37bcff2f58619ae7",
         "evidence": [
           "credential_completion approved actual Worker handler coverage (11/11); cold review approved the active-version JSONC guard after isolated npm ci --ignore-scripts using the committed lockfile."
         ]
@@ -712,7 +798,8 @@
         "docs/plan/execution/rework-20260906/R1-final.json",
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T4-W2",
@@ -747,7 +834,8 @@
         "docs/plan/execution/rework-20260906/R1-final.json",
         "/private/tmp/corelink-r2-evidence/runner-corelink-billing.log",
         "/private/tmp/corelink-r2-evidence/worker-usage-event-conformance.log"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W3",
@@ -778,7 +866,8 @@
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "/private/tmp/corelink-t3-final-evidence/vitest-final.log",
         "/private/tmp/corelink-t3-final-evidence/typecheck-final.log"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W1",
@@ -806,7 +895,8 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-provider-recovery.json",
         "docs/plan/execution/2026-09-05-wp-fanout.json"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W2",
@@ -829,7 +919,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T8-W1",
@@ -859,7 +950,8 @@
         "conformance/engine-worker-control-requests.json",
         "deploy/cloudflare/test/engine-control-conformance.test.ts",
         "/private/tmp/corelink-t3-final-evidence/vitest-final.log"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T8-W3",
@@ -885,7 +977,8 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-06-shared-compute-verification.json"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W14",
@@ -904,7 +997,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W9",
@@ -924,7 +1018,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T8-W5",
@@ -964,7 +1059,8 @@
         "docs/plan/execution/rework-20260906/R1-final.json",
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T8-W2",
@@ -990,7 +1086,8 @@
       },
       "evidence": [
         "docs/handoff/2026-09-06-f008-credential-lifecycle-integration.md"
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W16",
@@ -1016,7 +1113,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T3-W15",
@@ -1035,7 +1133,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T8-W4a",
@@ -1052,7 +1151,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 0
     },
     {
       "id": "T8-W4b",
@@ -1078,7 +1178,8 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-auth-bridge-review.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T8-W6",
@@ -1100,11 +1201,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T8-W7",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1124,11 +1226,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T3-W5",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1144,7 +1247,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T9-W1",
@@ -1157,7 +1261,7 @@
         "T8-W4b",
         "T9-W0"
       ],
-      "next_action": "The unqualified settlement endpoint now refuses active capacity release until qualified provider terminal-artifact authority exists. T9-W1 remains partial: finish that authority, provider hard-stop/usage producers, explicit baseline/key provisioning, paired migration, and live acceptance.",
+      "next_action": "Use the authority and D2 contract at docs/plan/execution/2026-09-06-t9-w1-d2-authority-decision.md to finish provider terminal/usage producers, explicit baseline/key provisioning, paired migration, and live acceptance. T9-W1 remains partial.",
       "blockers": [
         "Qualified provider terminal/cancellation and actual usage remain F005/F007; configured8h reservation does not by itself prove provider hard-stop.",
         "Production signing/public keys and reconciled external baseline are not provisioned; paired server migration and live acceptance remain."
@@ -1183,8 +1287,16 @@
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
         "docs/handoff/2026-09-06-techlead-takeover.md",
         "docs/plan/execution/2026-09-06-shared-compute-verification.json",
-        "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate."
-      ]
+        "Approved bounded regression: parent accepted valid bearer settlement of active capacity with zero usage; 241950d returns 503 without calling settlement. Focused compute_budget_api tests passed 5/5. Mocked API regression only; existing real-PG ledger conservation evidence remains separate.",
+        "Decision contract integrated from 97d6dd33f1a8e34b78cd242f068aa5b9384d839b as 6489f31; documentary authority only, no completion credit."
+      ],
+      "historical_sprint": 1,
+      "decision_contract": {
+        "path": "docs/plan/execution/2026-09-06-t9-w1-d2-authority-decision.md",
+        "source_commit": "97d6dd33f1a8e34b78cd242f068aa5b9384d839b",
+        "integration_commit": "6489f319e0f068da06a04e9cdd30ddcb9c209c63",
+        "disposition": "Defines the qualified provider terminal-artifact authority and D2 disposition; it does not complete T9-W1 or waive F005/F007, provisioning, migration, or live acceptance."
+      }
     },
     {
       "id": "T1-W5",
@@ -1213,7 +1325,8 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-mint-readiness.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T1-W6",
@@ -1237,7 +1350,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T1-W2",
@@ -1258,7 +1372,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T1-W3",
@@ -1280,11 +1395,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T1-W4",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1303,7 +1419,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T2-W2b",
@@ -1329,7 +1446,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T2-W4",
@@ -1351,7 +1469,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T2-W5",
@@ -1373,7 +1492,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T2-W6",
@@ -1395,7 +1515,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 2
     },
     {
       "id": "T3-W7",
@@ -1417,7 +1538,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T3-W8",
@@ -1439,7 +1561,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T4-W7",
@@ -1464,7 +1587,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T4-W8",
@@ -1487,11 +1611,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T5-W4",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1512,11 +1637,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T5-W5",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1537,11 +1663,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T5-W6",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1561,7 +1688,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T6-W5",
@@ -1582,7 +1710,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T6-W6",
@@ -1604,7 +1733,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T6-W7",
@@ -1625,7 +1755,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T6-W9",
@@ -1654,11 +1785,12 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-rule-matrix-and-billing-review.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T6-W10",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1679,11 +1811,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T6-W11",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1699,11 +1832,12 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T7-W5",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1722,7 +1856,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     },
     {
       "id": "T6-W12",
@@ -1745,7 +1880,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 3
     },
     {
       "id": "T3-W18",
@@ -1773,7 +1909,8 @@
       "evidence": [
         "docs/plan/evidence/T3-W18-containment-live.json",
         "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T6-W13",
@@ -1802,11 +1939,12 @@
       },
       "evidence": [
         "docs/plan/execution/2026-09-06-sprint1-source-closure.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "T6-W14",
-      "sprint": 4,
+      "sprint": 3,
       "state": "backlog",
       "implementation": "unknown",
       "owner": "root",
@@ -1826,7 +1964,8 @@
         "commit": null,
         "evidence": []
       },
-      "evidence": []
+      "evidence": [],
+      "historical_sprint": 4
     }
   ],
   "findings": [
@@ -1846,7 +1985,8 @@
       ],
       "evidence": [
         "docs/plan/execution/2026-09-05-stress-inputs.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "F-20260905-002",
@@ -1873,7 +2013,8 @@
         "docs/plan/execution/2026-09-05-provider-binding.json",
         "docs/plan/execution/2026-09-05-provider-recovery.json"
       ],
-      "resolution": "Unknown identity no longer confirms absence; new Held records have durable bindings before transition and restore exact provider domain/handle/route. Residual discovery/liveness is explicitly split into F-20260905-005; not universal recovery or live proof."
+      "resolution": "Unknown identity no longer confirms absence; new Held records have durable bindings before transition and restore exact provider domain/handle/route. Residual discovery/liveness is explicitly split into F-20260905-005; not universal recovery or live proof.",
+      "historical_sprint": 1
     },
     {
       "id": "F-20260905-003",
@@ -1894,7 +2035,8 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
         "docs/plan/execution/2026-09-06-shared-compute-verification.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "F-20260905-004",
@@ -1913,7 +2055,8 @@
       "evidence": [
         "docs/plan/relays/devenv-authorized-start.md",
         "docs/plan/execution/2026-09-06-shared-compute-verification.json"
-      ]
+      ],
+      "historical_sprint": 1
     },
     {
       "id": "F-20260905-005",
@@ -1930,7 +2073,8 @@
       "evidence": [
         "docs/plan/execution/2026-09-05-provider-recovery.json"
       ],
-      "origin": "Successor discovery/liveness scope from F-20260905-002. AU3.25/AU7.7 source safety is complete; universal recovery and zero orphans are not claimed. Northflank scope is explicitly additional to canonical Cloudflare T3-W16."
+      "origin": "Successor discovery/liveness scope from F-20260905-002. AU3.25/AU7.7 source safety is complete; universal recovery and zero orphans are not claimed. Northflank scope is explicitly additional to canonical Cloudflare T3-W16.",
+      "historical_sprint": 3
     },
     {
       "id": "F-20260905-006",
@@ -1951,7 +2095,8 @@
         "https://developers.cloudflare.com/kv/concepts/how-kv-works/",
         "https://developers.cloudflare.com/kv/api/write-key-value-pairs/",
         "Root9focusedtests passed including actual DO+cron active/requested isolation, restart, remint during revoke preserving projection, staleKV and legacyemptyrefusal. Global migration/event completion still F008; retain open until paired lifecycle closure."
-      ]
+      ],
+      "historical_sprint": 2
     },
     {
       "id": "F-20260905-007",
@@ -1970,7 +2115,8 @@
         "Independent read-only review of1ef55b33260fbb722c4094b89a859be9c1b0c406; root inspected production function.",
         "Root reviewed diagnostic-only mitigation; author3 focused lifecycle tests passed. Full authoritative reaping remains unresolved."
       ],
-      "state": "open"
+      "state": "open",
+      "historical_sprint": 2
     },
     {
       "id": "F-20260905-008",
@@ -1999,7 +2145,8 @@
         "Rootc97ba58 reproduces23 Worker auth tests plus strictTS; root09f3ea7 forwards dedicated exec/lifecycle credentials into fabricd, with18 focused routing tests plus strictTS reproduced. Root corrected paired rotation documentation.",
         "At2026-09-06T07:33Z F008 remains open: a delayed first delivery can enumerate post-resume credentials; Worker receipt/selection has no lifecycle generation and legacy migration coverage is incomplete. These commits do not close the finding or WP.",
         "Root reproduced1 suspension interleaving test and7 enforcement tests at9e007cd with DEBUG=0 and INCREMENTAL=0. Local suspend/unsuspend durable writes and cache changes now share a mutex. Original F008 remains open for cross-service epochs, ordered resume and legacy migration."
-      ]
+      ],
+      "historical_sprint": 2
     }
   ],
   "activity": [
@@ -2454,5 +2601,94 @@
       ]
     }
   ],
-  "execution_plan": "docs/plan/execution/2026-09-06-disjoint-plan.json"
+  "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
+  "historical_sprint_scope": {
+    "1": [
+      "T3-W18",
+      "T8-W4b",
+      "T6-W4",
+      "T6-W9",
+      "T6-W13",
+      "T6-W15",
+      "T4-W4",
+      "T3-W10",
+      "T1-W5",
+      "T6-W2",
+      "T2-W3",
+      "T9-W1"
+    ],
+    "2": [
+      "T2-W2b",
+      "T2-W4",
+      "T2-W6",
+      "T4-W1",
+      "T4-W2",
+      "T3-W3",
+      "T3-W1",
+      "T3-W2",
+      "T8-W1",
+      "T8-W3",
+      "T3-W14",
+      "T3-W9",
+      "T8-W5",
+      "T8-W2"
+    ],
+    "3": [
+      "T3-W16",
+      "T3-W15",
+      "T6-W12",
+      "T1-W6",
+      "T6-W6",
+      "T1-W2",
+      "T1-W3",
+      "T2-W5",
+      "T3-W7",
+      "T3-W8",
+      "T4-W7",
+      "T4-W8",
+      "T6-W5",
+      "T6-W7",
+      "T8-W6"
+    ],
+    "4": [
+      "T6-W14",
+      "T6-W10",
+      "T1-W4",
+      "T3-W5",
+      "T5-W1",
+      "T5-W2",
+      "T5-W3",
+      "T5-W4",
+      "T5-W5",
+      "T5-W6",
+      "T6-W11",
+      "T7-W5",
+      "T8-W7"
+    ]
+  },
+  "operational_sprint_model": {
+    "id": "three-serialized-operational-sprints/v1",
+    "bundles": {
+      "1": {
+        "bundle": "B1",
+        "work_packages": 12,
+        "starts_after_merge": null
+      },
+      "2": {
+        "bundle": "B2",
+        "work_packages": 14,
+        "starts_after_merge": "B1"
+      },
+      "3": {
+        "bundle": "B3",
+        "work_packages": 28,
+        "starts_after_merge": "B2",
+        "historical_origins": [
+          3,
+          4
+        ]
+      }
+    },
+    "rules": "Only the active sprint may execute. Full CI and heavy tests run only after every work package of that sprint is complete and composed in its stacked bundle PR. CI fixes are grouped by root cause and disjoint scope, then checks are re-evaluated on the new SHA."
+  }
 }

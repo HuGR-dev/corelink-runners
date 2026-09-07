@@ -20,7 +20,7 @@ class LedgerCorruptionTests(unittest.TestCase):
         cls.ordered = sorted(cls.ids)
 
     def fixture(self):
-        groups = [sorted(ledger.EXPECTED_SCOPE[i]) for i in range(1, 5)]
+        groups = [sorted(ledger.EXPECTED_SCOPE[i]) for i in range(1, 4)]
         baseline = sorted(self.ids - set().union(*map(set, groups)))
         head = ledger.git(self.repo, "rev-parse", "HEAD")
         items = []
@@ -28,8 +28,12 @@ class LedgerCorruptionTests(unittest.TestCase):
             items.append({"id": ident, "sprint": 0, "state": "recorded_delivered", "implementation": "complete", "owner": "root", "dependencies": sorted(self.deps[ident]), "next_action": "historical", "blockers": [], "commits": [], "review": {"status": "pending", "commit": None, "evidence": []}, "evidence": []})
         for sprint, group in enumerate(groups, 1):
             for ident in group:
-                items.append({"id": ident, "sprint": sprint, "state": "backlog", "implementation": "unknown", "owner": "root", "dependencies": sorted(self.deps[ident]), "next_action": "implement", "blockers": [], "commits": [], "review": {"status": "pending", "commit": None, "evidence": []}, "evidence": []})
-        return {"schema_version": "delivery-ledger/v1", "registry": self.registry, "baseline": {"main_commit": head, "prepared_commit": head, "recorded_delivered": 16, "source": "history"}, "sprint_scope": {str(i): group for i, group in enumerate(groups, 1)}, "sprints": [{"id": i, "state": "implementation", "tip_commit": None, "ci": {"status": "not_run", "commit": None, "evidence": []}, "acceptance": {"status": "pending", "evidence": []}, "merge_commit": None} for i in range(1, 5)], "items": items, "findings": [], "activity": []}
+                historical_sprint = next(number for number, members in ledger.HISTORICAL_SCOPE.items() if ident in members)
+                items.append({"id": ident, "sprint": sprint, "historical_sprint": historical_sprint, "state": "backlog", "implementation": "unknown", "owner": "root", "dependencies": sorted(self.deps[ident]), "next_action": "implement", "blockers": [], "commits": [], "review": {"status": "pending", "commit": None, "evidence": []}, "evidence": []})
+        for item in items:
+            if item["sprint"] == 0:
+                item["historical_sprint"] = 0
+        return {"schema_version": "delivery-ledger/v1", "registry": self.registry, "baseline": {"main_commit": head, "prepared_commit": head, "recorded_delivered": 16, "source": "history"}, "sprint_scope": {str(i): group for i, group in enumerate(groups, 1)}, "historical_sprint_scope": {str(i): sorted(ledger.HISTORICAL_SCOPE[i]) for i in range(1, 5)}, "operational_sprint_model": {"id": "fixture", "rules": "fixture", "bundles": {"1": {"bundle": "B1", "work_packages": 12, "starts_after_merge": None}, "2": {"bundle": "B2", "work_packages": 14, "starts_after_merge": "B1"}, "3": {"bundle": "B3", "work_packages": 28, "starts_after_merge": "B2"}}}, "sprints": [{"id": i, "state": "implementation", "tip_commit": None, "ci": {"status": "not_run", "commit": None, "evidence": []}, "acceptance": {"status": "pending", "evidence": []}, "merge_commit": None} for i in range(1, 4)], "items": items, "findings": [], "activity": []}
 
     def validate_fixture(self, value, mode="check", target=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -134,6 +138,11 @@ class LedgerCorruptionTests(unittest.TestCase):
         self.assertEqual(self.validate_fixture(value), [])
         value, _ = self.ready_fixture(2)
         self.assertTrue(any("is not ready" in e for e in self.validate_fixture(value, "ready-ci", 2)))
+
+    def test_operational_sprints_cannot_gate_out_of_order(self):
+        value, _ = self.ready_fixture(2)
+        errors = self.validate_fixture(value, "ready-ci", 2)
+        self.assertTrue(any("cannot enter a gate before sprint 1 is merged" in error for error in errors))
 
     def test_delivered_record_requires_complete_sprint_and_no_open_finding(self):
         value, head = self.ready_fixture()

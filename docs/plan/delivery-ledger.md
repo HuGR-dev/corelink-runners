@@ -1,9 +1,10 @@
 # Delivery ledger
 
-`delivery-ledger.json` is the execution record for the four agreed sprints. The
-canonical dispatch registry still owns WP identities and dependency edges. The
-ledger preserves all 70 vertices and the exact 12/14/15/13 remaining scopes;
-it does not replace the acceptance catalog or count findings as WPs.
+`delivery-ledger.json` is the execution record for three serialized operational
+sprints. The canonical dispatch registry still owns WP identities and dependency
+edges. The ledger preserves all 70 vertices, the exact 12/14/28 operational
+scopes, and the historical 12/14/15/13 origin scopes; it does not replace the
+acceptance catalog or count findings as WPs.
 
 ```sh
 python3 scripts/dev/delivery-ledger.py --check

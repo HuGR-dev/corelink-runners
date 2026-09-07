@@ -323,6 +323,105 @@ gates remain open. The frozen runtime contract is recorded at
 completion, deployment, production qualification, or change to the recorded
 16/70 delivered count is implied.
 
+## T6-W15 single-executor completion plan
+
+The user assigned one T6-W15 executor through acceptance:
+`r2_pair_acceptance` (Luna), using
+`/private/tmp/corelink-t6-w15-owner-20260906` from
+`e016ca9df43b8e5b9d005c2e62f454c9d49890f5`. Root remains the orchestrator and
+architect; the global integrator composes approved work; and
+`spawn_preparation_integration` performs Terra cold review. Component authors
+have finished their assigned work and no new component dispatch or work package
+is created by this ownership decision.
+
+The three token codecs and terminal-ingest source through `aaa68154` are now
+integrated. The ingest acceptance suite passed 25 distinct tests (integrity 6,
+transition 4, periodic 4, quarantine 2, idempotency 7, credential isolation 2)
+and `tsc --noEmit`; the `4a73` proof was already present in source as `e27276f`
+and was not counted twice. The remaining composition is witness runtime, durable
+signer registry, ACK recovery, durable human page acknowledgement, and concrete
+main runtime under `r2_pair_acceptance`. This records execution ownership and
+acceptance flow only. It preserves the T6-W15 DoD, `prepared`/partial status,
+qualification gates, 16/70 delivery count, and all worktrees and data.
+
+The ledger's direct item summary separates 16 historical
+`recorded_delivered` items from 16 nonhistorical implementation-complete items,
+6 partial items, and 32 unknown-backlog items. These categories total 70
+items. Only the historical 16 are delivery credit; the other counts do not add
+deliveries or change the T6-W15 DoD.
+
+## Canonical closeout execution plan
+
+`docs/plan/execution/2026-09-06-closeout-three-bundles.md` is the sole
+canonical closeout plan, byte-identical to
+`$CODEX_HOME/plans/corelink-wp-closeout-20260906.md` at SHA-256
+`b703442b854fa10e173d6712fa4d02b187c80db2cde7410c2315092c2423b7b0`.
+It fixes exactly three serialized operational Runner sprints and merges: S1/B1
+has 12 WPs, S2/B2 has 14, and S3/B3 has 28. Historical Sprint 3/4 membership
+is retained in the ledger only to trace the criteria inherited by S3/B3; it
+does not create a fourth operational sprint.
+
+Only the active operational sprint may execute. S2 starts after B1 merges and
+S3 starts after B2 merges. Full CI and heavy tests wait for every WP in the
+active sprint to be complete and composed in its stacked bundle PR. Any CI
+repair is grouped by root cause and disjoint scope, then checked again on its
+new SHA. The ledger checker enforces the three scopes, serial predecessors, and
+the preserved historical membership.
+
+The plan's mandatory method governs entry, review, correction, and exit for
+each WP: the same executor receives partial-review follow-up; a second
+submission rejected by review goes to root for causal diagnosis before another
+attempt; lack of progress requires a checkpoint within 60 minutes; and no WP
+is abandoned or moved to a new plan after compaction. Every fix records the
+causal mechanism, affected branches, state consequences, minimal complete
+repair, proportionate prevention, and evidence. Reviews are bounded to a
+specific SHA, objective, scope, risks, criteria, evidence, and a consolidated
+PROMOTE/CORRECT/INCONCLUSIVE outcome; re-review covers the delta and relevant
+regressions. These rules preserve the original DoD and forbid test suppression,
+unrelated refactors, and hypothetical architecture.
+
+For T6-W15 base acceptance, trusted time/TSA, WORM, three-account independence,
+crash/rotation/isolation, and A6.10 probe 3/3 remain required. The A6.17
+seven-day observation remains historically associated with T6-W12 and T6-W10
+as a separately tracked post-delivery operational obligation. It does not block
+any WP, sprint, promote, merge, or go-live.
+
+## T6-W15 runtime and verifier template integration
+
+PROMOTE sources `cc9fa84c09cc4f654549db97403606620f719cc3` and
+`eacd95a5337dd065181e30dffd87129a60d23f55` were replayed with `-x` as
+`1db850b542f11c9a966ec5017f868585f422142a` through
+`d718b412acac1f3d23f1a6482c8d474b0e383827`. They add the concrete
+witness Lambda runtime, real signed-RSA dispatch coverage, verifier account
+binding, and the verifier runtime template/prefix boundary. Focused
+`witness-runtime.test.ts` passed 4/4, verifier runtime policy assertions
+passed, and `npm run typecheck` passed. This is component integration only;
+T6-W15 remains partial pending its durable registry, recovery, page ACK, main
+runtime, and remaining qualification criteria.
+
+## Git closeout inventory
+
+`docs/plan/execution/2026-09-06-git-closeout-inventory.json` is the bounded,
+metadata-only integration record for Git-CLOSEOUT-01. It enumerates the eleven
+open source PRs (#548–#558), 265 refs, 265 registered worktrees, known agent
+source commits, reachability from this integration head and `origin/main`, and
+the primary checkout's three preserved `UU`/`DU` conflicts. It is not a WP,
+source audit, or delivery record.
+
+The inventory classifies later-sprint source as preserved, records ingest and
+three codecs as proven substituted sources, and retains the exact B1 T6-W15
+witness-runtime (`cc9fa84c09cc4f654549db97403606620f719cc3`) and verifier
+journal-prefix (`eacd95a5337dd065181e30dffd87129a60d23f55`) packets for the
+bounded C1–C5 review/promote path. Entries without a proven bundle destination
+remain explicitly `origin_destination_to_resolve`; no age-based cleanup is
+authorized.
+
+The resumable state checkpoint is
+`docs/handoff/2026-09-06-compaction-checkpoint.md`. It mirrors the current
+closeout state for compaction recovery without becoming a second execution
+plan; the canonical plan remains
+`docs/plan/execution/2026-09-06-closeout-three-bundles.md`.
+
 ## Earlier integrated packets
 
 The prior packets in this tree include:
