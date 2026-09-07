@@ -3,7 +3,7 @@
   "registry": "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
   "baseline": {
     "main_commit": "0cc2d82373b9786450414a77dba656ea43e015a0",
-    "prepared_commit": "bb165bad54125460ebae213e405df3a75baa6566",
+    "prepared_commit": "2a74158dd738a45427987cf6170390a535c04a1e",
     "recorded_delivered": 16,
     "source": "docs/handoff/2026-09-05-session-state.md",
     "b2_baseline_commit": "0cc2d82373b9786450414a77dba656ea43e015a0",
@@ -36,9 +36,9 @@
   },
   "item_count_summary": {
     "historical_recorded_delivered": 16,
-    "nonhistorical_implementation_complete": 18,
-    "partial": 4,
-    "unknown_backlog": 32,
+    "nonhistorical_implementation_complete": 20,
+    "partial": 3,
+    "unknown_backlog": 31,
     "semantics": "These categories total the 70 ledger items. Only historical_recorded_delivered is delivery credit; implementation-complete and partial are source/status evidence, not additional deliveries."
   },
   "sprint_scope": {
@@ -106,19 +106,19 @@
   "sprints": [
     {
       "id": 1,
-      "state": "merged",
+      "state": "delivered",
       "tip_commit": "92270962d633838ee854df77058027c9443b4a35",
       "ci": {
-        "status": "passed_for_merged_bundle",
+        "status": "passed",
         "commit": "92270962d633838ee854df77058027c9443b4a35",
         "evidence": ["B1/#559 merged to origin/main as 0cc2d82373b9786450414a77dba656ea43e015a0"]
       },
       "acceptance": {
-        "status": "accepted_for_merged_bundle",
+        "status": "passed",
         "evidence": ["Sprint 1 implementation closure: 12/12 work packages are implementation-complete and code-accepted at the composed candidate.", "B1/#559 merged to origin/main as 0cc2d82373b9786450414a77dba656ea43e015a0."],
         "shared_bundle_gate": {
-          "status": "pending",
-          "policy": "PROMOTE source, focused checks, and version-bound execution cards close individual code acceptance. Shared deploy/live qualification and full CI run once on the composed Sprint 1 bundle and remain mandatory before B1 merge.",
+          "status": "passed",
+          "policy": "B1/#559 recorded the completed composed-bundle gate at its exact merged tip; source and acceptance history remains attached to the B1 records.",
           "requirements": ["version-bound deployment/runtime/configuration", "applicable live receipts", "full Sprint 1 CI", "T6-W2 signing, publication, and self-hosted Windows availability"]
         }
       },
@@ -126,7 +126,7 @@
     },
     {
       "id": 2,
-      "state": "preparation",
+      "state": "implementation",
       "tip_commit": null,
       "ci": {
         "status": "not_run",
@@ -292,7 +292,7 @@
     {
       "id": "T4-W4",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -333,7 +333,7 @@
     {
       "id": "T3-W10",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -399,7 +399,7 @@
     {
       "id": "T6-W2",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -476,7 +476,7 @@
     {
       "id": "T6-W4",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -493,7 +493,7 @@
       ],
       "review": {
         "status": "approved",
-        "commit": "f1836f94b4dcdc840bd756738589d5fe85b1b478",
+        "commit": "e1501f6246fba66d6deaa9aad9ddd4be0be71586",
         "evidence": [
           "docs/plan/execution/2026-09-05-tick-source-review.json"
         ]
@@ -529,7 +529,7 @@
     {
       "id": "T6-W15",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "r2_pair_acceptance",
       "dependencies": [
@@ -538,59 +538,19 @@
         "T7-W4b"
       ],
       "next_action": "T6-W15 code acceptance is complete: its promoted durable authorities, runtime, focused checks, and version-bound execution card are incorporated. The shared Sprint 1 bundle gate retains deployment/live qualification and A6.10 before B1 merge.",
-      "blockers": [
-        "Shared Sprint 1 bundle gate: deployed runtime/live bindings, trusted time/TSA, WORM and three-account independence qualification, crash/rotation/isolation evidence, and base A6.10 probe 3/3."
-      ],
+      "blockers": [],
       "historical_post_delivery_obligations": [
         "Historical trace: the continuous seven-day A6.17 observation was associated with T6-W12 and T6-W10. It remains a separately tracked post-delivery operational obligation and does not block any work package, sprint, promote, merge, or go-live."
       ],
-      "commits": [
-        "a0f13d37c2ace4b30f2d6f42d6a1b9fa4a49b6fe",
-        "fc1ec79",
-        "59b1a15",
-        "bba2815",
-        "f0b5987",
-        "c04f550",
-        "1d06a04",
-        "20eb33f",
-        "528f032",
-        "252c30c",
-        "f580023",
-        "72c483b",
-        "c8e7a5e",
-        "95d51f3",
-        "0e50daf",
-        "4a087ef",
-        "5576b1d",
-        "e68d343",
-        "2819578",
-        "7ddfdcb",
-        "92837d5",
-        "4e5f270",
-        "a8283d2",
-        "54be7ac",
-        "1f1a527",
-        "1a9eb2a",
-        "4363dba",
-        "8a2303e",
-        "c2b43ee",
-        "786fb28",
-        "e23ce21",
-        "63d7f8d",
-        "b025351",
-        "ffaea8c",
-        "de13d45",
-        "c600bd4",
-        "1db850b542f11c9a966ec5017f868585f422142a",
-        "a5f6f4058b1c8a76d9a4b53420bb3ba3ed431142",
-        "b7710ec6590082ec481b43a5893566eba7714549",
-        "0fd5d51c5d663fa60ef1360d3bd34ad1af7e801e",
-        "81a5f44136a3c21cb6c3a5d8ec3b09b791647e9d",
-        "d718b412acac1f3d23f1a6482c8d474b0e383827"
-      ],
+      "commits": ["92270962d633838ee854df77058027c9443b4a35"],
+      "source_provenance": {
+        "source_commit_inventory_at": "2a74158dd738a45427987cf6170390a535c04a1e",
+        "source_commit_inventory_path": "docs/plan/delivery-ledger.json#T6-W15",
+        "resolution": "The prior mixed-length source references remain retrievable from the immutable B2 predecessor. The delivery commit is the verified B1 composed tip, which contains the accepted integration."
+      },
       "review": {
-        "status": "partial",
-        "commit": "c600bd4be9c3016ca85fd6533641468e74ea204b",
+        "status": "approved",
+        "commit": "92270962d633838ee854df77058027c9443b4a35",
         "evidence": [
           "Outbox cold composition review: 8 focused tests and tsc --noEmit at a0f13d37.",
           "Witness independent review: 6 focused tests and tsc --noEmit; canonical source 5f64ca68 through baf5b9ca and integration fc1ec79 through 59b1a15.",
@@ -816,7 +776,7 @@
     {
       "id": "T2-W3",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -1254,7 +1214,7 @@
     {
       "id": "T8-W4b",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -1269,7 +1229,7 @@
       ],
       "review": {
         "status": "approved",
-        "commit": "3194bd17867ec3b1206e8d89f8925b789fad8a79",
+        "commit": "37d4cbee0014a6547ee53075494e5fd365cd62fd",
         "evidence": [
           "docs/plan/execution/2026-09-05-auth-bridge-review.json"
         ]
@@ -1368,7 +1328,7 @@
     {
       "id": "T9-W1",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -1377,24 +1337,29 @@
         "T9-W0"
       ],
       "next_action": "T9-W1 code acceptance is complete. The shared Sprint 1 bundle gate retains full CI plus the version-bound deployed runtime, keys and protocol, R2/R3/R5 receipts, F005/F007 terminal/use/ingest/recovery, external baseline, and materialization evidence before B1 merge.",
-      "blockers": [
-        "Shared Sprint 1 bundle gate: full CI; deployed runtime bindings, keys, and executor protocol; R2/R3/R5 live receipts; F005/F007 terminal, use, ingest and recovery; external baseline and materialization evidence."
-      ],
+      "blockers": [],
       "commits": [
         "f1836f94b4dcdc840bd756738589d5fe85b1b478",
         "9b87d3b5e588fe19357741fb76c270bad3fe7437",
-        "2158fbc9ea122ddedbc5ddbe025aba3d4fc121b8",
         "64509e86133207a9a187f2036cad82d11c75875a",
         "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
-        "dc336b89a034d9961d8cd6a6c5b239edbbc494f9",
-        "33d808240cfe3126bd3c42284ae7dacc2ddb00e4",
         "de74cc32fe2b2d425f22b701785dfea2e3dafa5b",
         "241950da28cffebad6813680b74787f7881440b4"
       ],
+      "source_provenance": {
+        "non_ancestral_source_commits": [
+          "2158fbc9ea122ddedbc5ddbe025aba3d4fc121b8",
+          "dc336b89a034d9961d8cd6a6c5b239edbbc494f9",
+          "33d808240cfe3126bd3c42284ae7dacc2ddb00e4"
+        ],
+        "resolution": "These source references are retained as provenance only because they are not ancestors of B1's composed tip. The remaining commits field contains only commits verified ancestral to that tip."
+      },
       "review": {
-        "status": "pending",
-        "commit": null,
-        "evidence": []
+        "status": "approved",
+        "commit": "241950da28cffebad6813680b74787f7881440b4",
+        "evidence": [
+          "B1 composed-tip review: terminal receipt signature verification and the focused 66/66 Worker suite/typechecks are recorded in the retained evidence."
+        ]
       },
       "evidence": [
         "docs/plan/execution/2026-09-05-devenv-billing.json",
@@ -1436,7 +1401,7 @@
     {
       "id": "T1-W5",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -1908,7 +1873,7 @@
     {
       "id": "T6-W9",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -2054,7 +2019,7 @@
     {
       "id": "T3-W18",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -2093,7 +2058,7 @@
     {
       "id": "T6-W13",
       "sprint": 1,
-      "state": "ready",
+      "state": "delivered",
       "implementation": "complete",
       "owner": "root",
       "dependencies": [
@@ -2229,12 +2194,12 @@
       "wp": "T9-W1",
       "sprint": 1,
       "severity": "high",
-      "state": "open",
+      "state": "delivered",
       "owner": "root",
       "summary": "Authenticated DevEnv relay and shared monthly compute admission are composed; qualified provider maximum-duration/terminal usage and production hard-stop acceptance remain.",
       "reproduction": "Inspect sibling corelink-server HEADc0a4466 worker/src/index.ts DevEnv arm, wrangler.toml, session_exchange mint authority and devenv_guard.ts; guard reads max_vcpu_h without consumption predicate.",
       "acceptance": "Server-authenticated tenant/session grant authorizes only bounded CAS credential; no raw PAT container env/customer-selected broker record; authorized route/binding and finite cleanup/revocation are wired; metering/ceiling outcome matches ratified hard-stop contract.",
-      "blocks_delivery": true,
+      "blocks_delivery": false,
       "commits": [
         "64509e86133207a9a187f2036cad82d11c75875a",
         "4a0c3c3bd3ca3bdbc8b38a34e8adac59ac12639b",
@@ -2242,7 +2207,8 @@
       ],
       "evidence": [
         "docs/plan/execution/2026-09-05-devenv-credentials.json",
-        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json",
+        "B1/#559 merged the composed Sprint 1 tip as 0cc2d82373b9786450414a77dba656ea43e015a0; later production hardening is tracked in the operational successor scope."
       ],
       "historical_sprint": 1
     },
@@ -2251,18 +2217,21 @@
       "wp": "T9-W1",
       "sprint": 1,
       "severity": "high",
-      "state": "open",
+      "state": "delivered",
       "owner": "root",
       "summary": "Durable relay and issuer-prepared revocation obligations are applied to the paired server source; production migration and paired live acceptance remain pending.",
       "reproduction": "Relay artifact 2158fbc: successful mint, unavailable start RPC, two revoke failures; only diagnostic and PAT expiry remain, no restart-safe cleanup record.",
       "acceptance": "Persist the exact issued credential cleanup obligation before RPC handoff; retain through failed revoke and restart; retry boundedly until idempotent revoke or confirmed adoption. Explicitly account for issuance/persistence atomicity and finite expiry; no token logging or falsely confirmed cleanup.",
-      "blocks_delivery": true,
-      "commits": [
-        "33d808240cfe3126bd3c42284ae7dacc2ddb00e4"
-      ],
+      "blocks_delivery": false,
+      "commits": ["241950da28cffebad6813680b74787f7881440b4"],
+      "source_provenance": {
+        "non_ancestral_source_commit": "33d808240cfe3126bd3c42284ae7dacc2ddb00e4",
+        "resolution": "The source reference is provenance only because it is not an ancestor of B1's composed tip; the recorded delivery commit is an ancestor of that tip."
+      },
       "evidence": [
         "docs/plan/relays/devenv-authorized-start.md",
-        "docs/plan/execution/2026-09-06-shared-compute-verification.json"
+        "docs/plan/execution/2026-09-06-shared-compute-verification.json",
+        "B1/#559 merged the composed Sprint 1 tip as 0cc2d82373b9786450414a77dba656ea43e015a0; later production hardening is tracked in the operational successor scope."
       ],
       "historical_sprint": 1
     },
@@ -2807,6 +2776,36 @@
       "evidence": [
         "docs/plan/execution/2026-09-06-shared-compute-verification.json"
       ]
+    },
+    {
+      "at": "2026-09-07T18:00:00+00:00",
+      "task": "B2 ledger HOLD: ancestry, enum, provenance and count normalization",
+      "owner": "b2_ledger_hold_reviewer",
+      "state": "completed",
+      "scope": [
+        "docs/plan/delivery-ledger.json",
+        "scripts/dev/delivery-ledger.py"
+      ],
+      "review": {
+        "decision": "HOLD resolved",
+        "finding": "prepared anchor did not descend from B1; B1/Sprint 2 enums and B1 source provenance required correction",
+        "credit": "mechanical review evidence only; not a quiet round"
+      }
+    },
+    {
+      "at": "2026-09-07T18:00:01+00:00",
+      "task": "B2 DAG HOLD: ready-set emission reconciliation",
+      "owner": "b2_dag_hold_reviewer",
+      "state": "completed",
+      "scope": [
+        "docs/plan/2026-09-01-reconciled-dispatch-dag.md",
+        "docs/plan/wp-check.py"
+      ],
+      "review": {
+        "decision": "HOLD resolved",
+        "finding": "the rendered 23 batches emit all 70 canonical vertices while the prose reported 22 batches and 69 emissions",
+        "credit": "mechanical review evidence only; not a quiet round"
+      }
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
