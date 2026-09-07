@@ -55,7 +55,8 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
     if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: options.revokeStatus ?? 204 });
     if (url.includes("/internal/v1/compute/")) {
       if (url.endsWith("/cancel")) return new Response("already active", { status: 409 });
-      return json({ reservation_id: computeId, state: url.endsWith("/reserve") ? "prepared" : url.endsWith("/settle") ? "settled" : "active" });
+      const state = url.endsWith("/reserve") ? "prepared" : "active";
+      return json({ reservation_id: computeId, state });
     }
     if (url.endsWith("/internal/v1/runner/adopt")) {
       order.push("adopt");
@@ -220,15 +221,14 @@ describe("spawn preparation before containment claim", () => {
     expect(f.slotsStorage.map.get("slot-holders:v1:7104")).toMatchObject({ holders: ["healthy-preparation"] });
   });
 
-  it("settles an unused metered preparation despite PAT revocation failure and preserves the winning slot", async () => {
+  it("retains an ambiguously activated preparation despite PAT revocation failure and preserves the winning slot", async () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-06T12:00:00Z"));
     const f = fixture({ metered: true, revokeStatus: 503 });
     await f.slots.acquire(TENANT, "7122", 2, 10, 60_000, "winning-preparation");
     f.store.map.set("spawn:7122", "held-by-winning-owner");
     await queued(f, "7122");
     const settled = f.calls.filter(({ url }) => url.endsWith("/compute/settle"));
-    expect(settled).toHaveLength(1);
-    expect(JSON.parse(String(settled[0].init?.body))).toMatchObject({ actual_vcpu_ms: "0", terminal_evidence_digest: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(settled).toHaveLength(0);
     expect(f.slotsStorage.map.get("slot-holders:v1:7122")).toMatchObject({ holders: ["winning-preparation"] });
     expect((await f.d.instance.revocationRequestedCredentials()).records).toContainEqual({ jobId: "7122", tenant: TENANT, patId: "new-pat", lifecycleGeneration: "1" });
     expect(getContainer).not.toHaveBeenCalled();

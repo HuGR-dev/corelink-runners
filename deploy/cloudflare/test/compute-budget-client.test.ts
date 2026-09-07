@@ -6,7 +6,13 @@ const TOKEN = "grant.example";
 const DIGEST = "a".repeat(64);
 
 function client(fetcher: typeof fetch) { return new ComputeBudgetClient("https://fabric.example", fetcher); }
-function ok(state: string, id = ID) { return new Response(JSON.stringify({ reservation_id: id, state }), { status: 200 }); }
+function ok(state: string, id = ID) {
+  const terminal = state === "cancelled" || state === "settled";
+  return new Response(JSON.stringify(terminal ? {
+    reservation_id: id, state, materialized: state === "settled", actual_vcpu_ms: state === "settled" ? "1" : "0",
+    evidence_digest: DIGEST, future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } : { reservation_id: id, state }), { status: 200 });
+}
 function calls(fetcher: ReturnType<typeof vi.fn>) { return fetcher.mock.calls[0]![1] as RequestInit; }
 
 describe("ComputeBudgetClient", () => {
@@ -31,7 +37,7 @@ describe("ComputeBudgetClient", () => {
     expect((calls(fetcher).headers as Record<string, string>).Authorization).toBe(`ComputeGrant ${TOKEN}`);
 
     fetcher.mockResolvedValueOnce(ok("settled"));
-    await c.settle(TOKEN, ID, "1", DIGEST);
+    await expect(c.settle(TOKEN, ID, "1", DIGEST)).resolves.toMatchObject({ reservation_id: ID, state: "settled", materialized: true, actual_vcpu_ms: "1" });
     expect(fetcher.mock.calls[1]![0]).toBe("https://fabric.example/internal/v1/compute/settle");
     expect((fetcher.mock.calls[1]![1] as RequestInit).body).toBe(JSON.stringify({ actual_vcpu_ms: "1", terminal_evidence_digest: DIGEST }));
   });
@@ -54,6 +60,15 @@ describe("ComputeBudgetClient", () => {
     await expect(client(vi.fn(async () => ok("prepared"))).activate(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
     await expect(client(vi.fn(async () => ok("cancelled", "123e4567-e89b-12d3-a456-426614174001"))).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
     await expect(client(vi.fn(async () => new Response(JSON.stringify({ reservation_id: ID, state: "active", extra: 1 })))).reserve(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
+  });
+
+  it.each([
+    ["state-only", { reservation_id: ID, state: "cancelled" }],
+    ["missing evidence", { reservation_id: ID, state: "cancelled", materialized: false, actual_vcpu_ms: "0", future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86) }],
+    ["wrong identity", { reservation_id: "123e4567-e89b-12d3-a456-426614174001", state: "cancelled", materialized: false, actual_vcpu_ms: "0", evidence_digest: DIGEST, future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86) }],
+    ["future fence missing", { reservation_id: ID, state: "cancelled", materialized: false, actual_vcpu_ms: "0", evidence_digest: DIGEST, terminal_authority: "fabric_compute", authority_signature: "c".repeat(86) }],
+  ] as const)("rejects unauthenticated terminal receipt: %s", async (_name, body) => {
+    await expect(client(vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }))).cancel(TOKEN, ID)).rejects.toMatchObject({ code: "ambiguous" });
   });
 
   it("maps HTTP outcomes without reflecting response secrets", async () => {

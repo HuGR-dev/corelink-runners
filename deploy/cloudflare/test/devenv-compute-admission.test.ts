@@ -42,7 +42,26 @@ function fixture(fetcher: typeof fetch) {
   const instance = new RunnerDevEnvDO(ctx, env);
   return { instance, stored, stashed, ctx, env };
 }
-function response(url: string, state = url.endsWith("/reserve") ? "prepared" : url.endsWith("/cancel") ? "cancelled" : "active") { return new Response(JSON.stringify({ reservation_id: sessionUuid, state }), { status: 200 }); }
+function response(url: string, state = url.endsWith("/reserve") ? "prepared" : url.endsWith("/cancel") ? "cancelled" : "active") {
+  const terminal = state === "cancelled" || state === "settled";
+  return new Response(JSON.stringify(terminal ? {
+    reservation_id: sessionUuid, state, materialized: state === "settled", actual_vcpu_ms: state === "settled" ? "1" : "0",
+    evidence_digest: "a".repeat(64), future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } : { reservation_id: sessionUuid, state }), { status: 200 });
+}
+function responseFor(id: string, state: string) {
+  const terminal = state === "cancelled" || state === "settled";
+  return new Response(JSON.stringify(terminal ? {
+    reservation_id: id, state, materialized: state === "settled", actual_vcpu_ms: state === "settled" ? "1" : "0",
+    evidence_digest: "a".repeat(64), future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } : { reservation_id: id, state }), { status: 200 });
+}
+function cancelledEvidence(id: string) {
+  return { terminalKind: "cancelled", actualVcpuMs: "0", evidenceDigest: "a".repeat(64), providerReceipt: {
+    reservation_id: id, state: "cancelled", materialized: false, actual_vcpu_ms: "0", evidence_digest: "a".repeat(64),
+    future_materialization_fence: "b".repeat(64), terminal_authority: "fabric_compute", authority_signature: "c".repeat(86),
+  } };
+}
 
 beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -53,7 +72,7 @@ describe("authorized DevEnv compute composition", () => {
     let unavailable = true;
     const fetcher = vi.fn(async () => unavailable
       ? new Response("unavailable", { status: 503 })
-      : new Response(JSON.stringify({ reservation_id: failedId, state: "cancelled" })));
+      : responseFor(failedId, "cancelled"));
     const f = fixture(fetcher);
     await f.ctx.blockConcurrencyWhile(async () => undefined);
     for (let n = 1; n <= 26; n++) {
@@ -62,7 +81,7 @@ describe("authorized DevEnv compute composition", () => {
         binding: { token: obligationToken(id, id, NOW - 1), reservationId: id, tenantId,
           workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 },
         phase: n === 1 ? "preparing" : "terminal", deadlineMs: NOW - 1,
-        ...(n === 1 ? {} : { terminalKind: "cancelled" }),
+        ...(n === 1 ? {} : cancelledEvidence(id)),
       });
     }
     await f.instance.retryUnusedCompute({ reservationId: failedId });
@@ -122,8 +141,7 @@ describe("authorized DevEnv compute composition", () => {
       const authorization = new Headers(init?.headers).get("authorization")!;
       const encoded = authorization.slice("ComputeGrant ".length).split(".")[0];
       const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")));
-      return new Response(JSON.stringify({ reservation_id: payload.reservation_id,
-        state: url.endsWith("/cancel") ? "cancelled" : url.endsWith("/reserve") ? "prepared" : "active" }));
+      return responseFor(payload.reservation_id, url.endsWith("/cancel") ? "cancelled" : url.endsWith("/reserve") ? "prepared" : "active");
     });
     const f = fixture(fetcher);
     vi.mocked(f.instance.schedule).mockRejectedValueOnce(new Error("scheduler unavailable"));
@@ -149,8 +167,8 @@ describe("authorized DevEnv compute composition", () => {
     const fetcher = vi.fn(async (url: string) => {
       calls++;
       if (calls === 1) return new Response("over", { status: 429 });
-      if (url.endsWith("/cancel")) return new Response(JSON.stringify({ reservation_id: oldId, state: "cancelled" }));
-      return new Response(JSON.stringify({ reservation_id: newId, state: url.endsWith("/reserve") ? "prepared" : "active" }));
+      if (url.endsWith("/cancel")) return responseFor(oldId, "cancelled");
+      return responseFor(newId, url.endsWith("/reserve") ? "prepared" : "active");
     });
     const f = fixture(fetcher);
     await expect(f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
@@ -167,7 +185,7 @@ describe("authorized DevEnv compute composition", () => {
     let cancel = false;
     const fetcher = vi.fn(async (url: string) => {
       if (url.endsWith("/cancel") || cancel) return new Response("unavailable", { status: 503 });
-      return new Response(JSON.stringify({ reservation_id: oldId, state: url.endsWith("/reserve") ? "prepared" : "active" }));
+      return responseFor(oldId, url.endsWith("/reserve") ? "prepared" : "active");
     });
     const f = fixture(fetcher);
     await f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 });
@@ -180,11 +198,11 @@ describe("authorized DevEnv compute composition", () => {
   });
 
   it("carries the drain cursor across restart before reaching an expired preparation", async () => {
-    const fetcher = vi.fn(async (url: string) => new Response(JSON.stringify({ reservation_id: "11111111-1111-4111-8111-999999999999", state: url.endsWith("/cancel") ? "cancelled" : "active" }), { status: 200 })); const f = fixture(fetcher);
+    const fetcher = vi.fn(async (url: string) => responseFor("11111111-1111-4111-8111-999999999999", url.endsWith("/cancel") ? "cancelled" : "active")); const f = fixture(fetcher);
     await f.ctx.blockConcurrencyWhile(async () => undefined);
     for (let n = 1; n <= 25; n++) {
       const id = `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
-      await f.ctx.storage.put(`compute:obligation:${id}`, { binding: { token: obligationToken(id, id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 }, phase: "terminal", deadlineMs: NOW + 60_000, terminalKind: "cancelled" });
+      await f.ctx.storage.put(`compute:obligation:${id}`, { binding: { token: obligationToken(id, id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 }, phase: "terminal", deadlineMs: NOW + 60_000, ...cancelledEvidence(id) });
     }
     const expiredId = "11111111-1111-4111-8111-999999999999";
     await f.ctx.storage.put(`compute:obligation:${expiredId}`, { binding: { token: obligationToken(expiredId, expiredId, NOW - 1), reservationId: expiredId, tenantId, workloadKind: "devenv", workloadId: expiredId, vcpuCount: 4, maximumWallMs: 28_800_000 }, phase: "preparing", deadlineMs: NOW - 1 });
