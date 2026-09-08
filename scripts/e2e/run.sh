@@ -22,7 +22,7 @@ run_critic() {
 
 # Live suites need the real tenant PATs. Source the OOB e2e env if present (never printed).
 load_live_env() {
-  local envf="$HOME/.hugit/secrets/e2e-prod-env.sh"
+  local envf="${CORELINK_E2E_ENV_FILE:-$HOME/.corelink/secrets/e2e-prod-env.sh}"
   if [ -f "$envf" ]; then set +u; . "$envf" >/dev/null 2>&1; set -u; fi
   export E2E_LIVE=1
 }

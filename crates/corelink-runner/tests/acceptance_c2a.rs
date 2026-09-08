@@ -9,7 +9,7 @@
 //!      isolated network namespace.
 //!
 //! These are **box-dependent**: they drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
 //! unreachable they **FAIL** (not skip) — per contract, box-dependent tests
 //! must fail, never silently pass.
 
@@ -79,7 +79,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
 /// Whether the box-dependent acceptance lane is active.
 ///
 /// The WP-C2a suite (`tests/acceptance/wp-c2a/run.sh`) always exports
-/// `HUGIT_RUNNER_HOST=91.99.11.196`; inside that lane these tests run and
+/// `CORELINK_RUNNER_HOST=<runner-endpoint>`; inside that lane these tests run and
 /// **FAIL** if the box is unreachable (contract: fail, not skip). When the var
 /// is **absent** the file is being collected by the bare cargo gate lane
 /// (`cargo test --workspace`, e.g. the WP-01 gate), which must stay green and
@@ -87,7 +87,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
 /// Acceptance completeness is owned by the suite that sets the env, never by
 /// the bare gate.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -95,7 +95,7 @@ fn box_lane_active() -> bool {
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 /// Only called inside the active box lane.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -192,7 +192,7 @@ fn item_2_lease_isolation() {
 //
 // `Engine::exec` is exercised only on the live-box lane (item ①), so the
 // captured-output half of the seam is extended here the same way it gates:
-// short-circuit when `HUGIT_RUNNER_HOST` is absent, FAIL (never skip) inside
+// short-circuit when `CORELINK_RUNNER_HOST` is absent, FAIL (never skip) inside
 // the active lane. Hermetic FakeBox units live in `src/isolation.rs`.
 #[test]
 fn exec_captured_separates_streams_on_live_box() {

@@ -4,7 +4,7 @@
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_warm_vs_cold_boot_timing` — warm boot ≤10s; cold boot ≥60s.
-//!      *Timing on the real box requires `HUGIT_RUNNER_HOST`.*
+//!      *Timing on the real box requires `CORELINK_RUNNER_HOST`.*
 //!      *Hermetic structural proof (always runs in the bare gate)*: the warm path
 //!      reuses cached toolchain layers (zero materializations); the cold path
 //!      materializes from scratch (non-zero). Proven via an in-process fake CAS
@@ -21,7 +21,7 @@
 //! ## Box-dependence seam
 //! The *timing* assertion in item ① (`≤10s warm / ≥60s cold`) requires a real
 //! warm-then-cold boot cycle on the live runner box and is gated behind
-//! `HUGIT_RUNNER_HOST` (the suite that sets the env owns completion). The bare
+//! `CORELINK_RUNNER_HOST` (the suite that sets the env owns completion). The bare
 //! `cargo test --workspace` gate runs only the **hermetic structural proof** of
 //! items ①, ②, ③ — always, fail-not-skip.
 //!
@@ -75,7 +75,7 @@ fn sample_fence() -> FenceManifest {
 
 /// Whether the box-dependent lane is active.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -297,7 +297,7 @@ fn item_1_warm_vs_cold_structural_proof() {
 
 /// Box-dependent: real warm ≤10s vs cold ≥60s timing on the live runner box.
 ///
-/// Requires `HUGIT_RUNNER_HOST`. When absent this body short-circuits (the
+/// Requires `CORELINK_RUNNER_HOST`. When absent this body short-circuits (the
 /// hermetic structural proof above always runs instead).
 #[test]
 fn item_1_warm_vs_cold_timing() {
@@ -318,7 +318,7 @@ fn item_1_warm_vs_cold_timing() {
     use corelink_runner::boot::BoxHydrate;
     use corelink_runner::lease::SshBox;
 
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set in the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set in the box lane");
 
     // Ensure the box is reachable.
     let ping = boxx

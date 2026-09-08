@@ -1,6 +1,6 @@
 // Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Hermetic supply-chain + RCE oracle — runs in the **bare** `cargo test
-//! --workspace` gate with NO runner box (fail-not-skip, no `HUGIT_RUNNER_HOST`
+//! --workspace` gate with NO runner box (fail-not-skip, no `CORELINK_RUNNER_HOST`
 //! needed).
 //!
 //! The brutal review's load-bearing X4 finding (R2) was that the verify-before-

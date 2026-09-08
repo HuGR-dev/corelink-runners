@@ -15,9 +15,9 @@
 //!      residue. This is the ⑤ kill-test.
 //!
 //! These are **box-dependent**: they drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
 //! unreachable they **FAIL** (not skip) — box-dependent tests must fail, never
-//! silently pass. When `HUGIT_RUNNER_HOST` is **entirely unset** (the bare
+//! silently pass. When `CORELINK_RUNNER_HOST` is **entirely unset** (the bare
 //! cargo gate lane) the box-dependent body short-circuits.
 //!
 //! # Box-sharing (CRITICAL)
@@ -92,17 +92,17 @@ fn fresh_lease(slug: &str, expiry: u64) -> RunnerLease {
 }
 
 /// Whether the box-dependent acceptance lane is active. Mirrors C2a: present &
-/// non-empty `HUGIT_RUNNER_HOST` ⇒ run + FAIL on unreachable; entirely unset ⇒
+/// non-empty `CORELINK_RUNNER_HOST` ⇒ run + FAIL on unreachable; entirely unset ⇒
 /// short-circuit (bare cargo gate lane, which does not provision the box).
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");

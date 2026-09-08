@@ -17,9 +17,9 @@
 //! ②③④⑥ stay hugit-side with the broker.
 //!
 //! **Box-dependent**: drives the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (env name preserved exactly across the transfer).
+//! `CORELINK_RUNNER_HOST` (the operator-provided runner endpoint).
 //! When the box is unreachable it **FAILS** (not skip) — per contract. It
-//! skips only when `HUGIT_RUNNER_HOST` is unset (the bare cargo gate lane).
+//! skips only when `CORELINK_RUNNER_HOST` is unset (the bare cargo gate lane).
 //!
 //! Box-sharing: everything here is namespaced with the prefix `hugit-c5b-`;
 //! spawn/probe/teardown touch only that prefix.
@@ -31,14 +31,14 @@ const IMAGE: &str = "alpine:3.20";
 
 /// Whether the box-dependent acceptance lane is active.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");

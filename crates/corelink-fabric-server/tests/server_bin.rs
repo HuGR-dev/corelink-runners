@@ -920,13 +920,13 @@ async fn mock_drives_full_lifecycle() {
 
 /// Frozen-constant guard: MOCK_STDOUT must equal the documented string
 /// exactly.  This guards against accidental drift that would silently break
-/// the SHA-256 digest pinned by githugr's offline adapter.
+/// the SHA-256 digest pinned by the offline adapter.
 #[test]
 fn mock_stdout_is_frozen() {
     use corelink_fabric_server::MOCK_STDOUT;
     assert_eq!(
         MOCK_STDOUT, "corelink-fabricd mock-exec: deterministic stub output\n",
-        "MOCK_STDOUT must never change (githugr pins its sha256)"
+        "MOCK_STDOUT must never change (offline consumers pin its sha256)"
     );
 }
 

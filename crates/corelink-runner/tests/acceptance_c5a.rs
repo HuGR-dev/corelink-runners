@@ -9,9 +9,9 @@
 //!      while the in-fence file is readable.
 //!
 //! This is **box-dependent**: it drives the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
 //! unreachable it **FAILS** (not skip) — per contract, box-dependent tests must
-//! fail, never silently pass. It skips only when `HUGIT_RUNNER_HOST` is unset
+//! fail, never silently pass. It skips only when `CORELINK_RUNNER_HOST` is unset
 //! (the bare cargo gate lane, which does not provision the box).
 //!
 //! Box-sharing: WP-C2b runs concurrently on the same box. Everything here is
@@ -32,21 +32,21 @@ const WORKSPACE_ROOT: &str = "/hugit-c5a-ws";
 
 /// Whether the box-dependent acceptance lane is active.
 ///
-/// The WP-C5a suite always exports `HUGIT_RUNNER_HOST`; inside that lane the
+/// The WP-C5a suite always exports `CORELINK_RUNNER_HOST`; inside that lane the
 /// test runs and FAILS if the box is unreachable. When the var is absent the
 /// file is being collected by the bare cargo gate lane (`cargo test
 /// --workspace`), which must stay green and does not provision the box — so the
 /// body short-circuits. Acceptance completeness is owned by the suite that sets
 /// the env, never by the bare gate.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");

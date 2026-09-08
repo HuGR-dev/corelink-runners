@@ -13,7 +13,8 @@ export const BASE = process.env.FABRIC_BASE_URL || 'https://corelink-fabricd.gmh
 export function loadPat() {
   if (process.env.FABRIC_F0005_PAT) return process.env.FABRIC_F0005_PAT.trim();
   try {
-    return readFileSync(join(homedir(), '.hugit/secrets/f0005-runners-item4-acquiring-pat.txt'), 'utf8').trim();
+    const patFile = process.env.CORELINK_E2E_PAT_FILE || join(homedir(), '.corelink/secrets/f0005-runners-item4-acquiring-pat.txt');
+    return readFileSync(patFile, 'utf8').trim();
   } catch {
     return null;
   }

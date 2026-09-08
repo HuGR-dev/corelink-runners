@@ -15,7 +15,7 @@
 //!      processed. The ordering is load-bearing. (box-dependent)
 //!
 //! Box-dependence: items ① and ③ drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the env is set
+//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the env is set
 //! but the box is unreachable they **FAIL** (not skip), per contract.
 //!
 //! The fail-closed-before-spawn ORDERING (item ③, the load-bearing invariant)
@@ -23,7 +23,7 @@
 //! `item_3_fail_closed_before_spawn_hermetic`, which drives the **production**
 //! [`DockerEngine::spawn`] surface against a FAKE box (no network, no env).
 //! This closes the brutal-review X4 finding: the ordering proof is no longer a
-//! silent no-op when `HUGIT_RUNNER_HOST` is unset — it runs, and FAILS (not
+//! silent no-op when `CORELINK_RUNNER_HOST` is unset — it runs, and FAILS (not
 //! skips) if the engine ever issues `docker run` before rejecting a
 //! tampered/unpinned image.
 //!
@@ -57,7 +57,7 @@ const TAMPERED_REF: &str =
 /// not, so box bodies short-circuit there to keep `cargo test --workspace`
 /// green.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -295,7 +295,7 @@ fn item_4_spawn_applies_untrusted_hardening_flags() {
 /// Connect to the live box; FAIL (panic) if unreachable, per contract. Only
 /// called inside the active box lane.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
