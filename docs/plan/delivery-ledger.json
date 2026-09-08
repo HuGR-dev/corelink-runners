@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "partial: final production one-shot PASS records Worker 1418af47 at 100%, ready DevEnv on immutable d105 image, fabricd v26 running on digest 2e7b and fleet gates 0/0/0; local gate is 90 files / 1119 tests. The required 10/10 independent cold-start evidence for A2.4/A2.5/A2.7/A2.10 remains absent; earlier failure/rollback history is retained",
+        "T2-W2b": "partial: the recovery after harness 0/10 restored Worker 1418af47 at 100%, ready DevEnv on immutable d105 image, a new running Fabricd provider app v1 on digest 2e7b, fleet gates 0/0/0 and pauses 1/1. Historical Fabricd provider-v26 criterion remains RED; required 10/10 independent cold-start evidence remains absent",
         "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,8 +1643,8 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Capture one version-bound 10/10 independent cold-start artifact covering A2.4/A2.5/A2.7/A2.10: each start must record Worker version/deploy, ready DevEnv d105, provider-reported running fabricd v26/digest 2e7b, documented deploy and Worker /health, fleet gates, plus rollback/recovery evidence. The final one-shot PASS does not satisfy this boot-sensitive criterion.",
-      "blockers": ["A2.4 10/10 independent cold-start deploy artifact absent", "A2.5 10/10 provider-reported running-instance/digest artifact absent", "A2.7 10/10 documented deploy and new Worker /health artifact absent", "A2.10 10/10 rollback-to-prior-version answering artifact absent"],
+      "next_action": "Resolve or explicitly adjudicate the unrecoverable historical Fabricd provider-v26 criterion, then capture one version-bound 10/10 independent cold-start artifact for the valid acceptance contract. The recovered Fabricd app is a new provider v1 app on digest 2e7b; service recovery does not restore the historical v26 criterion or satisfy the one-shot/10-start gap.",
+      "blockers": ["T2-W2b harness 0/10 root cause: --containers-rollout=none skipped Fabricd container application creation", "Historical Fabricd provider-v26 criterion RED: recovery recreated the app as provider v1 on digest 2e7b", "A2.4/A2.5/A2.7/A2.10 version-bound 10/10 independent cold-start artifact absent"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
         "b610a924edaa224db46320d3993bea797bbe2504",
@@ -1655,7 +1655,8 @@
         "9463dc87620424142bfb62ed9a72cfbbbba40d0b",
         "9273080e0485a202bdca5f1c2899e5169fb48e45",
         "31742786e3dbe55139a19f0790ede8542e854686",
-        "c15e1231fbe6950773b2611bc45fa9eafbdcf82e"
+        "c15e1231fbe6950773b2611bc45fa9eafbdcf82e",
+        "e88ded3ec7c5e74c03f628908b14208da9a90710"
       ],
       "review": {
         "status": "pending",
@@ -1669,7 +1670,8 @@
         "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only.",
         "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence previously proved A2.5 with a running fabricd instance reporting the configured immutable digest and both health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history.",
         "docs/plan/evidence/T2-W2b-A2.7-final-20260908.json: a prior candidate Worker 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977 deployed at 100% while provider fabricd state was stopped (active=0, healthy=0, assigned=1), so rollback recovered cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; fleet returned 0/0/0 without FORCE and references remained unchanged. This retained rollback recovery supplies A2.10 history.",
-        "docs/plan/evidence/T2-W2b-deploy-final.json: final production promotion is PASS. Worker 1418af47-d71a-488f-89a6-cbb9173402bd is deployed at 100%; DevEnv a037c709-9f21-493c-8dcb-2414a588a1cd is ready on immutable d105e11f...; fabricd v26 instance 12e222c7... reports running on immutable 2e7bcea9...; authenticated fleet and post gates are 0/0/0 without FORCE. Version-bound local CI is 90 files / 1119 tests plus typecheck PASS at the product-equivalent 9273080 source."
+        "docs/plan/evidence/T2-W2b-deploy-final.json: final production one-shot PASS recorded Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%, ready DevEnv d105e11f..., Fabricd v26/digest 2e7b and gates 0/0/0. Version-bound local CI is 90 files / 1119 tests plus typecheck PASS at product-equivalent 9273080 source.",
+        "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json: after the harness 0/10 root cause (--containers-rollout=none skipped container application creation), recovery restored Worker 1418af47 at 100%, new Fabricd app a03e645c... running at provider v1 on immutable digest 2e7b, HTTP health/attestation 200, ready DevEnv d105, fleet 0/0/0 and pauses 1/1. The historical provider-v26 criterion remains RED and no completion credit is granted."
       ],
       "historical_sprint": 2
     },
@@ -3349,6 +3351,34 @@
       "evidence": [
         "Product-equivalent local gate remains typecheck PASS and Vitest 90 files / 1119 tests PASS at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
         "Earlier failed/rollback and recovered states remain retained as historical evidence."
+      ]
+    },
+    {
+      "at": "2026-09-08T02:45:15+00:00",
+      "task": "T2-W2b harness recovery evidence integration",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json",
+        "docs/plan/evidence/T2-W2b-incident-recovery-20260908.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commits": [
+        "176f77a3d28d07e173ce87f57bc868e946369d1f",
+        "63c8fde6c7bbe904112583403aee5a6a5e528575",
+        "56993a06810a105d6d13d4b7415b4441205a259b"
+      ],
+      "integrated_commits": [
+        "70676d3",
+        "1729a88",
+        "e88ded3ec7c5e74c03f628908b14208da9a90710"
+      ],
+      "conclusion": "Recovery restored the operational service but not the historical acceptance: the harness 0/10 root cause was a no-container rollout that skipped Fabricd application creation. Fabricd is a new provider v1 app on the expected digest, so provider-v26 remains RED and T2-W2b remains partial.",
+      "evidence": [
+        "Final Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%; ready DevEnv d105e11f...; recovered Fabricd app a03e645c-9589-401c-84a0-e023ff2b6749 provider v1 running on 2e7bcea9... with health and attestation HTTP 200.",
+        "Fleet busy=0, checked=0, unverifiable=0, force=false; intake/redrive remain paused 1/1."
       ]
     }
   ],
