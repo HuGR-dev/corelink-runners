@@ -75,16 +75,19 @@ the proxy edge. The Worker returns `503` with `Retry-After: 60` before looking
 up or waking a container for these routes:
 
 - `POST /v1/leases` (new lease acquire)
-- `POST /webhooks/github` (autoscaler-driven new lease acquire)
+- `POST /webhooks/github` workflow_job.queued and other non-completion events
+  (autoscaler-driven new lease acquire)
 - `POST /v1/test/mint-cred-ticket` (dev/test ticket mint)
 
 The default is fail-open only when the binding is absent or exactly `0`. Any
 other value, including a malformed or whitespace-padded value, is treated as
-paused. Health, attestation, lease reads, existing lease execution and
-credential redemption, cancel/teardown, and close continue through the normal
-proxy path so already-issued leases can drain. Set the var back to exactly
-`0` to resume admissions; applying the change still requires the normal owner
-approved Worker rollout.
+paused. A `workflow_job.completed` webhook is parsed at the edge and still
+forwards to Rust so credential revocation and runner teardown can complete.
+Health, attestation, lease reads, existing lease execution and credential
+redemption, cancel/teardown, and close continue through the normal proxy path
+so already-issued leases can drain. Set the var back to exactly `0` to resume
+admissions; applying the change still requires the normal owner-approved
+Worker rollout.
 
 ## Smoke (checkpoint A/B/C)
 ```sh
