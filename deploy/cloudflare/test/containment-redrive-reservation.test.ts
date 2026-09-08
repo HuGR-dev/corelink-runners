@@ -142,6 +142,32 @@ describe("atomic redrive reservation state machine", () => {
 });
 
 describe("redrive gates and identity/authorization", () => {
+  it("shared admission pause suppresses scheduled new-spawn reconcilers before GitHub/KV", async () => {
+    const d = makeDO();
+    const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 }) });
+    const drive = vi.fn(async () => {});
+    const scan = vi.fn(async () => []);
+
+    await retryOrphanedSpawns(
+      env(d, store, { FABRIC_ADMISSION_PAUSED: "1" }),
+      ctx() as never,
+      T0,
+      drive,
+      vi.fn(async () => null),
+    );
+    await redriveOrphanedJobs(
+      env(d, store, { FABRIC_ADMISSION_PAUSED: "1", RECONCILER_REPOS: "acme/repo" }),
+      ctx() as never,
+      undefined,
+      T0,
+      { listOrphanRunnerJobs: scan },
+    );
+
+    expect(store.list).not.toHaveBeenCalled();
+    expect(scan).not.toHaveBeenCalled();
+    expect(drive).not.toHaveBeenCalled();
+  });
+
   it("suppresses both reconcilers for paused or invalid switches before KV/GitHub", async () => {
     const d = makeDO(); const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 }) }); const drive = vi.fn(async () => {});
     for (const value of ["1", "true", " "]) { const c = ctx(); await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: value }), c as never, T0, drive, vi.fn(async () => null)); expect(store.list).toHaveBeenCalledTimes(0); }
