@@ -1,0 +1,34 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w4-image-ship-20260908",
+  "kind": "registry-push",
+  "status": "PASS",
+  "observed_at": "2026-09-08T00:24:56Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "cb9f417a5d2ddba5d4f4f0f67ccdb1edc983aef8",
+    "path": "docs/plan/evidence/T2-W4-image-ship.json"
+  },
+  "claims": ["T2-W4:image-push"],
+  "version": {"id": "cb9f417a5d2ddba5d4f4f0f67ccdb1edc983aef8"},
+  "evidence": {
+    "source_image": "corelink-runner-devenv:sha-bca2c39",
+    "source_revision": "bca2c39",
+    "source_repository": "https://github.com/HuGR-Labs/corelink-runners",
+    "platform": "linux/amd64",
+    "local_image_id": "sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c",
+    "registry_tag": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv:sha-bca2c39",
+    "remote_ref": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c",
+    "remote_digest": "sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c",
+    "remote_media_type": "application/vnd.oci.image.manifest.v1+json",
+    "remote_config_digest": "sha256:974a3ee3e964809fa588f13a4e06a6cf4c7f06db711db27da28822724f60455b",
+    "remote_layer_count": 14,
+    "push_attempts": [
+      {"client": "wrangler containers push", "tag": "sha-bca2c39", "result": "stalled-before-manifest", "new_tag": false},
+      {"client": "docker push", "tag": "sha-bca2c39", "result": "success", "exit": 0, "new_tag": false}
+    ],
+    "mutations": {"registry_push": true, "worker_config": false, "worker_deploy": false, "container_rollout": false},
+    "transcript": "docs/plan/evidence/T2-W4-image-ship-transcript-20260908.md",
+    "scope_note": "Registry push and digest resolution only; no pinning, deployment, rollout, or live qualification credit."
+  }
+}
