@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. WP is still partial pending the canonical provider-lifecycle, fabricd running-digest and documented CI /health probes",
+        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. Canonical provider-lifecycle evidence proves A2.5; A2.7 remains RED after 5 failing test files / 10 failing tests, so the WP remains partial",
         "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,12 +1643,13 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Capture the canonical version-bound provider-lifecycle artifact at docs/plan/evidence/T2-W2b-deploy.json, then prove A2.5 (deployed fabricd digest and running-instance report) and A2.7 (documented CI control-plane deploy answering /health). The success retry does not complete those probes.",
-      "blockers": ["T2-W2b provider-lifecycle artifact absent", "A2.5 fabricd running-digest probe absent", "A2.7 documented CI /health probe absent"],
+      "next_action": "Resolve the documented CI test gate for A2.7, then rerun the documented control-plane CI deploy and record the new version health proof. The canonical provider-lifecycle artifact proves A2.5; the successful retry deployment does not override the A2.7 RED result.",
+      "blockers": ["A2.7 documented CI test gate RED: 5 failing test files / 10 failing tests", "A2.7 documented CI control-plane /health proof remains uncredited while its required test gate is RED"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
         "b610a924edaa224db46320d3993bea797bbe2504",
-        "ac34eace117c61b1cf9c5b1ce7e85f2ee2946ef6"
+        "ac34eace117c61b1cf9c5b1ce7e85f2ee2946ef6",
+        "f8489a045caf2735333b3b973b7646017576e3ed"
       ],
       "review": {
         "status": "pending",
@@ -1659,7 +1660,8 @@
         "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not grant implementation or live credit.",
         "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false.",
         "docs/plan/evidence/T2-W2b-rollout-20260908.json: deploy attempt created Worker version 9a456fa5-e30b-44cc-a638-f78da8fc02cc but failed because the container Durable Object binding was absent. Rollback recovered active version 43df9d2b-7a83-437b-ba11-aa40ddef1b42 at 100%; pre/post fleet gates were busy=0, checked=0, unverifiable=0 with force=false. RunnerContainer, CheckHostContainer and fabricd were unchanged.",
-        "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only; canonical provider-lifecycle, A2.5 and A2.7 probes remain absent."
+        "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only.",
+        "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence proves A2.5 with the running fabricd instance reporting the configured immutable digest and both fabricd health routes HTTP 200. A2.7 is RED: npm ci and typecheck passed, but npm run test failed in 5 files / 10 tests out of 1119. The artifact preserves the local deploy success (Worker cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%, ready RunnerDevEnvDO, fleet gates 0/0/0 without FORCE) without granting CI or completion credit."
       ],
       "historical_sprint": 2
     },
@@ -3249,6 +3251,25 @@
       "evidence": [
         "Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; pre/post fleet gate busy=0, checked=0, unverifiable=0, force=false.",
         "RunnerContainer and CheckHostContainer unchanged; fabricd not targeted."
+      ]
+    },
+    {
+      "at": "2026-09-08T01:10:20+00:00",
+      "task": "T2-W2b canonical provider-lifecycle evidence integration",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W2b-deploy.json",
+        "docs/plan/evidence/T2-W2b-deploy-20260908.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commit": "f8489a045caf2735333b3b973b7646017576e3ed",
+      "conclusion": "Canonical evidence proves A2.5: the deployed fabricd digest matches the running instance and health probes return HTTP 200. A2.7 remains RED because the documented local CI substitution has 5 failing files / 10 failing tests; preserve the successful Worker retry deployment, but grant neither A2.7 nor WP-completion credit.",
+      "evidence": [
+        "Worker cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; ready RunnerDevEnvDO a037c709-9f21-493c-8dcb-2414a588a1cd on the immutable d105e11f... image; pre/post fleet gates 0/0/0 without FORCE.",
+        "A2.7 local CI substitution: npm ci PASS, typecheck PASS, npm run test RED with 85 passing test files, 5 failing files, 1109 passing tests and 10 failing tests of 1119."
       ]
     }
   ],
