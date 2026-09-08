@@ -730,14 +730,30 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     expect(perKeyCap).toBe(5); // min(5, 20) = 5
   });
 
-  // ── Cell 12 — a THROWN DO error is a closed admission refusal ─────────────
-  it("cell12-authority-failure: a THROWN DO acquire error refuses before mint or provider", async () => {
+  // ── Cell 12 — a THROWN DO error with no budget authority is closed ────────
+  it("cell12-authority-failure: missing budget authority refuses before mint or provider", async () => {
     const slots = fakeSlots("throw"); // simulate a DO/infra reset
     const metrics = fakeMetrics();
+    const kv = fakeKv();
+    const authorities = makeWorkerAuthorities(kv as never);
+    const containment = new Proxy(authorities.containment, {
+      get(target, property, receiver) {
+        if (property === "spendAdmissionBudget") return async () => { throw new Error("budget authority unavailable"); };
+        return Reflect.get(target, property, receiver);
+      },
+    });
     const env = baseEnv({
-      RUNNER_JOB_PATS: fakeKv() as never,
+      RUNNER_JOB_PATS: kv as never,
       METRICS: metrics as never,
       CONCURRENCY_SLOTS: slots as never,
+      // The slot DO and the independent exceptional-admission authority are
+      // separate bindings. Make the latter unavailable to exercise the
+      // fail-closed branch; a healthy ContainmentDO intentionally admits only
+      // within its bounded five-per-minute budget.
+      CONTAINMENT: {
+        idFromName: () => "global",
+        get: () => containment,
+      } as never,
       CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
       SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
       CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
@@ -746,7 +762,8 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "1201", repo: "acme/api", installationId: 42 });
     await drain(ctx);
-    // The acquire threw, so no emergency slot or provider path is available.
+    // The acquire and its independent budget authority both failed, so no
+    // emergency slot or provider path is available.
     expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
     expect(fetchCalls.some((u) => u.includes("/internal/v1/runner/mint") || u.includes("generate-jitconfig"))).toBe(false);
     expect(containers).toHaveLength(0);

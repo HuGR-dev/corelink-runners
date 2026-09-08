@@ -121,6 +121,7 @@ import {
   type OrphanRecord,
 } from "./lib";
 import { flushBillingUsageBacklog } from "./billing_recovery";
+import { spendAdmissionBudget, type AdmissionBudgetVerdict } from "./lib/admission_budget";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
   dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
@@ -859,6 +860,16 @@ export class ContainmentDO extends DurableObject<Env> {
 
   private tx<T>(fn: (storage: any) => Promise<T>): Promise<T> {
     return this.ctx.storage.transaction(fn);
+  }
+
+  /**
+   * Spend the bounded exceptional-admission budget in the same durable
+   * authority that serializes all callers. A missing or unreadable authority
+   * is a refusal; a healthy missing record is a fresh budget.
+   */
+  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
+    const nowMs = Date.now();
+    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
   }
 
   async snapshot(): Promise<ContainmentMeta> {
@@ -3276,8 +3287,10 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
 //   • cold (no derived tenant): key = `repo:<repo>`, perKeyCap = COLD_REPO_CAP —
 //     the old KV path skipped cold spawns entirely (unlimited runners); they are
 //     now capped per-repo AND under the same global FLEET cap.
-// The slot authority is mandatory. Both a clean cap refusal and an authority
-// failure stop the attempt before mint or provider dispatch.
+// A clean cap refusal stops the attempt. A transient slot-authority failure
+// uses the bounded ContainmentDO budget so a short hiccup does not block
+// legitimate work, while a sustained outage admits at most five starts per
+// rolling minute and an unavailable budget refuses closed.
 export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
@@ -3300,8 +3313,17 @@ export async function acquireConcurrencySlot(
       preparationId,
     );
   } catch (e) {
-    const verdict = { admitted: false, reason: "slot_authority_unavailable" };
-    logEvent("error", "concurrency_slot_acquire_error_refused", {
+    // The budget is authoritative: an absent, unreadable, or failed
+    // ContainmentDO transaction refuses rather than bypassing the bound.
+    let verdict: { admitted: boolean; reason?: string };
+    try {
+      verdict = env.CONTAINMENT
+        ? await containmentAuthority(env).spendAdmissionBudget()
+        : { admitted: false, reason: "slot_failopen_budget_unreadable" };
+    } catch {
+      verdict = { admitted: false, reason: "slot_failopen_budget_unreadable" };
+    }
+    logEvent("error", "concurrency_slot_acquire_error_failopen", {
       jobId,
       key,
       error: (e as Error).message,
