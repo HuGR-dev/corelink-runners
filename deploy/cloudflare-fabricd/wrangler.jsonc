@@ -50,6 +50,11 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
+    // Emergency edge freeze for NEW lease/admission/mint routes. Absent or
+    // exact "0" is fail-open; any other value pauses with 503 + Retry-After.
+    // Leave unset in the normal posture; set through the reviewed config change
+    // procedure when a containment window is required.
+    // "FABRIC_ADMISSION_PAUSED": "0",
     // ⛔ CURRENT CONTAINMENT: the durable PG block is explicitly disabled.
     // Keep this byte-exact value. DATABASE_URL may remain bound, but it NEVER arms
     // PG by itself: pgLedgerEnvVars forwards the PG ledger, vCPU ceiling, and
