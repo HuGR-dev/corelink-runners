@@ -65,7 +65,7 @@ describe("FABRIC_ADMISSION_PAUSED parsing and route scope", () => {
 describe("paused Worker", () => {
   it.each([
     ["direct acquire", "/v1/leases", "{}"],
-    ["autoscaler webhook", "/webhooks/github", "{}"],
+    ["autoscaler queued webhook", "/webhooks/github", JSON.stringify({ action: "queued", workflow_job: { id: 42 } })],
     ["test ticket mint", "/v1/test/mint-cred-ticket", "{}"],
   ])("rejects %s before a container lookup", async (_name, path, body) => {
     const response = await worker.fetch(
@@ -79,6 +79,34 @@ describe("paused Worker", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(await response.json()).toEqual({ error: "fabric admission paused" });
     expect(getContainer).not.toHaveBeenCalled();
+  });
+
+  it("forwards workflow_job.completed so Rust can revoke and tear down", async () => {
+    const body = JSON.stringify({
+      action: "completed",
+      workflow_job: { id: 42, labels: ["corelink"] },
+    });
+    const hits: Request[] = [];
+    getContainer.mockImplementation(() => ({
+      fetch: (request: Request) => {
+        hits.push(request);
+        return Promise.resolve(new Response("completed", { status: 200 }));
+      },
+    }));
+
+    const response = await worker.fetch(
+      new Request("http://fabricd/webhooks/github", {
+        method: "POST",
+        headers: { "x-github-event": "workflow_job", "x-hub-signature-256": "sha256=test" },
+        body,
+      }),
+      envWithPause("1"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(hits).toHaveLength(1);
+    expect(await hits[0].text()).toBe(body);
+    expect(hits[0].headers.get("x-github-event")).toBe("workflow_job");
   });
 
   it.each([
