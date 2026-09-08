@@ -3,14 +3,14 @@
   "artifact_id": "t2-w2b-deploy-20260908",
   "kind": "probe",
   "status": "RED",
-  "observed_at": "2026-09-08T01:10:20Z",
+  "observed_at": "2026-09-08T01:31:15Z",
   "source": {
     "repository": "corelink-runners",
-    "commit_sha": "5cede249c578315621d20a3ba85729c54d5c04e8",
+    "commit_sha": "9273080e0485a202bdca5f1c2899e5169fb48e45",
     "path": "docs/plan/evidence/T2-W2b-deploy.json"
   },
   "claims": ["A2.5", "A2.7"],
-  "version": {"id": "5cede249c578315621d20a3ba85729c54d5c04e8"},
+  "version": {"id": "9273080e0485a202bdca5f1c2899e5169fb48e45"},
   "evidence": {
     "A2.5": {
       "status": "PASS",
@@ -49,20 +49,21 @@
     },
     "A2.7": {
       "status": "RED",
-      "reason": "The documented deploy workflow's local CI substitution did not pass its test gate: 85 test files passed and 5 failed (10 tests failed out of 1119). The Worker deploy and post-deploy health proof succeeded, but the full CI path cannot be promoted while the required test job is red.",
+      "reason": "The local test and typecheck gates are green at 9273080e0485a202bdca5f1c2899e5169fb48e45, but this tip has not run through the documented CI deploy path. The only recorded Worker deploy predates the G1 production change at 9463dc8, so it cannot credit A2.7 for the current source tip or replace the required post-deploy Worker /health proof.",
       "documented_workflow": ".github/workflows/deploy-spawn-worker.yml",
       "owner_authorized_local_substitution": true,
       "local_ci_substitution": {
         "working_directory": "deploy/cloudflare",
         "commands": ["npm ci", "npm run typecheck", "npm run test"],
-        "npm_ci": {"exit": 0, "audit_summary": "12 vulnerabilities reported by npm audit; no auto-fix applied"},
-        "typecheck": {"exit": 0},
-        "test": {"exit": 1, "test_files_passed": 85, "test_files_failed": 5, "tests_total": 1119, "tests_failed": 10},
-        "failed_files": ["test/reconciler-wave-acceptance.test.ts", "test/retry-epoch-integration.test.ts", "test/teardown-permutation.test.ts", "two additional files reported by the same vitest summary"],
-        "ci_substitution_verdict": "RED"
+        "npm_ci": {"exit": 0, "scope": "canonical attempt before the current G1-G5 tip", "audit_summary": "12 vulnerabilities reported by npm audit; no auto-fix applied"},
+        "typecheck": {"exit": 0, "tip": "9273080e0485a202bdca5f1c2899e5169fb48e45"},
+        "test": {"exit": 0, "tip": "9273080e0485a202bdca5f1c2899e5169fb48e45", "test_files_passed": 90, "test_files_failed": 0, "tests_total": 1119, "tests_passed": 1119, "tests_failed": 0, "duration_seconds": 26.67},
+        "prior_red_gate": {"test_files_passed": 85, "test_files_failed": 5, "tests_total": 1119, "tests_passed": 1109, "tests_failed": 10, "failed_files": ["test/reconciler-wave-acceptance.test.ts", "test/retry-epoch-integration.test.ts", "test/teardown-permutation.test.ts", "two additional files reported by the same vitest summary"]},
+        "ci_substitution_verdict": "LOCAL_TEST_GATE_PASS_DOCUMENTED_DEPLOY_PENDING"
       },
       "deploy_proof": {
         "command": "npx wrangler deploy --config wrangler.jsonc --name corelink-spawn-worker",
+        "scope": "historical deploy before G1-G5; retained as deployment history only, not current-tip A2.7 credit",
         "worker_deployment_id": "7e60acfb-acf2-4df0-a496-52ee7460ca19",
         "worker_version": "cb704a9d-f6e0-45d7-9e68-89a263a77993",
         "traffic_percentage": 100,
@@ -85,6 +86,6 @@
     "transcripts": [
       "docs/plan/evidence/T2-W2b-deploy-20260908.md"
     ],
-    "scope_note": "A2.5 is proven. A2.7 remains RED specifically because the locally substituted CI test gate failed; no green credit is inferred from a successful deploy alone."
+    "scope_note": "A2.5 is proven. The A2.7 local test/typecheck gate recovered at 9273080, while its prior 5-file/10-test RED evidence remains preserved. A2.7 remains RED because the current tip has not completed the documented CI deploy and post-deploy Worker /health proof; no green credit is inferred from the historical successful deploy alone."
   }
 }
