@@ -222,9 +222,9 @@
       // is ALSO what evicts those three: no token has instance-delete scope, so a
       // new image is the only lever. Rollback = increment-4 digest
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
-      // build-sha: 2cc1e84778301e0e9f04041a04d416a61cde789b
-      // image-provenance: digest=sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029 build-sha=2cc1e84778301e0e9f04041a04d416a61cde789b
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
+      // image-provenance: digest=sha256:186a8e48ff876a04a732710939c7d9b83694c12bb8408ef788bcea1ef652047b build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:186a8e48ff876a04a732710939c7d9b83694c12bb8408ef788bcea1ef652047b",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
@@ -271,9 +271,9 @@
       // NOTE: live-flip to prod is still separately gated (real toolchain snapshot +
       // owner go) — deploying the app just moves it out of the stuck "provisioning".
       "class_name": "CheckHostContainer",
-      // build-sha: 2cc1e84778301e0e9f04041a04d416a61cde789b
-      // image-provenance: digest=sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851 build-sha=2cc1e84778301e0e9f04041a04d416a61cde789b
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
+      // image-provenance: digest=sha256:260bae50075fd6308e9260774176aa731690f6be5638cd6f21ab25837586dbb8 build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:260bae50075fd6308e9260774176aa731690f6be5638cd6f21ab25837586dbb8",
       "instance_type": "standard-4",
       // 2026-08-02: lowered 4 → 1. A cost audit found this app sitting at
       // `healthy: 4, active: 0, assigned: 0` — FOUR boxes of 4 vCPU / 12 GiB /
