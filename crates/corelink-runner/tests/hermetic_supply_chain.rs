@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use corelink_runner::isolation::{DockerEngine, Engine, IsolationProbe, RunningContainer};
 use corelink_runner::lease::{BoxExec, CmdOutput, ContainerSpec};
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runner::ws::{DedupSpawner, spawn_workspace};
 use corelink_runners_contracts::{FenceManifest, RunnerLease, RunnerState};
 
@@ -202,7 +203,7 @@ fn lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -310,9 +311,9 @@ fn real_docker_engine_verifies_before_run() {
     // A ContainerSpec built by hand (bypassing from_lease) to prove the engine
     // itself is the floor — even a directly-constructed spec is gated.
     let make_spec = |image: &str| ContainerSpec {
-        name: "hugit-job-real".to_string(),
+        name: "corelink-job-real".to_string(),
         image: image.to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         no_network: true,
         allow_egress: false,
         run_on_create: false,

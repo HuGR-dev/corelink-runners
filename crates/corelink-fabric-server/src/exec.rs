@@ -56,8 +56,8 @@ impl LeasedExec for NoBoxExec {
 /// The FROZEN deterministic output emitted by [`MockLeasedExec`] on every
 /// exec.
 ///
-/// **FROZEN — DO NOT CHANGE.** External CoreLink consumers may pin the SHA-256
-/// of this string (`sha256:a30dd181a99e2acecd791e826
+/// **FROZEN — DO NOT CHANGE.** External consumers pin the SHA-256 of this
+/// string (`sha256:a30dd181a99e2acecd791e826
 /// 347f30104e7e7db30fd14035d0287affb51d254`) in their test fixtures. Any edit
 /// to this constant silently breaks those pinned digests.
 pub const MOCK_STDOUT: &str = "corelink-fabricd mock-exec: deterministic stub output\n";
@@ -67,7 +67,7 @@ pub const MOCK_STDOUT: &str = "corelink-fabricd mock-exec: deterministic stub ou
 /// Every call to [`exec_captured_for`] returns a deterministic
 /// `Ok(CmdOutput { code: Some(0), stdout: MOCK_STDOUT, stderr: "" })`
 /// regardless of `lease_id` or `argv`. This is NOT a real execution — it
-/// is a pure offline stub that allows external CoreLink consumers to
+/// is a pure offline stub that allows external consumers to
 /// drive the REAL binary + REAL HTTP API + REAL signed attestation without a
 /// cloud provider.
 ///
@@ -144,7 +144,8 @@ fn content_ref(bytes: &[u8]) -> String {
 }
 
 /// The FROZEN memo-key formula, transcribed byte-exactly from
-/// `corelink-runners-contracts/src/check_result.rs`:
+/// `corelink-runners-contracts/src/check_result.rs` (single-sourced on the
+/// hugit side as `hugit_refstore::compute_memo_key`):
 ///
 /// ```text
 /// memo_key = lower_hex( SHA-256( LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest) ) )
