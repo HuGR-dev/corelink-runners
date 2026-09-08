@@ -259,6 +259,12 @@ Extracted verbatim from `FEATURES.md`. Each maps to `>= 1` suite cell (enforced 
 Extracted verbatim from `USE-SCENARIOS.md`. Per-persona coverage + the explicit X4/owner call-outs.
 The critic (§4) enforces **per-S-id** cell existence; this table is the human-readable disposition.
 
+**P2 provenance/disposition.** The P2 S-ids remain verbatim historical atoms from
+`USE-SCENARIOS.md`; that source records the discontinued external persona. This active
+suite maps those atoms to a direct CoreLink CLI/SDK fixture so the coverage ledger stays
+complete. That mapping is an explicit test transformation with historical provenance;
+it does not claim Hugit/githugr adoption, ownership, dispatch, or external live evidence.
+
 | Persona | S-ids | primary suite | fabricable live | X4 / owner-gated (the honest residual) |
 |---|---|---|---|---|
 | P1 dev (46) | S1.1.1–S1.7.5 | TS-2/TS-3 | dogfood job, warm/cold boot, matrix, ceiling, recovery | external install (S1.1.1/2), full cache-hit smoke (S1.2.1 tail), multi-size (S1.3.3/4), GPU/arch (S1.3.4) |

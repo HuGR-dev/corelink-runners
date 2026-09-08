@@ -1773,8 +1773,8 @@ changing the principal suite's 94-row / 92-live scope:
 
 1. The live picture now names the contained, intentionally degraded state: `FABRIC_PG_DISABLED=1`,
    in-memory ledger, and suspended durable vCPU/billing paths, with the evidence artifact cited.
-2. The plan-check totals remain W2 = 21 and DEFER = 5. The suite is exactly 94 rows / 91 live:
-   53 test, 34 probe, 2 test+probe, 3 judged and 2 withdrawn; 47 WPs own 89 non-judged items.
+2. The plan-check totals remain W2 = 21 and DEFER = 5. The suite is exactly 94 physical rows / 91 live:
+   52 test, 34 probe, 3 test+probe, 2 judged and 3 withdrawn; 48 WPs own 89 non-judged items.
 3. Wave tables now include every WP known to `wp-check.py`; active `T4-W3` references were corrected
    to `T4-W4`. The deleted T4-W3 remains only where the rev-4 history describes that deletion.
 4. Round 2 is complete. Rounds 3, 4, 5 and 6 (2026-09-01) are explicitly **NOT QUIET** and their

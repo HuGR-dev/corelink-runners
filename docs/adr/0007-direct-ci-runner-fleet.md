@@ -1,10 +1,15 @@
-# ADR-0007 — Direct-CI on-ramp: an ephemeral GitHub Actions runner fleet
+# ADR-0007 — Historical direct-CI design: ephemeral GitHub Actions runner fleet
 
-- **Status:** Accepted (owner decision, 2026-06-15)
+- **Status:** Superseded and historical (2026-09-08; see ADR-0014)
 - **Date:** 2026-06-15
+- **Current boundary:** This document records a discarded design review. Hugit and
+  githugr are external projects and have no active CoreLink consumer, ownership,
+  verifier, deployment, acceptance, or go-live role. The text below is retained for
+  provenance only; it creates no current gate or implementation obligation.
 - **Context source:** a drift review (2026-06-15, 3 read-only studies) found that
   the "direct adoption surface" shipped earlier this session (`corelink run` CLI +
-  the GitHub Action wrapping it) is actually the **hugit memoized-check path**
+  the GitHub Action wrapping it) was described as a **historical external
+  memoized-check path**
   (campaign #3) in Action clothing — not the direct-CI on-ramp the canonical
   vision (whitepaper §9, product.md ICP-B) calls for. This ADR fixes the model.
 
@@ -17,10 +22,11 @@ cache-warm CoreLink microVM, one ephemeral runner per job, billed by concurrency
 
 **The drift (evidence, from our own code):**
 - `corelink run` zero-fills `tree_hash` and the comment admits it: *"a command
-  runner, not a memoized check pipeline"* (`crates/corelink-cli/src/run.rs`). It is
-  the hugit `CheckDef`/`CheckResult` path with two of three memo axes nulled.
-- `result_binding_sig_v2` binds **`memo_key`** (`binding.rs`) — hugit's frozen
-  three-axis memoization key. A normal CI customer does not ed25519-verify a
+  runner, not a memoized check pipeline"* (`crates/corelink-cli/src/run.rs`). It was
+  also used by the historical external `CheckDef`/`CheckResult` path with two of
+  three memo axes nulled.
+- The historical `result_binding_sig_v2` bound **`memo_key`** (`binding.rs`) — an
+  external three-axis memoization key. A normal CI customer does not ed25519-verify a
   signature over their build's exit code; that is a memoized-fleet trust primitive
   (campaign #3), not ICP-B's need.
 - The shipped GitHub Action runs `runs-on: ubuntu-latest`, does `actions/checkout`
@@ -50,12 +56,11 @@ same bounded class. So private-repo CI on the fabric is native, not precluded.
    **unmodified** workflow, then it deregisters and the box is torn down. One runner
    lease = one billable concurrency slot; pricing is unchanged (flat by concurrency).
 
-2. **The `corelink run` CLI + GitHub Action + `result_binding_sig_v2` + verify SDKs
-   are re-scoped** to what they are: the **hugit / campaign-#3 memoized-check path**
-   plus a power-user "run one attested check" primitive. They are correct and
-   load-bearing there — but they are **not** the direct adoption surface and must
-   stop being labelled as it. (No code is wrong; the positioning is corrected — see
-   the whitepaper §9 + ROADMAP edits accompanying this ADR.)
+2. The historical `corelink run` / GitHub Action / verify-SDK discussion, including
+   `result_binding_sig_v2`, is retained as provenance for an external memoized-check
+   design. It is not a current CoreLink go-live gate, verifier dependency, acceptance
+   criterion, or ownership assignment. Current promotion follows ADR-0014 and the
+   direct CoreLink API/CLI/SDK contracts.
 
 ## Architecture
 
@@ -63,13 +68,13 @@ A new **runner-lease mode** alongside the existing check/exec-lease mode. Both r
 the same lease / isolate / concurrency-cap / teardown spine; they differ in what the
 box runs and how the lifecycle is driven.
 
-| | Check lease (today, hugit/power-user) | Runner lease (this ADR, direct-CI) |
+| | Check lease (historical external path) | Runner lease (historical direct-CI design) |
 |---|---|---|
 | Box command | fabric sets `sh -lc <check.command>` per `/exec` | provision-time: the GH runner agent (`config + run --ephemeral --jitconfig`) |
 | Drive | fabric-driven, per-`/exec` REST, attested | GitHub-driven: GitHub assigns the job; fabric provisions-then-waits-for-exit |
 | Source onto box | CAS / cache-warm materialization | native `actions/checkout` (GitHub's per-job token) |
 | Credential injected | per-lease ingest token | per-lease **JIT runner registration config** (ephemeral) |
-| Result | `CheckResult` + `result_binding_sig_v2` | the customer's own GitHub check status |
+| Result | historical `CheckResult` + binding signature | the customer's own GitHub check status |
 
 **Lifecycle (runner lease):** acquire → broker mints a JIT ephemeral runner config →
 provision box (`image` = runner image, command = agent run, `env` = {JIT config,
@@ -97,7 +102,7 @@ reaches the box.
   isolation gates admit **only** for runner-mode leases; check leases keep the
   no-egress floor. ADR-0003 already accepts outbound egress on the managed tier, so
   this is admitting at the gate what the provider already permits — scoped to runner
-  leases so the hugit/check path's posture is unchanged.
+  leases so the historical external check path's posture was unchanged.
 - **C3 — runner image.** A digest-pinned image (X4 floor) containing the GitHub
   Actions runner agent + the cache-warm toolchain base; its command launches
   `config.sh --ephemeral --jitconfig <…> && run.sh`. The registration config is read
@@ -124,13 +129,15 @@ reaches the box.
 
 ## Consequences
 
-- Whitepaper §9 and ROADMAP are updated: the direct front door is a runner fleet,
-  not a "shim" step. The hugit/via-hugit front door is unaffected (it keeps the
-  memoized attested check-exec model).
+- Whitepaper §9 and ROADMAP were updated in that historical review: the direct
+  front door was a runner fleet, not a "shim" step. The external memoized check
+  path was left unchanged at that time; it has no current CoreLink role under
+  ADR-0014.
 - New trust surface: the GitHub App private key, held by the fabric (same class as
   the Northflank token + the ingest signing key — never on the box). Per-job tokens
   are bounded ephemeral capabilities, ADR-0003-consistent.
-- The earlier "adoption surface" framing is corrected in-place; the code (`corelink
-  run` / Action / attestation / SDKs) is retained for the hugit path + power users.
-- Supersedes the discarded ADR-0007 (Firecracker isolation seam, removed 2026-06-14)
-  — that number is reused here.
+- The earlier "adoption surface" framing was corrected in-place; the code (`corelink
+  run` / Action / attestation / SDKs) is retained as historical implementation
+  provenance. Current CoreLink promotion does not depend on the external path.
+- Historical note: this record superseded the discarded Firecracker isolation seam
+  (removed 2026-06-14); ADR-0014 now governs the current product boundary.

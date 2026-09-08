@@ -178,15 +178,17 @@ broke prod once (#195).** `CloudflareEngine` v0 remains **runner-only by design*
 the spawn-Worker's only container is the GitHub-Actions runner image). So:
 
 - **Cloudflare ONLY** (`CLOUDFLARE_SPAWN_WORKER_URL` var + `CLOUDFLARE_SPAWN_AUTH_TOKEN`
-  secret) → **runner** leases spawn on Cloudflare, but a **CHECK-exec** lease
-  (`allow_egress=false`) **fails CLOSED at spawn** (#198). The killer (memoized CI /
-  per-PR attested cost) dispatches CHECK-exec leases → **Cloudflare-only does NOT serve
-  the killer.** Wiring CF alone and pointing the killer at it is the #195 regression.
+  secret) → **runner** leases spawn on Cloudflare, but a **check-exec** lease
+  (`allow_egress=false`) **fails closed at spawn** (#198). The direct CoreLink
+  check/exec path therefore requires the second substrate; Cloudflare-only is a
+  runner-only configuration. Wiring CF alone and routing check/exec work to it is
+  the #195 regression.
 
 - **Rota B — BOTH substrates** (`CLOUDFLARE_SPAWN_*` **and** `NORTHFLANK_API_TOKEN`
   + `NORTHFLANK_PROJECT_ID`) → the composition selects the **Hybrid** backend
   (`select_backend(true,true)`): **runner→Cloudflare** (the R2-co-located moat),
-  **check-exec→Northflank**. This path supplies the killer's required substrate. Set all four and redeploy.
+  **check-exec→Northflank**. This is the supported dual-backend configuration for
+  the two CoreLink lease kinds. Set all four and redeploy.
 
 ```bash
 # wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
@@ -200,7 +202,7 @@ npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
 # merely to diagnose whether a variable is present.
 ```
 
-After the env becomes active, smoke BOTH kinds before handing the host to the killer: a runner
+After the env becomes active, smoke BOTH kinds before promoting the host: a runner
 acquire → 200 Held + a CF `/v1/spawn` fired; a check acquire → 200 Held + provisioned on
 Northflank (not Cloudflare). The `tests/hybrid_flip_e2e.rs` e2e pins this routing offline;
 the live smoke confirms the real backends. **Never claim boxes work off the boot log alone
