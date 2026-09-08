@@ -30,14 +30,6 @@ pub const C5A_WORKSPACE_ROOT: &str = "/corelink-c5a-ws";
 /// Private tmpfs root for the escape red-team acceptance lane.
 pub const C5B_WORKSPACE_ROOT: &str = "/corelink-c5b-ws";
 
-/// Migration-only cleanup vocabulary for resources created before the
-/// CoreLink namespace cutover.  These values are intentionally isolated from
-/// all creation, census, and normal teardown paths.  A future one-shot box
-/// migration may consume this mapping and then remove it.
-#[allow(dead_code)]
-pub const HISTORICAL_CLEANUP_PREFIXES: &[&str] =
-    &["hugit-job-", "hugit-c2b-", "hugit-c5a-", "hugit-c5b-"];
-
 const ACTIVE_PREFIXES: &[&str] = &[JOB_PREFIX, C2B_PREFIX, C5A_PREFIX, C5B_PREFIX, WS_PREFIX];
 
 /// Return whether a Docker/provider resource name belongs to a current
@@ -64,17 +56,6 @@ pub fn validate_corelink_owned_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Filter a provider/container listing to names eligible for the one-shot
-/// legacy migration cleanup. It consumes the historical mapping above and
-/// applies an exact prefix check before any caller can delete a name.
-pub fn historical_cleanup_names(listing: &str) -> impl Iterator<Item = &str> {
-    listing.lines().map(str::trim).filter(|name| {
-        HISTORICAL_CLEANUP_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix) && name.len() > prefix.len())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,7 +65,7 @@ mod tests {
         let prefixes = [JOB_PREFIX, C2B_PREFIX, C5A_PREFIX, C5B_PREFIX, WS_PREFIX];
         for prefix in prefixes {
             assert!(prefix.starts_with("corelink-"));
-            assert!(!prefix.contains("hugit"));
+            assert!(!prefix.contains("legacy"));
         }
         for (index, prefix) in prefixes.iter().enumerate() {
             assert!(
@@ -93,28 +74,19 @@ mod tests {
                     .all(|other| !other.starts_with(prefix))
             );
         }
-        assert!(!JOB_LABEL.contains("hugit"));
-        assert!(!C5A_LABEL.contains("hugit"));
-        assert!(!C5B_LABEL.contains("hugit"));
-        assert!(!JOB_TMP_ROOT.starts_with("/hugit"));
-        assert!(!C5A_WORKSPACE_ROOT.starts_with("/hugit"));
-        assert!(!C5B_WORKSPACE_ROOT.starts_with("/hugit"));
-    }
-
-    #[test]
-    fn historical_cleanup_filter_is_prefix_scoped() {
-        let names = "hugit-c2b-good\nmy-hugit-c2b-foreign\nhugit-c2b\n";
-        assert_eq!(
-            historical_cleanup_names(names).collect::<Vec<_>>(),
-            ["hugit-c2b-good"]
-        );
+        assert!(!JOB_LABEL.contains("legacy"));
+        assert!(!C5A_LABEL.contains("legacy"));
+        assert!(!C5B_LABEL.contains("legacy"));
+        assert!(!JOB_TMP_ROOT.starts_with("/legacy"));
+        assert!(!C5A_WORKSPACE_ROOT.starts_with("/legacy"));
+        assert!(!C5B_WORKSPACE_ROOT.starts_with("/legacy"));
     }
 
     #[test]
     fn resource_name_validation_rejects_legacy_and_foreign_names() {
         assert!(validate_corelink_owned_name("corelink-job-abc").is_ok());
-        assert!(validate_corelink_owned_name("hugit-job-abc").is_err());
-        assert!(validate_corelink_owned_name("githugr-job-abc").is_err());
+        assert!(validate_corelink_owned_name("legacy-job-abc").is_err());
+        assert!(validate_corelink_owned_name("foreign-job-abc").is_err());
         assert!(validate_corelink_owned_name("runner-job").is_err());
         assert!(validate_corelink_owned_name("corelink-job-abc/evil").is_err());
     }
