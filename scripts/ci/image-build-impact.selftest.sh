@@ -39,6 +39,22 @@ grep -q 'image=corelink-fabricd-fabricdcontainer' <<< "$output"
 grep -q 'image=corelink-runner-devenv' <<< "$output"
 echo 'PASS image-build-impact detects transitive image closures'
 
+rename="$fixture/rename"
+mkdir -p "$rename/deploy/runner" "$rename/docs"
+printf 'runner recipe\n' > "$rename/deploy/runner/Dockerfile"
+git -C "$rename" init -q
+git -C "$rename" config user.email selftest@example.invalid
+git -C "$rename" config user.name image-build-impact-rename-selftest
+git -C "$rename" add .
+git -C "$rename" commit -qm rename-base
+rename_base="$(git -C "$rename" rev-parse HEAD)"
+git -C "$rename" mv deploy/runner/Dockerfile docs/runner-recipe.txt
+git -C "$rename" commit -qm rename-out-of-tree
+rename_head="$(git -C "$rename" rev-parse HEAD)"
+output="$($checker --repo "$rename" --base "$rename_base" --head "$rename_head")"
+grep -q 'image=corelink-spawn-worker-runnercontainer' <<< "$output"
+echo 'PASS image-build-impact detects out-of-tree Dockerfile rename'
+
 printf 'docs\n' > "$fixture/README.md"
 git -C "$fixture" add README.md
 git -C "$fixture" commit -qm docs

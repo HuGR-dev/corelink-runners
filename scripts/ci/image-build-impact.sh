@@ -73,7 +73,17 @@ declare -a FABRICD_PATHS=(
   ".github/workflows/build-fabricd-image.yml"
 )
 
-mapfile -t changed < <(git -C "$repo" diff --name-only --diff-filter=ACDMRTUXB "$base...$head")
+changed=()
+# Use status-aware output and inspect BOTH sides of renames/copies. A Dockerfile
+# moved out of its old tree still invalidates the old image pin, even when the
+# destination is outside the ordinary context path list.
+while IFS=$'\t' read -r change_status old_path new_path; do
+  [[ -n "$old_path" ]] || continue
+  changed+=("$old_path")
+  if [[ "$change_status" =~ ^[RC] ]]; then
+    [[ -n "$new_path" ]] && changed+=("$new_path")
+  fi
+done < <(git -C "$repo" diff --name-status --find-renames --find-copies "$base...$head")
 
 matches_path() {
   local changed_path=$1 declared

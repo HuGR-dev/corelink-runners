@@ -7,8 +7,9 @@ dockerfile="$repo/deploy/runner/Dockerfile"
 build_workflow="$repo/.github/workflows/build-cf-container-images.yml"
 fabricd_workflow="$repo/.github/workflows/build-fabricd-image.yml"
 shim="$repo/deploy/runner/docker-shim.sh"
+disk_guard="$repo/scripts/ci/container-build-disk-guard.sh"
 
-[[ -f "$dockerfile" && -f "$build_workflow" && -f "$fabricd_workflow" && -f "$shim" ]] || {
+[[ -f "$dockerfile" && -f "$build_workflow" && -f "$fabricd_workflow" && -f "$shim" && -f "$disk_guard" ]] || {
   echo 'runner-image-static-check: required image files are missing' >&2
   exit 1
 }
@@ -32,23 +33,26 @@ for variable in NIGHTLY_DATE CARGO_FUZZ_VERSION; do
   fi
 done
 
-# Production publication must use Wrangler's direct BuildKit registry output;
-# a local `docker build` followed by `containers push` recreates the containerd
-# unpack/disk-exhaustion path this check guards against.
-if grep -nE '(^|[[:space:]])docker build([[:space:]\\]|$)|containers push' \
-    "$build_workflow" "$fabricd_workflow"; then
-  echo 'runner-image-static-check: local build or second-step push path found' >&2
+# Locked Wrangler requires a locally loaded image. Verify the production path
+# explicitly prunes the exact tag and unreferenced content, with a pre-build
+# free-space guard, rather than pretending `containers build --push` streams
+# directly on this runner.
+if ! grep -q 'docker build' "$build_workflow" ||
+   ! grep -q 'containers push' "$build_workflow" ||
+   ! grep -q 'docker build' "$fabricd_workflow" ||
+   ! grep -q 'containers push' "$fabricd_workflow" ||
+   ! grep -q 'container-build-disk-guard.sh' "$build_workflow" ||
+   ! grep -q 'container-build-disk-guard.sh' "$fabricd_workflow"; then
+  echo 'runner-image-static-check: bounded local build/push path is missing' >&2
   exit 1
 fi
-if ! grep -q 'containers build' "$build_workflow" ||
-   ! grep -q -- '--push' "$build_workflow" ||
-   ! grep -q 'containers build' "$fabricd_workflow"; then
-  echo 'runner-image-static-check: direct registry-output build is missing' >&2
+if grep -q 'type=image,name=' "$shim" || grep -q '^ *--push)' "$shim"; then
+  echo 'runner-image-static-check: unsupported direct-registry shim translation found' >&2
   exit 1
 fi
-if ! grep -q 'type=image,name=' "$shim" ||
-   ! grep -q '^ *--push)' "$shim"; then
-  echo 'runner-image-static-check: docker buildx --push is not translated to direct registry output' >&2
+if grep -q 'REF="\${IMG}:\${GITHUB_SHA}"' "$fabricd_workflow" ||
+   grep -q 'imagetools) exit 0' "$shim"; then
+  echo 'runner-image-static-check: mutable digest fallback or silent imagetools failure found' >&2
   exit 1
 fi
 

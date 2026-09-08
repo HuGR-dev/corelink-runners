@@ -11,6 +11,9 @@ on:
     paths:
       - 'deploy/runner/**'
       - 'deploy/check-host/**'
+      - 'deploy/**'
+      - '**/Dockerfile*'
+      - '**/*.dockerfile'
       - 'deploy/cloudflare/Dockerfile.runner-devenv'
       - 'deploy/cloudflare/entrypoint.sh'
       - 'deploy/cloudflare/supervisord.conf'

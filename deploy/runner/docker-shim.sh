@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # docker(1) drop-in shim for CoreLink runner leases.
 #
 # A customer job on `runs-on: corelink` runs its UNMODIFIED `docker build` /
@@ -23,58 +23,21 @@ set -e
 # notably `wrangler containers build` (used by build-cf-container-images.yml) —
 # therefore cannot build on a CoreLink lease unless we translate the two forms it
 # emits. Plain `docker build` already works here (containerd image store), so:
-#   - `buildx build …`             -> `build …`     (drop the `buildx` word);
-#     Docker's `--push` is translated to nerdctl's direct registry exporter
-#     (`--output type=image,name=...,push=true`) so the result is never unpacked
-#     into the containerd image store first.
-#   - `buildx imagetools inspect …`-> best-effort no-op: nerdctl has no imagetools;
-#                                     our callers `|| true` and fall back to the
-#                                     tag when the metadata query yields nothing.
+#   - `buildx build …`             -> `build …`     (drop the `buildx` word)
+#   - `buildx imagetools inspect …`-> fail loudly: nerdctl has no imagetools;
+#                                     callers must fail closed rather than fall
+#                                     back to a mutable tag.
 #   - `buildx version`             -> nerdctl --version (cheap; no daemon needed)
 #   - any other `buildx …`         -> pass the remainder through best-effort.
 # Placed BEFORE the daemon bring-up so the no-op paths never spin up containerd.
 if [ "${1:-}" = "buildx" ]; then
   shift
   case "${1:-}" in
-    build)
-      shift
-      # Wrangler invokes Docker as `buildx build --tag NAME --push ...`. nerdctl
-      # has no Docker-compatible --push flag; use BuildKit's registry exporter.
-      # Arrays are intentional: customer build arguments can contain spaces.
-      _build_args=()
-      _build_tag=""
-      _build_push=0
-      while (($#)); do
-        case "$1" in
-          --push)
-            _build_push=1
-            ;;
-          --tag|-t)
-            (($# >= 2)) || { echo 'docker-shim: --tag requires a value' >&2; exit 2; }
-            _build_tag="$2"
-            shift
-            ;;
-          --tag=*|-t=*)
-            _build_tag="${1#*=}"
-            ;;
-          *)
-            _build_args+=("$1")
-            ;;
-        esac
-        shift
-      done
-      if (( _build_push )); then
-        if [[ -z "$_build_tag" ]]; then
-          echo 'docker-shim: refusing --push without a --tag image name' >&2
-          exit 2
-        fi
-        _build_args+=(--output "type=image,name=${_build_tag},push=true")
-      elif [[ -n "$_build_tag" ]]; then
-        _build_args+=(--tag "$_build_tag")
-      fi
-      set -- "${_build_args[@]}"
+    build) : ;;                                    # falls through: nerdctl build …
+    imagetools)
+      echo 'docker-shim: buildx imagetools is unavailable; digest resolution must fail closed' >&2
+      exit 127
       ;;
-    imagetools) exit 0 ;;                          # best-effort; caller falls back
     version|--version) exec sudo nerdctl --version ;;
     *) : ;;                                        # best-effort passthrough
   esac
