@@ -36,9 +36,7 @@ use corelink_runners_contracts::{FenceManifest, RunnerLease};
 
 use crate::isolation::{Engine, RunningContainer};
 use crate::lease::{BoxExec, ContainerSpec};
-
-/// Prefix for all C9-owned workspace containers on the shared box.
-pub const WS_PREFIX: &str = "corelink-ws-";
+pub use crate::namespace::WS_PREFIX;
 
 // ── container naming ──────────────────────────────────────────────────────────
 

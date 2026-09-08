@@ -55,6 +55,7 @@ use anyhow::{Result, bail};
 use corelink_runner::ContainerSpec;
 use corelink_runner::isolation::{Engine, IsolationProbe, RunningContainer};
 use corelink_runner::lease::CmdOutput;
+use corelink_runner::namespace::validate_corelink_owned_name;
 use corelink_runner::pin::PinnedImageRef;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, Method};
@@ -896,6 +897,7 @@ impl<H: HttpTransport> NorthflankEngine<H> {
 
 impl<H: HttpTransport> Engine for NorthflankEngine<H> {
     fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+        validate_corelink_owned_name(&spec.name)?;
         // ── Isolation floor (parity with DockerEngine) ────────────────────────
         // A `no_network == false` spec is admitted ONLY when it also carries the
         // egress grant `allow_egress == true` — which only `from_runner_lease`
@@ -1173,6 +1175,18 @@ mod tests {
             "jitconfig must be in TOP-LEVEL runtimeEnvironment (else the box \
              starts with no env and the runner entrypoint exits 1)"
         );
+    }
+
+    #[test]
+    fn spawn_rejects_foreign_resource_name_before_provider_contact() {
+        let engine =
+            NorthflankEngine::new(ExplodingTransport, NorthflankConfig::new("proj", "tok"));
+        let mut bad = spec(vec![]);
+        bad.name = "hugit-job-foreign".to_string();
+        let err = engine
+            .spawn(&bad)
+            .expect_err("foreign resource names must fail before provider contact");
+        assert!(format!("{err:#}").contains("CoreLink-owned namespace"));
     }
 
     /// A runner spec (`allow_egress == true`).
@@ -1485,7 +1499,7 @@ mod tests {
     fn job_name_is_northflank_legal() {
         for input in [
             "corelink-c2b-lease/x y",
-            "HUGIT-JOB-Weird.Name",
+            "corelink-job-Weird.Name",
             "////",           // slug collapses to empty
             &"x".repeat(500), // length stress
             "corelink-c2b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
