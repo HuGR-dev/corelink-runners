@@ -1,7 +1,8 @@
 # Design — CF-native check-host (the Cloudflare-first check execution path)
 
 > Status: **PLANNED** (planning round 2026-06-26, 6 read-only seam studies). NOT yet building —
-> gated on (G1) the hugit A/B answer, (G2) the toolchain-resolver cross-TL seam, (G3) owner go on scope.
+> gated on (G2) the toolchain-resolver cross-TL seam and (G3) owner go on scope.
+> The former external-consumer decision is historical context only; it is not a CoreLink gate.
 > Supersedes the "rota A is multi-week, undefined" framing in ADR-0008 with a concrete, mostly-reusable design.
 
 ## Goal
@@ -46,8 +47,8 @@ verified against the frozen clw contract):** a toolchain in the CAS **IS a `clw 
   `clw hydrate --manifest-digest <D> <dest>`** (digest-direct, skips the AC name lookup, reuses the existing
   materialize path). It plugs into **W6**; clw lands it **on our W6 timeline** (no API ahead of a consumer).
 - **Closes the latent false-cache-hit bug below** (ref IS content → hydrated bytes provably match the memo axis).
-- **Remaining owners:** (i) **producer (githugr/hugit)** must set `CheckDef.toolchain_ref = the snapshot root
-  digest` — the ONE producer behavior change (relay when G1=B); (ii) **Cache TL** confirms the toolchain
+- **Remaining owners:** (i) the **CoreLink producer** must set `CheckDef.toolchain_ref = the snapshot root
+  digest`; (ii) **Cache TL** confirms the toolchain
   manifest+chunks live on the **R2-backed CAS** (zero-egress for the CF check-host).
 - Reply: `corelink-workspaces/docs/REPLY-clw-TL-toolchain-resolver-seam-2026-06-26.md` (archived pointer:
   `docs/handoff/2026-06-26-clw-tl-RESPONSE-toolchain-resolver-option-b.md`).
@@ -75,13 +76,11 @@ resolved (clw option b), so W5/W6 are now concrete — no stub resolver needed; 
 directly, W6 hydrates via the clw flag.**
 
 ## Gates (why we PLAN now but don't BUILD yet)
-- **G1 — hugit A/B:** if hugit's agent executes + feeds §13 (answer A), the check-host is NOT NEEDED. Build
-  only on a "B" answer (`docs/handoff/2026-06-26-ASK-hugit-tl-DECISIVE-...`).
 - **G2 — toolchain resolver:** ✅ **RESOLVED** (clw option b — `toolchain_ref` = clw manifest digest; clw
-  delivers `--manifest-digest`). Sub-items: producer sets `toolchain_ref = snapshot digest` (relay on G1=B);
+  delivers `--manifest-digest`). Sub-items: producer sets `toolchain_ref = snapshot digest`;
   Cache TL confirms R2 placement. No resolver service to build.
 - **G3 — owner go** on the scope (it's a real subsystem, even if ~70% reuse + G2 resolved).
 
-When **G1=B + G3=go**, W1–W6 are a clean parallel wave (solo; clw lands `--manifest-digest` into W6 on our
+When **G3=go**, W1–W6 are a clean parallel wave (solo; clw lands `--manifest-digest` into W6 on our
 timeline). The producer `toolchain_ref=digest` change + Cache R2 confirm are the only remaining cross-TL
 items, both small. Northflank remains the inert fallback throughout.

@@ -12,8 +12,7 @@ HuGR (the company / brand)
  └─ CoreLink (the platform)
      ├─ Cache         — content-addressed CAS + Action Cache   (launch, live)
      ├─ Runners       — ephemeral compute on the cache         (campaign #1, THIS REPO)
-     └─ Workspaces    — workspace-as-object                    (campaign #2)
-   hugit / githugr (agent-fleet forge)                         (campaign #3, DISCONTINUED 2026-07)
+   └─ Workspaces    — workspace-as-object                    (campaign #2)
 ```
 
 **CURRENT STATE (2026-09-01 containment).** Repo `HuGR-Labs/corelink-runners` (private; migrated
@@ -30,9 +29,10 @@ canary fabric probes that prevented scale-to-zero. C1 and C4 remain red. The **c
 on 2026-07-09 (native check-exec + per-job mint), but current go-live credit requires a fresh
 version-bound proof after durable recovery. A go-live
 hardening wave (2026-07-17) landed billing-usage durability, the external-GA installation
-allowlist, the idem_key cross-path disjointness lock, and the shim cfg-gate. **hugit +
-githugr (campaign #3) are DISCONTINUED (2026-07)** — Runners is sold **direct to its own
-ICP** (infra/CI teams), the single front door; the hugit seam is historical dead weight.
+allowlist, the idem_key cross-path disjointness lock, and the shim cfg-gate. The former
+external agent-fleet projects Hugit and Githugr were discontinued in 2026-07; they have no
+runtime, build, ownership, or acceptance role. Runners is sold **direct to its own ICP**
+(infra/CI teams), the single front door.
 Not-yet-live (owner/config-gated, not missing code): external-GA flip, billing usage-push
 (COGS-only, low-urgency), N>1 multi-instance (offline-proven, flip = env), `max_vcpu_h`
 value (server-side).
@@ -49,19 +49,19 @@ The runner-transfer campaign (2026-06-10) plus the P0 seed-hardening wave (audit
   C2a/C2b/C3/C5a/C9/E4/X4 + redteam + `hermetic_supply_chain` +
   `acceptance_s13` all green (182 tests).
 - `crates/corelink-runners-contracts` — wire-contract types (RunnerLease,
-  RunnerState, FenceManifest, MaterializedEntry @ hugit-contracts 7c2f1e6;
-  IntentMetrics/TokenCounts/ToolCount @ 443ff1b, schema 1.2.0); conformance
-  vectors byte-identical to hugit under `conformance/`, golden tests verify
+  RunnerState, FenceManifest, MaterializedEntry @ the historical hugit-contracts
+  snapshot 7c2f1e6; IntentMetrics/TokenCounts/ToolCount @ 443ff1b, schema 1.2.0);
+  conformance vectors byte-identical to the historical snapshot under `conformance/`, golden tests verify
   real SHA-256 + manifest membership + tamper rejection.
-- `docs/spec/hugit-integration-contract.md` v1.2.0 (envelope emission
+- `docs/spec/hugit-integration-contract.md` v1.2.0 (historical envelope-emission
   obligations) · `docs/ROADMAP.md` (P0/P1 closed, M1/M2 next).
 - Full gate: `cargo fmt --check` · `cargo clippy --workspace --all-targets
   --locked -- -D warnings` · `cargo test --workspace --locked` · `cargo deny
   check` · `cargo audit --deny warnings` — green locally AND on CI
   (`[self-hosted, mac, corelink-builder]`).
 
-**Wire-contract law (the cross-repo seam discipline — never break it):** originally the
-hugit↔Runners seam (now historical); the SAME discipline governs the **live corelink-server
+**Wire-contract law (the cross-repo seam discipline — never break it):** the original
+external seam is historical; the SAME discipline governs the **live corelink-server
 seam** (`conformance/corelink-introspect.json` + the billing `conformance/UsageEvent.json`).
 - Types are TRANSCRIBED on each side; no crate is imported across repos.
 - Conformance vectors (`conformance/*.json` + `conformance/manifest.sha256`) are committed
@@ -78,7 +78,7 @@ claim. Permanent repair must remove pre-bind dependency failure, timer-driven re
 missing independent paging before the durable backend is re-armed. Other open work includes
 external-GA, billing usage-push, N>1 multi-instance and the server-side `max_vcpu_h` value. The **live
 cross-repo seam is corelink-server** (auth introspect + billing ingest); the old
-hugit-gated seams (`IntentMetrics`, `hugit-c9-`) are **dead** — hugit is discontinued.
+external-consumer gates are historical and are not part of the live system.
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
 truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/product/USE-SCENARIOS.md`
@@ -94,35 +94,33 @@ truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/produc
   flat; minutes are unlimited. Per-minute billing is the thing we are replacing.
 - **Never charge for the customer's own compute twice.** Cache-warm boot + memoized
   results mean a re-run that's already computed costs ~0 — and the customer is never
-  billed as if it re-ran. (Shared with CoreLink + hugit.)
+  billed as if it re-ran. (Shared across the CoreLink platform.)
 - **Cache-warm by construction.** A runner boots with the CAS/AC pre-warmed; the job's
   inputs are local. The cache *is* the moat — runners are how it earns its keep.
 - **Untrusted compute is the hard part.** Runners execute customer (and AI-agent) code.
   Isolation is fail-closed, per-claim fenced, secrets brokered (never on the box).
   This ops discipline is inherited deliberately from the CoreLink/cache stack.
-- **One front door: direct.** hugit (campaign #3) is DISCONTINUED (2026-07), so the
-  "Runners as COGS under hugit / a hugit customer never sees a Runners line item" framing
-  is **retired**. Runners is sold **directly to its own ICP** (infra/CI teams) — the
-  single front door. (Historically this was "two front doors"; only the direct one remains.)
+- **One front door: direct.** The former multi-product framing is **retired**. Runners is
+  sold **directly to its own ICP** (infra/CI teams) — the single front door. Historical
+  campaign records may describe the earlier two-front-door model; it is not current policy.
 - **Tense discipline.** Production-state claims about the cache cite its GA
   notes: dedup is **intra-tenant at GA**; cross-tenant is staged
   (`CAP-DEDUP-CROSS-TENANT`). Never propagate the "cross-tenant dedup, live"
   overclaim (see the review note in Read-first).
 - **M1 replaces the transport, not the contract.** M1 is the production fabric behind
   the same `RunnerLease` semantics — multi-tenant, capped, sellable — now **LIVE on
-  Cloudflare** (`fabricd` + spawn-Worker). (The old interim SSH box `hugit-runner-01` and
-  hugit's P2 CI are historical — hugit is discontinued.)
+  Cloudflare** (`fabricd` + spawn-Worker). The old interim SSH box and external P2 CI are
+  historical and are not deployment paths.
 - **Identity is decided (ADR-0002):** M2 direct GA onboards via the **HuGR
   account** (same Clerk pool; org = tenant keys caps/fairness/billing).
 
 ## Relationship to the rest of HuGR
 
 - **Consumes CoreLink Cache** (CAS/AC/R2, tenancy, PAT auth) — does not fork it.
-- **hugit (campaign #3) is DISCONTINUED (2026-07).** It was the intended consumer of
-  this fabric (memoized CI via `hugit-fence` + `hugit-invariants`); the execution core
-  lives HERE (runner-transfer 2026-06-10). The `docs/spec/hugit-integration-contract.md`
-  seam and the hugit-specific wiring (agent-exec, IntentMetrics) are now **historical /
-  dead weight to clean up**, not a live obligation. This repo is the FABRIC, sold direct.
+- **Historical external-consumer context.** An earlier campaign planned to consume this
+  fabric through a separate agent-fleet integration. That integration, its consumer-side
+  verifier, and any related wiring are discontinued and have no live obligation. This repo
+  is the FABRIC, sold direct.
 - **Is consumed by CoreLink Workspaces** (campaign #2) — agent sandboxes / dev boxes
   are workspace SKUs that run on this fabric.
 - **Compute substrate (ADR-0008):** the default substrate is **Cloudflare Containers**
@@ -133,7 +131,7 @@ truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/produc
   HTTP contract (`deploy/cloudflare/` Worker + `CloudflareEngine` Rust client,
   transcribed each side). See `docs/adr/0008-cloudflare-containers-substrate.md`.
 
-⚠️ Sibling repos under `~/Documents/HuGR/` (`corelink-server`, `hugit`,
+⚠️ Sibling repos under `~/Documents/HuGR/` (`corelink-server`,
 `hugr-wallet`, …) frequently have **other live sessions**. Never assume sole
 ownership; read-only inspection is fine, mutation across repos is not.
 
@@ -150,10 +148,10 @@ sessions IN this directory. Fence changes need explicit owner approval.
 
 - Commits: `Signed-off-by:` (DCO) + `Co-Authored-By: Claude …` trailers.
   Canonical author: `gustavo@humangr.com`.
-- English for repo documents; lean, evidence-cited (house style mirrors hugit +
-  `corelink-server/marketing/`).
-- **Code exists** → branch → PR → merge, gates green before merge (inherit the
-  CoreLink/hugit discipline). Short-lived branches off `main`; PR to `main`
+- English for repo documents; lean, evidence-cited (house style mirrors current CoreLink
+  documentation and `corelink-server/marketing/`).
+- **Code exists** → branch → PR → merge, gates green before merge (follow the
+  repository discipline). Short-lived branches off `main`; PR to `main`
   (the seed-era `integ/seed-runner` is merged and retired). NOTE: GitHub free
   plan + private repo = no branch protection — the CI-green-before-merge rule
   is manual discipline; never `gh pr merge --auto` (it merges before checks).
@@ -164,6 +162,5 @@ sessions IN this directory. Fence changes need explicit owner approval.
 ## Don't touch
 
 Other HuGR projects share the parent dir. **Only work on corelink-runners here.**
-(The hugit integration contract is now **historical** — hugit is discontinued — so the
-"frozen from hugit's side" rule no longer applies; that seam is dead weight, not a live
-obligation. Don't build new work against it.)
+Archived external-consumer material is historical reference only. Do not build new work
+against discontinued external projects or make them a gate for CoreLink delivery.
