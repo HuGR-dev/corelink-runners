@@ -330,8 +330,13 @@ hash_file() {
 # stream it through jq and retain only names/types plus the temporary tenant's
 # value; secret values and arbitrary binding payloads never reach disk or logs.
 capture_remote_bindings() {
-  local label="$1" version_id="$2" worker_name="${3:-$WORKER_NAME}" out="$TMP_DIR/$label-remote-bindings.json"
-  local err="$LOG_DIR/$(date -u +%s%N)-${label}-versions.stderr" rc
+  local label version_id worker_name out
+  label="$1"
+  version_id="$2"
+  worker_name="${3:-$WORKER_NAME}"
+  out="$TMP_DIR/${label}-remote-bindings.json"
+  local err rc
+  err="$LOG_DIR/$(date -u +%s%N)-${label}-versions.stderr"
   : > "$out"; chmod 600 "$out"; : > "$err"; chmod 600 "$err"
   set +e
   "${WRANGLER[@]}" versions view "$version_id" --name "$worker_name" --json 2>"$err" |
@@ -457,7 +462,10 @@ make_header_file() {
 }
 
 make_oob_header_file() {
-  local name="$1" file="$2" out="$TMP_DIR/${name}-header" key
+  local name file out key
+  name="$1"
+  file="$2"
+  out="$TMP_DIR/${name}-header"
   IFS= read -r key < "$file"
   printf 'X-Corelink-Internal-Auth: %s\n' "$key" > "$out"
   chmod 600 "$out"

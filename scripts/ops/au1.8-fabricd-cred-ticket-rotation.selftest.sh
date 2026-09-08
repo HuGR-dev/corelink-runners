@@ -48,6 +48,48 @@ validate_stability() {
     "$harness" --execute --ack-destructive >/dev/null 2>&1
 }
 
+unset_local_regression() {
+  local remote_fn header_fn mock key
+  remote_fn="$(sed -n '/^capture_remote_bindings() {/,/^}$/p' "$harness")"
+  header_fn="$(sed -n '/^make_oob_header_file() {/,/^}$/p' "$harness")"
+  mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-wrangler.XXXXXX")"
+  key="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-key.XXXXXX")"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""}]}'\''' > "$mock"
+  printf 'mock-observability-key\n' > "$key"
+  chmod 700 "$mock"
+  chmod 600 "$key"
+  # Execute the production function bodies under nounset with no globals named
+  # `label` or `name`; this catches premature expansion in local declarations.
+  # shellcheck disable=SC2016
+  if ! env -u label -u name bash -u -c '
+    set -Eeuo pipefail
+    source="$1"
+    mock="$2"
+    key="$3"
+    eval "$source"
+    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-local-regression.XXXXXX")"
+    LOG_DIR="$TMP_DIR/log"
+    mkdir -p "$LOG_DIR"
+    scrub_file() { :; }
+    log_event() { :; }
+    WRANGLER=("$mock")
+    WORKER_NAME=corelink-fabricd
+    CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
+    result="$(capture_remote_bindings sample version-a)"
+    test -f "$result"
+    jq -e "length == 1 and .[0].name == \"FABRIC_TEST_MINT_TENANTS\"" "$result" >/dev/null
+    header="$(make_oob_header_file observability "$key")"
+    test "$(sed -n "1p" "$header")" = "X-Corelink-Internal-Auth: mock-observability-key"
+    rm -rf -- "$TMP_DIR"
+  ' -- "$remote_fn
+$header_fn" "$mock" "$key"; then
+    rm -f -- "$mock" "$key"
+    return 1
+  fi
+  rm -f -- "$mock" "$key"
+}
+
 validate
 
 printf 'untracked\n' > "$repo/untracked"
@@ -118,6 +160,10 @@ if rg -n -- '--containers-rollout=none' "$harness" >/dev/null; then
 fi
 if [[ "$(rg -c -- '--containers-rollout=immediate' "$harness")" -lt 2 ]]; then
   echo "FAIL: AU1.8 must use immediate rollout for arm and disarm" >&2
+  exit 1
+fi
+if ! unset_local_regression; then
+  echo "FAIL: unset local names must not break mocked AU1.8 helper paths" >&2
   exit 1
 fi
 
