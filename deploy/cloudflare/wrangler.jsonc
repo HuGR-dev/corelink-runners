@@ -222,6 +222,8 @@
       // is ALSO what evicts those three: no token has instance-delete scope, so a
       // new image is the only lever. Rollback = increment-4 digest
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
+      // build-sha: 2cc1e84778301e0e9f04041a04d416a61cde789b
+      // image-provenance: digest=sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029 build-sha=2cc1e84778301e0e9f04041a04d416a61cde789b
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
@@ -269,6 +271,8 @@
       // NOTE: live-flip to prod is still separately gated (real toolchain snapshot +
       // owner go) — deploying the app just moves it out of the stuck "provisioning".
       "class_name": "CheckHostContainer",
+      // build-sha: 2cc1e84778301e0e9f04041a04d416a61cde789b
+      // image-provenance: digest=sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851 build-sha=2cc1e84778301e0e9f04041a04d416a61cde789b
       "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
       "instance_type": "standard-4",
       // 2026-08-02: lowered 4 → 1. A cost audit found this app sitting at
@@ -294,7 +298,9 @@
       // pin updates desired configuration only; it does not deploy, roll out, or
       // qualify a live DevEnv runner.
       "class_name": "RunnerDevEnvDO",
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c",
+      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
+      // image-provenance: digest=sha256:0145e461fc1d35e2672f4a2190008fef4214c691bc8485ec68902cb8852fd441 build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:0145e461fc1d35e2672f4a2190008fef4214c691bc8485ec68902cb8852fd441",
       "instance_type": "standard-4",
       "max_instances": 10
     }
