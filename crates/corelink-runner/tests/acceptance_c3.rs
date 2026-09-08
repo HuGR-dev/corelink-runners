@@ -43,6 +43,7 @@ use corelink_runner::boot::{
     BootCas, BootError, BootOutcome, HydrationPlan, ToolchainLayer, cold_hydrate, hydrate,
 };
 use corelink_runner::lease::BoxExec;
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runners_contracts::{FenceManifest, RunnerLease, RunnerState};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }

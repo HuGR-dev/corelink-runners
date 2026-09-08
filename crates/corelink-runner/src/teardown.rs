@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn report_dirty_when_container_remains() {
         let r = ForensicReport {
-            containers: vec!["hugit-job-x".to_string()],
+            containers: vec!["corelink-job-x".to_string()],
             ..Default::default()
         };
         assert!(!r.is_clean());
@@ -260,7 +260,7 @@ mod tests {
 
     fn container() -> RunningContainer {
         RunningContainer {
-            name: "hugit-job-rescan".to_string(),
+            name: "corelink-job-rescan".to_string(),
         }
     }
 

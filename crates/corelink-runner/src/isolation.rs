@@ -15,6 +15,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::lease::{BoxExec, ContainerSpec};
+use crate::namespace::JOB_LABEL;
 // Re-exported so Engine consumers get the full trait surface (including the
 // `exec_captured` return type) from one coherent import path.
 pub use crate::lease::CmdOutput;
@@ -190,7 +191,7 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             "--tmpfs",
             &tmpfs,
             "--label",
-            "hugit.job=1",
+            JOB_LABEL,
             &spec.image,
             "sleep",
             IDLE_SLEEP_SECS,
@@ -344,7 +345,7 @@ mod tests {
 
     fn container() -> RunningContainer {
         RunningContainer {
-            name: "hugit-job-cf0b".to_string(),
+            name: "corelink-job-cf0b".to_string(),
         }
     }
 
@@ -369,7 +370,7 @@ mod tests {
             vec![vec![
                 "docker".to_string(),
                 "exec".to_string(),
-                "hugit-job-cf0b".to_string(),
+                "corelink-job-cf0b".to_string(),
                 "sh".to_string(),
                 "-c".to_string(),
                 "exit 7".to_string(),
@@ -390,7 +391,7 @@ mod tests {
         });
         let engine = DockerEngine::new(boxx);
         let out = engine
-            .exec_captured(&container(), &["cat", "/hugit/tmp/blob"])
+            .exec_captured(&container(), &["cat", "/corelink/tmp/blob"])
             .expect("exec_captured");
         assert_eq!(out.stdout, hostile, "stdout must be byte-faithful");
         assert_eq!(out.stderr, hostile, "stderr must be byte-faithful");

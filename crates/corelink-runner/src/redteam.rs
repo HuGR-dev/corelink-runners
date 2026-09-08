@@ -34,7 +34,7 @@
 //!
 //! **Containment is bounded and self-cleaning.** Resource attacks are capped by
 //! the container's own cgroup limits ([`ContainerLimits`]) — never the box's —
-//! and every container is `hugit-c5b-*`-namespaced and force-removed at the end
+//! and every container is `corelink-c5b-*`-namespaced and force-removed at the end
 //! so box residue is **0**. The fork bomb and disk fill cannot reach another
 //! lease or starve a sibling because the caps are per-container.
 //!
@@ -46,6 +46,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::isolation::RunningContainer;
 use crate::lease::BoxExec;
+use crate::namespace::{C5B_LABEL, C5B_WORKSPACE_ROOT};
 use corelink_runners_contracts::FenceManifest;
 
 use crate::enforce::probe_outside_enoent;
@@ -158,7 +159,7 @@ impl ContainmentReport {
 }
 
 /// The red-team harness, bound to a box transport. All containers it spawns are
-/// `hugit-c5b-*`-namespaced and torn down by [`RedTeamHarness::teardown_all`].
+/// `corelink-c5b-*`-namespaced and torn down by [`RedTeamHarness::teardown_all`].
 pub struct RedTeamHarness<'b, B: BoxExec> {
     boxx: &'b B,
     image: String,
@@ -175,13 +176,13 @@ pub struct RedTeamHarness<'b, B: BoxExec> {
 }
 
 /// The mandatory namespace prefix for every red-team container.
-pub const REDTEAM_PREFIX: &str = "hugit-c5b-";
+pub use crate::namespace::C5B_PREFIX as REDTEAM_PREFIX;
 /// In-container writable workspace root (a size-capped tmpfs).
-pub const WORKDIR: &str = "/hugit-c5b-ws";
+pub const WORKDIR: &str = C5B_WORKSPACE_ROOT;
 /// Unique sentinel content written into the planted host secret. If this exact
 /// string ever appears INSIDE a container, the mount-namespace boundary leaked
 /// (an ESCAPE). It is the marker the traversal/symlink vectors search for.
-pub const HOST_SECRET_SENTINEL: &str = "HUGIT_C5B_HOST_SECRET_LEAKED_ed1f9c2a";
+pub const HOST_SECRET_SENTINEL: &str = "CORELINK_C5B_HOST_SECRET_LEAKED_ed1f9c2a";
 
 impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
     /// Construct a harness over `boxx`, attacking `image` under `limits`.
@@ -235,7 +236,7 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
         format!("{REDTEAM_PREFIX}{slug}-{nonce}")
     }
 
-    /// Spawn one `hugit-c5b-*` container: no network, capped PIDs, capped memory,
+    /// Spawn one `corelink-c5b-*` container: no network, capped PIDs, capped memory,
     /// and a size-capped tmpfs as the writable workdir. The held `sleep` keeps
     /// it alive so attacks overlap the observation window.
     fn spawn(&mut self, slug: &str) -> Result<RunningContainer> {
@@ -259,7 +260,7 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
             "--tmpfs",
             &tmpfs,
             "--label",
-            "hugit.wp=c5b",
+            C5B_LABEL,
             &self.image,
             // held command: overlaps the attack with the observation.
             "sleep",
@@ -609,7 +610,7 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
         })
     }
 
-    /// Force-remove **only** the `hugit-c5b-*` containers this harness spawned,
+    /// Force-remove **only** the `corelink-c5b-*` containers this harness spawned,
     /// and re-scan to confirm box residue for the prefix is **0**.
     ///
     /// # Errors
@@ -622,7 +623,7 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
         self.spawned.clear();
         // Remove the planted host secret (prefix-scoped, host-side). Best-effort:
         // the forensic residue scan below is container-scoped; the host secret
-        // lives under /tmp/hugit-c5b-* and is cleaned here so the box is left
+        // lives under /tmp/corelink-c5b-* and is cleaned here so the box is left
         // exactly as found.
         if let Some(path) = self.host_secret.take() {
             debug_assert!(
@@ -631,7 +632,7 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
             );
             let _ = self.boxx.run(&["rm", "-f", &path]);
         }
-        // Re-scan: no hugit-c5b-* container may remain (running or stopped).
+        // Re-scan: no corelink-c5b-* container may remain (running or stopped).
         let scan = self.boxx.run(&[
             "docker",
             "ps",
@@ -652,15 +653,15 @@ impl<'b, B: BoxExec> RedTeamHarness<'b, B> {
     }
 }
 
-/// Box residue after a red-team teardown, scoped to the `hugit-c5b-*` prefix.
+/// Box residue after a red-team teardown, scoped to the `corelink-c5b-*` prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedTeamResidue {
-    /// Any `hugit-c5b-*` containers still present (must be empty).
+    /// Any `corelink-c5b-*` containers still present (must be empty).
     pub remaining: Vec<String>,
 }
 
 impl RedTeamResidue {
-    /// `true` iff zero `hugit-c5b-*` residue remains on the box.
+    /// `true` iff zero `corelink-c5b-*` residue remains on the box.
     #[must_use]
     pub fn is_zero(&self) -> bool {
         self.remaining.is_empty()
@@ -914,7 +915,7 @@ mod tests {
         assert!(RedTeamResidue { remaining: vec![] }.is_zero());
         assert!(
             !RedTeamResidue {
-                remaining: vec!["hugit-c5b-x".to_string()]
+                remaining: vec!["corelink-c5b-x".to_string()]
             }
             .is_zero()
         );

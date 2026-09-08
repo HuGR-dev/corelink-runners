@@ -16,7 +16,7 @@
 //! - pinned action refs (no `@latest` / `@main`)
 //!
 //! This satisfies the determinism precondition stated in
-//! `crates/hugit-runner/src/shim/executor.rs` and in `docs/shim/supported-subset.md`.
+//! `crates/corelink-runner/src/shim/executor.rs` and in `docs/shim/supported-subset.md`.
 //!
 //! Contract: docs/plan/wp-contracts/WP-E4.md
 
@@ -505,7 +505,7 @@ fn item_4_equivalence_deterministic_fixture() {
     );
     let harness_nd = EquivalenceHarness::new(
         ShimExecutor::new(Box::new(NullBroker), empty_manifest()),
-        Some("HuGR-Labs/corelink-runners".to_string()),
+        Some("corelink-fixtures/corelink-fleet-syn-1".to_string()),
     );
     let outcome_nd = harness_nd.compare(&wf_nd);
     assert!(

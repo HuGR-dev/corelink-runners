@@ -571,7 +571,7 @@ fn emit_forensic(
         CloseReason::Normal => "normal",
     };
     eprintln!(
-        "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to hugit) \
+        "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to external consumers) \
          lease_id={lease_id} tenant={tenant} close_reason={reason} source={source} \
          capture_incomplete={capture_incomplete} no_capture={no_capture} \
          tokens_total={} tool_calls={} cost_usd_micros={} \

@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-invariants/x4/pin.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from hugit/crates/corelink-invariants/x4/pin.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
 //! Content-pinning + ordered verify-before-spawn for runner images (WP-X4 ①③).
 //!
 //! The invariant: a runner image reference is acceptable for spawn **only** if

@@ -20,12 +20,11 @@
 //! All C9 workspace containers are prefixed `corelink-ws-` so forensic scans and
 //! kill-sweeps stay scoped to this WP on the shared box. Scans/cleanups target
 //! ONLY this prefix — no other WP's containers are touched. The prefix value
-//! predates the runner transfer (hugit → corelink-runners, 2026-06-10) and is
-//! ops-visible on the shared interim box (`hugit-runner-01`); renaming it is a
-//! seam change that needs owner/hugit-techlead sign-off, not a local cleanup.
+//! is ops-visible on the shared interim box (`corelink-runner-01`); all create,
+//! census, teardown, and sweep paths use the same prefix.
 //!
 //! # Firecracker note
-//! Runtime is container-per-job on the interim box (`hugit-runner-01`,
+//! Runtime is container-per-job on the interim box (`corelink-runner-01`,
 //! Hetzner-class); Firecracker is the documented upgrade path, not built here.
 
 use std::collections::HashMap;
@@ -761,7 +760,7 @@ fn path_covered_by(path: &str, ceiling: &[String]) -> bool {
 
 /// In-container destination for a restored state payload. A FIXED literal —
 /// never derived from untrusted input — so it cannot itself carry an injection.
-const STATE_RESTORE_PATH: &str = "/hugit/tmp/state_restore_marker";
+const STATE_RESTORE_PATH: &str = "/corelink/tmp/state_restore_marker";
 
 /// Restore a state payload into the container by **streaming the bytes over
 /// stdin**, never shell-constructing them.

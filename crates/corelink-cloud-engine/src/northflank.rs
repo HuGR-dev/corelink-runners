@@ -108,7 +108,7 @@ pub struct NorthflankConfig {
     /// API token (raw; the transport renders the `Bearer ` scheme).
     pub token: String,
     /// Billing/compute plan id (vCPU/mem class), e.g. `nf-compute-20`. Used for
-    /// CHECK-exec boxes (hermetic/hugit/§3) — kept small.
+    /// CHECK-exec boxes (hermetic contract §3) — kept small.
     pub deployment_plan: String,
     /// Per-job ephemeral disk (MiB) for CHECK-exec boxes.
     pub ephemeral_storage_mb: u32,
@@ -455,7 +455,7 @@ fn parse_id(body: &str) -> Result<String> {
 ///
 /// Northflank object names are far stricter than Docker's: lowercase
 /// `[a-z0-9-]`, must start with a letter, length-capped. The upstream
-/// container-name derivations (`hugit-c2b-…`, `hugit-job-…`) sanitize foreign
+/// container-name derivations (`corelink-c2b-…`, `corelink-job-…`) sanitize foreign
 /// characters to `_` and apply no length cap, so the *Docker* name they produce
 /// is already **non-injective** (`lease/x` and `lease x` both → `…lease_x`) and
 /// not even Northflank-legal. Passing it verbatim risked two distinct leases
@@ -1087,7 +1087,7 @@ mod tests {
     /// A pinned spec helper for body-shape tests.
     fn spec(env: Vec<(String, String)>) -> ContainerSpec {
         ContainerSpec {
-            name: "hugit-job-x".to_string(),
+            name: "corelink-job-x".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1464,12 +1464,12 @@ mod tests {
         // Each pair upstream-sanitizes to ONE Docker name (non-[alnum_._-] → '_'),
         // i.e. these collided before this fix.
         let collide_pairs = [
-            // Both → "hugit-c2b-lease_x_y".
-            ("hugit-c2b-lease/x/y", "hugit-c2b-lease x y"),
-            // Both → "hugit-c2b-a_b".
-            ("hugit-c2b-a:b", "hugit-c2b-a;b"),
-            // Both → "hugit-job-a_b".
-            ("hugit-job-a b", "hugit-job-a/b"),
+            // Both → "corelink-c2b-lease_x_y".
+            ("corelink-c2b-lease/x/y", "corelink-c2b-lease x y"),
+            // Both → "corelink-c2b-a_b".
+            ("corelink-c2b-a:b", "corelink-c2b-a;b"),
+            // Both → "corelink-job-a_b".
+            ("corelink-job-a b", "corelink-job-a/b"),
         ];
         for (a, b) in collide_pairs {
             let na = northflank_job_name(a);
@@ -1484,14 +1484,14 @@ mod tests {
     #[test]
     fn job_name_is_northflank_legal() {
         for input in [
-            "hugit-c2b-lease/x y",
+            "corelink-c2b-lease/x y",
             "HUGIT-JOB-Weird.Name",
             "////",           // slug collapses to empty
             &"x".repeat(500), // length stress
-            "hugit-c2b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "corelink-c2b-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             // The live runner-lease shape that triggered the >52 reject:
-            // a "hugit-job-" container name over a full `lease-<uuid>`.
-            "hugit-job-lease-62eda9d1-b10f-40d6-b71a-b7d9eae779faafbf7c5",
+            // a "corelink-job-" container name over a full `lease-<uuid>`.
+            "corelink-job-lease-62eda9d1-b10f-40d6-b71a-b7d9eae779faafbf7c5",
         ] {
             let name = northflank_job_name(input);
             // Starts with a letter, ≤52 chars (Northflank job-name limit), [a-z0-9-].
@@ -1516,8 +1516,8 @@ mod tests {
     #[test]
     fn job_name_is_deterministic() {
         assert_eq!(
-            northflank_job_name("hugit-c2b-lease-abc"),
-            northflank_job_name("hugit-c2b-lease-abc")
+            northflank_job_name("corelink-c2b-lease-abc"),
+            northflank_job_name("corelink-c2b-lease-abc")
         );
     }
 }
