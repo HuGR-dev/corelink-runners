@@ -1,7 +1,7 @@
 {
   "schema_version": "evidence/v1",
   "artifact_id": "t2-w2b-rollout-20260908-success",
-  "kind": "deploy+probe",
+  "kind": "probe",
   "status": "PASS",
   "observed_at": "2026-09-08T00:59:10Z",
   "source": {
