@@ -10,6 +10,11 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-bootstrap-test.XXXXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 chmod 700 "$tmp"
 
+for bad_window in 0 1 119 121; do
+  if "$harness" --mode execute --ack ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908 --stability-seconds "$bad_window" >/dev/null 2>"$tmp/execute-window-$bad_window.stderr"; then exit 1; fi
+  rg -q 'live stability window must be exactly 120 seconds' "$tmp/execute-window-$bad_window.stderr"
+done
+
 make_fixture() {
   root="$tmp/root-$1"; oob="$tmp/oob-$1"; state="$tmp/state-$1"; mkdir -p "$root/deploy/cloudflare-fabricd" "$root/evidence" "$oob"; chmod 700 "$root" "$root/evidence" "$oob"
   printf '%s\n' '{"image":"registry.example/corelink@sha256:1111111111111111111111111111111111111111111111111111111111111111"}' > "$root/deploy/cloudflare-fabricd/wrangler.jsonc"
@@ -40,7 +45,8 @@ events="$(jq -r '.logs.events' "$tmp/root-elapsed/evidence/result.json")"
 line_one="$(rg -n 'stability_sample_1_at=' "$events" | cut -d: -f1)"
 line_two="$(rg -n 'stability_sample_2_at=' "$events" | cut -d: -f1)"
 line_put="$(rg -n 'secret-put rc=0' "$events" | cut -d: -f1)"
-test "$line_one" -lt "$line_two" && test "$line_two" -lt "$line_put"
+line_key="$(rg -n 'key=ready value=excluded' "$events" | cut -d: -f1)"
+test "$line_key" -lt "$line_one" && test "$line_one" -lt "$line_two" && test "$line_two" -lt "$line_put"
 
 run_case drift drift fail
 test ! -f "$tmp/state-drift.secret-put"
