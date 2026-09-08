@@ -1,7 +1,7 @@
 //! Preventive per-tenant caps — concurrency + rate ceiling (CP2).
 //!
 //! Admission is decided at acquire time, BEFORE any box/VM is touched
-//! (contract §6, hugit X10⑤ "set before load"). [`CapGate::check`] is a
+//! (contract §6, the external consumer's X10⑤ "set before load"). [`CapGate::check`] is a
 //! **pure decision function**: a read-only pass over the lease ledger plus a
 //! caller-held [`RateWindow`] snapshot. No engine, box, or spawn symbol is
 //! reachable from this module — the only imports are fabric types — and that

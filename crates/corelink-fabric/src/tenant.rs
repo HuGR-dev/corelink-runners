@@ -74,7 +74,7 @@ impl From<TenantId> for String {
 ///
 /// BIL2 feeds it (plan tier → cap values, org = tenant per ADR-0002);
 /// CP2 enforces it **preventively** — at acquire time, before any box/VM is
-/// touched (contract §6, hugit X10⑤ "set before load"). Concurrency pricing,
+/// touched (contract §6, the external consumer's X10⑤ "set before load"). Concurrency pricing,
 /// never per-minute: `max_concurrency` IS the thing the customer buys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantPlan {

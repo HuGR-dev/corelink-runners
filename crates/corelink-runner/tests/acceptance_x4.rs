@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/corelink-invariants/x4/tests/acceptance_x4.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from transferred invariants/x4/tests/acceptance_x4.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! WP-X4 acceptance oracle — supply chain: image pinning + integrity +
 //! fail-closed. Contract: `docs/plan/wp-contracts/WP-X4.md`.
 //!

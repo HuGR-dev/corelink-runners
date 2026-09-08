@@ -1,7 +1,7 @@
-//! CP4 — non-interference measurement SURFACE (contract §6, hugit X6/X10).
+//! CP4 — non-interference measurement SURFACE (contract §6, X6/X10).
 //!
 //! Per-tenant wait statistics that make "other-tenant latency unmoved under
-//! hugit load" **provable, not assumed**: a bounded histogram plus
+//! the external consumer load" **provable, not assumed**: a bounded histogram plus
 //! nearest-rank p50/p95 over each tenant's own completed dispatch waits.
 //!
 //! Composition with CP3: [`crate::scheduler::TickReport::waits_ms`] is the

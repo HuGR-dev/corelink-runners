@@ -5,8 +5,8 @@
 //! that check, client-side. The v2 pre-image is reconstructed here byte-for-byte
 //! and guarded against drift by `preimage_matches_conformance_vector`, which
 //! asserts it against the SHARED `conformance/result_binding_v2.json`
-//! (`preimage_hex`) — the same vector hugit mirrors. So the CLI's verify can
-//! never diverge from the fabric's signer or hugit's verifier without a golden
+//! (`preimage_hex`) — the same vector external clients mirror. So the CLI's verify can
+//! never diverge from the fabric's signer or the external verifier without a golden
 //! test breaking.
 
 use anyhow::{Context, Result, anyhow};
@@ -16,7 +16,7 @@ use corelink_runners_contracts::CheckResult;
 use ed25519_dalek::{Signature, VerifyingKey};
 
 /// `LP(s) = u32_be(byte_len(s)) ‖ utf8_bytes(s)` — the framing shared by the
-/// fabric signer, the conformance vector, and hugit's verifier.
+/// fabric signer, the conformance vector, and the external verifier.
 ///
 /// Returns `Err` (never panics) if a field exceeds `u32::MAX` bytes — this is a
 /// client-side trust tool fed UNTRUSTED JSON, so a hostile/huge field must be a
@@ -133,7 +133,7 @@ mod tests {
     use serde::Deserialize;
 
     /// The SHARED cross-repo vector (workspace root) — the same drift guard the
-    /// fabric signer and hugit's verifier use.
+    /// fabric signer and the external verifier use.
     const VECTOR_JSON: &str = include_str!("../../../conformance/result_binding_v2.json");
 
     #[derive(Deserialize)]

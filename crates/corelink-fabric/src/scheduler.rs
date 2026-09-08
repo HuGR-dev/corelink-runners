@@ -1,5 +1,5 @@
 //! CP3 — fair multi-tenant scheduler: the dispatch MECHANISM (contract §6,
-//! hugit C7).
+//! C7).
 //!
 //! Generalizes the seeded single-box batch core
 //! (`corelink-runner::concurrency::Scheduler::run_batch`, the proven

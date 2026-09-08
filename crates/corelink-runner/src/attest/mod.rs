@@ -8,8 +8,8 @@
 //! The signature pre-image formula is **FROZEN** and single-sourced in the
 //! contracts crate: see the `sig` field doc on
 //! [`AttestationChain`](corelink_runners_contracts::AttestationChain)
-//! (transcribed from hugit-contracts @ 7736d02, built hugit-side only by
-//! `hugit_refstore::attestation_sig_preimage`). [`sig_preimage`] here MUST
+//! (transcribed from the frozen contract snapshot @ 7736d02, built only by the external consumer
+//! the external refstore attestation_sig_preimage implementation). [`sig_preimage`] here MUST
 //! stay byte-exact with that doc; the known-vector test below is the proof.
 
 use anyhow::Context;
@@ -102,7 +102,7 @@ impl FabricSigner {
     /// Deterministic key-rotation routing id derived from the public key bytes:
     /// `lower_hex(SHA-256(pubkey_bytes))[..16]` — the first 8 bytes of the
     /// SHA-256 digest over the raw 32-byte ed25519 public key, hex-encoded (16
-    /// lowercase hex characters). Stateless and self-verifying: hugit can
+    /// lowercase hex characters). Stateless and self-verifying: an external client can
     /// recompute it from the public key fetched at `GET /v1/attestation/key`
     /// without any out-of-band trust. Uses the `sha2` workspace dep — no new
     /// dependency.

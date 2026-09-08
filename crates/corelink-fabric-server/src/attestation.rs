@@ -5,7 +5,7 @@
 //!
 //! ## The honest composition (frozen chain untouched, result bound)
 //!
-//! The frozen `AttestationChain` shape (transcribed from hugit-contracts;
+//! The frozen `AttestationChain` shape (transcribed from frozen wire-contracts;
 //! pre-image frozen in [`corelink_runner::attest::sig_preimage`]) carries
 //! `tree`/`def`/`runner`/`model`/`principal` only. The contract §7 coverage
 //! set {image digest, resolved inputs, result hash} maps onto it WITHOUT

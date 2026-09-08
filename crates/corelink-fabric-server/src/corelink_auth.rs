@@ -69,7 +69,7 @@ pub struct IntrospectResponse {
 /// type is the SEPARATE, strict conformance lens: the ratified
 /// `conformance/corelink-introspect.json` vector must parse under
 /// `deny_unknown_fields` and re-serialize byte-identically, so any drift in
-/// corelink-server's frozen shape breaks the golden alongside the hugit-side
+/// corelink-server's frozen shape breaks the golden alongside the external consumer side
 /// vectors. It is the tripwire, not the runtime parser.
 ///
 /// `#[serde(deny_unknown_fields)]` makes an unexpected field a HARD parse

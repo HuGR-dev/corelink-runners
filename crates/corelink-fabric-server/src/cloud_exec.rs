@@ -660,7 +660,7 @@ impl<H: corelink_cloud_engine::HttpTransport + Send + Sync> BoxProvisioner
     fn provision(&self, lease_id: &str, spec: &ContainerSpec) -> Result<()> {
         // OFF-BOX / plain-hermetic lease → admit NO-BOX (bind nothing, no spawn).
         // A lease that is hermetic (`!allow_egress`) AND carries no `TOOLCHAIN_DIGEST`
-        // has no exec substrate on the CF backend — e.g. hugit's off-box §13 A-path,
+        // has no exec substrate on the CF backend — e.g. the external off-box §13 A-path,
         // which hosts the lease + attestation but NEVER execs (it submits §13 off-box).
         // CloudflareEngine::spawn fail-closes for such a spec (runner-only floor); on
         // this CF-only backend that would 503 the acquire and BLOCK the single-flight
@@ -1853,7 +1853,7 @@ mod tests {
         // `!allow_egress` and NO `TOOLCHAIN_DIGEST` — admits NO-BOX: provision
         // returns Ok, binds nothing, and NEVER calls the engine/spawn-Worker (so
         // it can't 503 or block the singleton on a box the caller never uses, e.g.
-        // hugit's off-box §13 A-path). The fake transport 500s if reached — proving
+        // the external off-box §13 A-path). The fake transport 500s if reached — proving
         // spawn is skipped.
         let registry = BoxRegistry::new();
         let prov = cf_provisioner(500, "boom", registry.clone_handle());

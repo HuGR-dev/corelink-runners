@@ -56,7 +56,7 @@ pub enum AbnormalKind {
 /// §13.4 [`IntentMetrics`] vector — `close_reason` rides on the
 /// [`CloseOutcome`] wrapper, never inside the metrics. The serde
 /// representation is exactly `normal|expired|crashed` (snake_case) so the
-/// wire strings are stable across the hugit seam.
+/// wire strings are stable across the external consumer seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CloseReason {

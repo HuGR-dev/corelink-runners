@@ -1,11 +1,11 @@
 //! Agent-exec (slices 2..N) — the egress-enabled, NON-memoized command driver
-//! for `agent`-mode leases (ratified (B) exec-server-drive with hugit,
+//! for `agent`-mode leases (ratified (B) exec-server-drive with the external consumer,
 //! 2026-07-05). Peer to the check `/exec` handler, but:
 //!
 //! - **egress** (the box was provisioned via `ContainerSpec::from_agent_lease`,
 //!   `allow_egress = true`) and **never memoized** (no `CheckDef`, no
 //!   `toolchain_ref`, no memo key, no attestation of a memo axis) — it is the
-//!   agent's tool-call sandbox that hugit's OFF-box §13 loop drives.
+//!   agent's tool-call sandbox that the external consumer's OFF-box §13 loop drives.
 //! - **ack→poll** (frozen DTO): `POST /agent-exec` accepts the command and
 //!   returns an `AgentExecAck { step_id }` immediately; the captured
 //!   `AgentExecResult` is polled at `GET /agent-exec/{step_id}`.

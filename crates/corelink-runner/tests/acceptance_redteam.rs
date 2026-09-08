@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/tests/acceptance_c5b.rs (item ⑤ + its box-lane helpers) @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10); removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence acceptance_c5b test (item ⑤ + its box-lane helpers) @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10); removed external-consumer side by WP-R4②.
 //! WP-C5b item ⑤ acceptance oracle — the active escape red-team, in its new
 //! home WITH the fence enforcement it drives.
 //!
@@ -14,7 +14,7 @@
 //! `materialize`/`enforce` so this assertion keeps red-teaming the REAL
 //! classifier in-process. Its hermetic load-bearing twin (FakeFsBox, bare
 //! gate, no box) rides inside `src/redteam.rs` unchanged. The broker items
-//! ②③④⑥ stay hugit-side with the broker.
+//! ②③④⑥ stay external-consumer side with the broker.
 //!
 //! **Box-dependent**: drives the live runner box pinned by
 //! `CORELINK_RUNNER_HOST` (env name preserved exactly across the transfer).

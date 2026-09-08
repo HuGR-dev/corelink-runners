@@ -6,7 +6,7 @@
 //! API event, not a refactor.
 
 /// Lease collection: `POST` = acquire (contract §1 "Acquire"), serving the
-/// lease lifecycle (`docs/spec/hugit-integration-contract.md` §1). API2.
+/// lease lifecycle (the legacy integration contract §1). API2.
 pub const LEASES: &str = "/v1/leases";
 
 /// Single lease: `GET` = status, mirroring the CP1 ledger exactly
@@ -23,7 +23,7 @@ pub const LEASE_CANCEL: &str = "/v1/leases/{lease_id}/cancel";
 pub const EXEC: &str = "/v1/leases/{lease_id}/exec";
 
 /// Drive an ARBITRARY command in an `agent`-mode lease (agent-exec, ratified
-/// (B) exec-server-drive with hugit 2026-07-05): `AgentExecRequest` in,
+/// (B) exec-server-drive with the contract owner 2026-07-05): `AgentExecRequest` in,
 /// `AgentExecAck` out. Egress-enabled + NEVER memoized — the agent's tool-call
 /// sandbox. Poll the captured result at [`AGENT_EXEC_POLL`]. AE (agent-exec
 /// slices 2..N).
@@ -34,8 +34,8 @@ pub const AGENT_EXEC: &str = "/v1/leases/{lease_id}/agent-exec";
 /// Peer to [`AGENT_EXEC`]. AE (agent-exec slices 2..N).
 pub const AGENT_EXEC_POLL: &str = "/v1/leases/{lease_id}/agent-exec/{step_id}";
 
-/// The §9 trigger path: hugit's landing queue triggers execution of an
-/// uncached check on demand (contract §9, `QueueApi`; hugit B5 seam). API4.
+/// The §9 trigger path: the external landing queue triggers execution of an
+/// uncached check on demand (contract §9, `QueueApi`; B5 seam). API4.
 pub const QUEUE_TRIGGER: &str = "/v1/queue/trigger";
 
 /// Per-tenant metrics surface for the non-interference proof (CP4: wait

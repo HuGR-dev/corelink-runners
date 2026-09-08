@@ -923,7 +923,7 @@ mod tests {
     /// The fabricd/NATIVE path (frozen 2026-07-08): no `installation_id`, so the
     /// field is OMITTED from the JSON entirely (not null, not empty — absent) and
     /// the tenant is resolved server-side by introspecting the acquiring PAT,
-    /// which is presented as `Authorization: Bearer`. This is the shape hugit's
+    /// which is presented as `Authorization: Bearer`. This is the shape the external verifier's
     /// check-host acquire produces (a native repo has no GitHub App installation).
     #[tokio::test]
     async fn mint_without_installation_id_omits_field_and_presents_bearer_pat() {

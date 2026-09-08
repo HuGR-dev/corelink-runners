@@ -1,4 +1,4 @@
-//! WP-API4 acceptance — the §9 trigger path: hugit's landing queue triggers
+//! WP-API4 acceptance — the §9 trigger path: the external landing queue triggers
 //! execution of an uncached check on demand (`POST /v1/queue/trigger`,
 //! contract §9, the `QueueApi` seam).
 //!

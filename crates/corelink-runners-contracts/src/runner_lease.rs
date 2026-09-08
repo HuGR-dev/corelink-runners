@@ -3,7 +3,7 @@
 //! A scoped filesystem-access lease granted to a runner, with expiry and
 //! lifecycle state tracking.
 //!
-//! Transcribed from hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+//! Transcribed from frozen wire-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 //! per the wire-contract rule — no git dep; conformance via shared vectors
 //! (see `conformance/` at the workspace root).
 

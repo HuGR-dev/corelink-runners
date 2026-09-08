@@ -4,7 +4,7 @@
 //! (WP-B2).
 //!
 //! Implements the metrics half of the envelope emission obligations in
-//! `docs/spec/hugit-integration-contract.md` v1.2.0 §13.1: at job close the
+//! the legacy integration contract v1.2.0 §13.1: at job close the
 //! runner reports an
 //! [`IntentMetrics`](corelink_runners_contracts::IntentMetrics)-consistent
 //! payload — token spend with the **mandatory cache split**, derived total,
@@ -32,7 +32,7 @@
 //!   flag; abnormal closes ([`AbnormalKind`]) share the exactly-once rule.
 //!
 //! The metrics type itself is the transcribed wire contract
-//! (`corelink-runners-contracts`, hugit-contracts @ 443ff1b / schema 1.2.0)
+//! (`corelink-runners-contracts`, the frozen contract snapshot @ 443ff1b / schema 1.2.0)
 //! — never redefined here. In-process mechanism only: M1 puts the fabric
 //! transport + PAT verification behind the same hook/close semantics.
 

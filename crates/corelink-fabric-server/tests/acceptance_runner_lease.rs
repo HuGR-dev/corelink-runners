@@ -266,7 +266,7 @@ async fn runner_acquire_mints_egress_lease_and_injects_jitconfig() {
     );
 
     // The §13 ingest credential is NOT on a runner box (it runs GitHub Actions,
-    // not the hugit agent loop).
+    // not the external agent loop).
     assert!(
         env_get(spec, "CORELINK_ENVELOPE_INGEST_CREDENTIAL").is_none(),
         "a runner box must NOT carry the §13.2 ingest credential"

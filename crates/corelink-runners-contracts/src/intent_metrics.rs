@@ -1,8 +1,8 @@
-// Transcribed from hugit-contracts @ 443ff1b (context_envelope, schema 1.2.0) — wire-contract seam, no git dep.
+// Transcribed from frozen wire-contracts @ 443ff1b (context_envelope, schema 1.2.0) — wire-contract seam, no git dep.
 
 //! IntentMetrics — the per-intent spend/effort block of the context envelope.
 //!
-//! Transcribed from hugit-contracts @ 443ff1b (`context_envelope`, schema
+//! Transcribed from frozen wire-contracts @ 443ff1b (`context_envelope`, schema
 //! 1.2.0) per the wire-contract rule — no git dep; golden fixture under
 //! `tests/fixtures/` in this crate.
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the context envelope these metrics belong to.
 ///
-/// Mirrors `hugit-contracts::context_envelope::CONTEXT_ENVELOPE_SCHEMA_VERSION`
+/// Mirrors the frozen `context_envelope` contract schema version
 /// (1.2.0, owner-ratified 2026-06-11).
 pub const CONTEXT_ENVELOPE_SCHEMA_VERSION: &str = "1.2.0";
 

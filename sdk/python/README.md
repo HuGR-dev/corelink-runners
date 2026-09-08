@@ -6,7 +6,7 @@ attestations — the customer-trust primitive in-language.
 A customer trusts a CoreLink verdict because they can **verify** it themselves.
 This package does exactly that: given a raw fabric response JSON and the
 published ed25519 key, it reconstructs the v2 pre-image byte-for-byte (the
-same formula as the fabric signer, the Rust CLI, and hugit's verifier) and
+same formula as the fabric signer, the Rust CLI, and the external verifier) and
 checks the detached signature.  No trust in the transport, no trust in the
 intermediary — the math is the proof.
 
@@ -53,7 +53,7 @@ produced by the fabric that holds the private key.
 
 This package is byte-locked to
 [`conformance/result_binding_v2.json`](../../conformance/result_binding_v2.json)
-— the same shared vector mirrored by hugit.  The conformance test
+— the same shared vector mirrored by the external consumer.  The conformance test
 (`tests/test_conformance.py`) asserts that `result_binding_preimage_v2(input)`
 produces the exact `preimage_hex` in that file, and that the committed
 signature verifies.  Any change to the v2 formula on the fabric side updates

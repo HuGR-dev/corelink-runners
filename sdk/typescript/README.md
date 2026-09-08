@@ -5,7 +5,7 @@ TypeScript/Node reference verifier for CoreLink fabric **result-binding v2** sig
 Verifies a fabric's `result_binding_sig_v2` against the published ed25519 key.
 Byte-identical to `crates/corelink-cli/src/binding.rs` (the Rust reference),
 byte-locked to `conformance/result_binding_v2.json` (the shared drift-tripwire
-vector that hugit mirrors). It can never drift from the fabric signer without
+vector that external clients mirror). It can never drift from the fabric signer without
 a golden test breaking on at least one side.
 
 **Zero runtime dependencies.** Uses Node's built-in `node:crypto` (Node >= 18).
@@ -90,7 +90,7 @@ sig = detached ed25519 over preimage.
 
 ## Conformance vector
 
-`conformance/result_binding_v2.json` (at the repo root, mirrored by hugit) is
+`conformance/result_binding_v2.json` (at the repo root, mirrored by the external consumer) is
 the drift-tripwire. The test in `test/conformance.test.mjs` asserts:
 
 - `hex(resultBindingPreimageV2(input)) === vector.preimage_hex` — pure Buffer

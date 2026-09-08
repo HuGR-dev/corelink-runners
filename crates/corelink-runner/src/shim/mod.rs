@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Actions-YAML compatibility shim v0 (WP-E4).
 //!
 //! ⚠️ **NON-PRODUCTION harness — never a real execution result.** This module
@@ -18,7 +18,7 @@
 //! GitHub-Actions runner fleet. Never wire a production path through this shim.
 //!
 //! A migration-lubricant shim that runs a **published supported subset** of
-//! GitHub Actions workflow YAML on hugit's runners. Design invariants:
+//! GitHub Actions workflow YAML on the external consumer's runners. Design invariants:
 //!
 //! 1. **Supported subset is a published contract** — every listed feature is
 //!    proven-to-execute by a passing fixture, not merely documented
