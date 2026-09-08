@@ -41,7 +41,7 @@ esac
 [ "$MODE" != execute ] || [ "$ACK_ARG" = "$ACK" ] || die 'exact live acknowledgement required'
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock mode requires --mock-wrangler'
 [[ "$STABILITY_SECS" =~ ^[0-9]+$ ]] || die 'stability seconds must be a nonnegative integer'
-[ "$MODE" = mock ] || [ "$STABILITY_SECS" -gt 0 ] || die 'live stability window must be positive; zero is mock-only'
+if [ "$MODE" = mock ]; then :; elif [ "$STABILITY_SECS" = 120 ]; then :; else die 'live stability window must be exactly 120 seconds'; fi
 [ -n "$ROOT" ] && [ -n "$COMMIT" ] && [ -n "$VERSION" ] && [ -n "$APP_ID" ] && [ -n "$DIGEST" ] || die 'missing repository/provider pins'
 [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || die 'expected commit must be a full SHA-1'
 [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'expected image digest must be sha256:<64 hex>'
@@ -119,6 +119,13 @@ single_line_file "$PAT_FILE" || die 'introspection PAT must be owner-only regula
 printf 'X-Corelink-Internal-Auth: ' > "$fleet_header"; tr -d '\r\n' < "$FLEET_KEY_FILE" >> "$fleet_header"; printf '\n' >> "$fleet_header"; chmod 600 "$fleet_header"
 printf 'X-Corelink-Internal-Auth: ' > "$introspect_header"; tr -d '\r\n' < "$INTROSPECT_KEY_FILE" >> "$introspect_header"; printf '\n' >> "$introspect_header"; chmod 600 "$introspect_header"
 
+if [ -n "$KEY_FILE" ]; then
+  if [ -e "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then safe_file "$KEY_FILE" || die 'provided key must be owner-only regular 0600 single-line file'; else key_parent="$(dirname -- "$KEY_FILE")"; safe_dir "$key_parent" || die 'generated key parent must be owner-only 0700'; tmp_key="$(mktemp "$key_parent/.obs-key.XXXXXXXX")"; chmod 600 "$tmp_key"; openssl rand -base64 48 | tr -d '\n' > "$tmp_key"; chmod 600 "$tmp_key"; mv -f -- "$tmp_key" "$KEY_FILE"; fi
+else
+  KEY_FILE="$OOB_DIR/fabric-observability-key-bootstrap.b64"; [ ! -e "$KEY_FILE" ] && [ ! -L "$KEY_FILE" ] || die 'default generated key already exists; provide a new path'; tmp_key="$(mktemp "$OOB_DIR/.obs-key.XXXXXXXX")"; chmod 600 "$tmp_key"; openssl rand -base64 48 | tr -d '\n' > "$tmp_key"; chmod 600 "$tmp_key"; mv -f -- "$tmp_key" "$KEY_FILE"
+fi
+single_line_file "$KEY_FILE" || die 'new observability key must be owner-only regular 0600 single-line file'; log_event 'key=ready value=excluded mode=0600'
+
 baseline="$(snapshot baseline)" || die 'provider baseline capture failed'; baseline_version="${baseline%%$'\t'*}"; baseline_digest="${baseline#*$'\t'}"
 [ "$baseline_version" = "$VERSION" ] || die 'provider deployment version drift'; [ "$baseline_digest" = "$DIGEST" ] || die 'provider container image digest drift'
 assert_frozen "$baseline_version" || die 'fabric admission is not frozen'
@@ -135,13 +142,6 @@ if [ "$STABILITY_SECS" -gt 0 ]; then sleep "$STABILITY_SECS"; fi
 stability_sample_2_at="$(date -u +%FT%H:%M:%SZ)"; stability_2="$(snapshot stability-sample-2)" || die 'provider stability sample 2 failed'; log_event "stability_sample_2_at=$stability_sample_2_at value=$stability_2"
 [ "$stability_1" = "$baseline" ] && [ "$stability_2" = "$baseline" ] && [ "$stability_1" = "$stability_2" ] || die 'provider version or digest changed during stability window'
 log_event "provider_stable=GREEN version=$baseline_version digest=$baseline_digest seconds=$STABILITY_SECS"
-
-if [ -n "$KEY_FILE" ]; then
-  if [ -e "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then safe_file "$KEY_FILE" || die 'provided key must be owner-only regular 0600 single-line file'; else key_parent="$(dirname -- "$KEY_FILE")"; safe_dir "$key_parent" || die 'generated key parent must be owner-only 0700'; tmp_key="$(mktemp "$key_parent/.obs-key.XXXXXXXX")"; chmod 600 "$tmp_key"; openssl rand -base64 48 | tr -d '\n' > "$tmp_key"; chmod 600 "$tmp_key"; mv -f -- "$tmp_key" "$KEY_FILE"; fi
-else
-  KEY_FILE="$OOB_DIR/fabric-observability-key-bootstrap.b64"; [ ! -e "$KEY_FILE" ] && [ ! -L "$KEY_FILE" ] || die 'default generated key already exists; provide a new path'; tmp_key="$(mktemp "$OOB_DIR/.obs-key.XXXXXXXX")"; chmod 600 "$tmp_key"; openssl rand -base64 48 | tr -d '\n' > "$tmp_key"; chmod 600 "$tmp_key"; mv -f -- "$tmp_key" "$KEY_FILE"
-fi
-single_line_file "$KEY_FILE" || die 'new observability key must be owner-only regular 0600 single-line file'; log_event 'key=ready value=excluded mode=0600'
 
 MUTATION_STARTED=1
 run_safe secret-put run_wrangler secret put FABRIC_OBSERVABILITY_KEY --name "$WORKER_NAME" < "$KEY_FILE" || die 'secret put failed'
