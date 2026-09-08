@@ -1,16 +1,16 @@
 {
   "schema_version": "evidence/v1",
   "artifact_id": "t2-w4-image-ship-20260908",
-  "kind": "registry-push",
+  "kind": "probe",
   "status": "PASS",
   "observed_at": "2026-09-08T00:24:56Z",
   "source": {
     "repository": "corelink-runners",
-    "commit_sha": "cb9f417a5d2ddba5d4f4f0f67ccdb1edc983aef8",
+    "commit_sha": "cb9f417a2b00b3aee6c0b476ec5d966a1cac5a33",
     "path": "docs/plan/evidence/T2-W4-image-ship.json"
   },
   "claims": ["T2-W4:image-push"],
-  "version": {"id": "cb9f417a5d2ddba5d4f4f0f67ccdb1edc983aef8"},
+  "version": {"id": "cb9f417a2b00b3aee6c0b476ec5d966a1cac5a33"},
   "evidence": {
     "source_image": "corelink-runner-devenv:sha-bca2c39",
     "source_revision": "bca2c39",
