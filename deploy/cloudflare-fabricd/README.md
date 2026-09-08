@@ -210,8 +210,9 @@ mint-armed 503→200 transition (or a server-side mint-request log) does.
 `HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).
 See `docs/handoff/2026-07-07-CUTOVER-READY-to-hugit-TL-…`. Trigger is the owner's.
 
-**Controlled-change note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
-root, `npx wrangler containers build <repo-root> -t corelink-fabricd-fabricdcontainer:<tag> --push`
+**Controlled-change note:** to rebuild the binary from the repository root, run
+`docker build -f crates/corelink-fabric-server/Dockerfile -t corelink-fabricd-fabricdcontainer:<tag> .`
+followed by `(cd deploy/cloudflare-fabricd && npx wrangler containers push corelink-fabricd-fabricdcontainer:<tag>)`
 (the root `.dockerignore` keeps the context small), pin the returned `@sha256` digest in
 `wrangler.jsonc`, `wrangler deploy` (a NEW digest forces the container rollout; a config-only change
 does not). This is an owner-approved release procedure, never a diagnostic step.

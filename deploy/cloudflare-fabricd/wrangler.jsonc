@@ -204,13 +204,15 @@
       // acquire_rejected_no_plan #382) AND the #376 dead-counter wiring
       // (acquire_rejected_lease_invalid at the ledger-decline seams). Additive /
       // default-off — reject-mode byte-identical; the new counters ride
-      // /internal/v1/status. Built via `wrangler containers build` (tag
+      // /internal/v1/status. Built with local Docker, then published via
+      // `wrangler containers push` (tag
       // audit-remediation-20260711). SUPERSEDES 205494de.
       // 2026-07-10 REAPER-COVERAGE binary (205494de): adds leases_expired +
       // leases_crashed golden counters (#359) — the always-on reaper's terminal
       // reclaims (Held→Expired at deadline, Held→Crashed on dead box) were
       // uncounted, so an abandon-rate rise was invisible. Additive; no behavior
-      // change vs 5f1d92db. Built via `wrangler containers build` (tag
+      // change vs 5f1d92db. Built with local Docker, then published via
+      // `wrangler containers push` (tag
       // counters-reaper-20260710).
       // 2026-07-09 OPS-BOOT-ARM binary (5f1d92db): adds the boot-time ops-surface
       // arm-state log (#356) — one stderr line at every boot reporting whether
@@ -220,7 +222,8 @@
       // (set 2026-07-09) — the singleton container reads env only at boot, so a
       // new image digest is the mechanism that picks up freshly-set secrets.
       // Additive stderr line; no behavior change vs 5d0b6b33 (which added the
-      // golden counters #353). Built via `wrangler containers build` (tag
+      // golden counters #353). Built with local Docker, then published via
+      // `wrangler containers push` (tag
       // ops-boot-arm-20260709).
       // 2026-07-09 OBSERVABILITY binary (5d0b6b33): adds the golden-signal
       // counters (#353) onto the /internal/v1/status aggregate — admission
@@ -232,7 +235,8 @@
       // (404 until FABRIC_OBSERVABILITY_KEY is set — it is, forwarded via #340).
       // ADDITIVE / default-safe — no live behavior change vs ddad8014. The prior
       // ddad8014 was the Stage-C binary (console read-APIs #346 + status #347 +
-      // revoke cleanup #350). Built via `wrangler containers build` (tag
+      // revoke cleanup #350). Built with local Docker, then published via
+      // `wrangler containers push` (tag
       // golive-counters-20260709).
       // 2026-07-16 W1-RESILIENCE rollout (5608d67d): SAME Rust binary as 61fcce2c
       // (no crates/ change this wave) — rebuilt only to force a container rollout so

@@ -931,7 +931,7 @@ S1.3.3's flow and acceptance lines are corrected to describe what the code does.
   `exec`s `nerdctl "$@"`, but nerdctl has no `buildx` subcommand, so an
   unmodified `docker buildx build` died with `unknown shorthand flag: 't' in
   -t` (verified on a live `runs-on: corelink` lease). This blocked any tooling
-  that shells to buildx — notably `wrangler containers build`, which is why
+  that shells to buildx — notably the legacy Wrangler container-build path, which is why
   `build-cf-container-images.yml` still has to run on hosted `ubuntu-latest`.
   Plain `docker build` already worked here (proven F2 + reprobed 2026-08-17), so
   the shim just drops the `buildx` word for `build` and best-effort-no-ops the

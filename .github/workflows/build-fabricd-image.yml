@@ -1,22 +1,17 @@
 # Build + push the corelink-fabricd control-plane image to the Cloudflare managed
-# registry — on a GitHub-hosted runner, with NO local Docker daemon.
+# registry — on an ephemeral CoreLink runner, with a bounded local image store.
 #
-# WHY THIS EXISTS: fabricd's image was built with a LOCAL `wrangler containers
-# build ../..` that needs a Docker daemon on the operator's machine. That local
-# step hung once and blocked a go-live. This workflow moves the build onto a
-# GH-hosted `ubuntu-latest` runner (Docker + buildx preinstalled) so no operator
-# laptop is ever in the deploy loop.
+# WHY THIS EXISTS: fabricd's image needs a local image for the locked Wrangler
+# inspect/auth/tag/push path. This workflow keeps that build in CI, and prunes
+# the image plus unreferenced layers immediately after publication.
 #
 # WHAT IT DOES:
-#   1. `docker buildx build` the fabricd binary image from
-#      `crates/corelink-fabric-server/Dockerfile` with the repo ROOT as context
-#      (the Dockerfile does `COPY . .`; the root `.dockerignore` keeps target/ +
-#      .git out). X4 supply-chain floor: the Dockerfile FROMs are already
-#      @sha256-pinned — this workflow does NOT unpin them.
-#   2. Push the built image to the Cloudflare managed registry via
-#      `wrangler containers push` (wrangler holds the registry credential; it
-#      authenticates from CLOUDFLARE_API_TOKEN — no `docker login` to
-#      registry.cloudflare.com needed).
+#   1. `docker build` the fabricd image from the root context (the Dockerfile
+#      does `COPY . .`; the root `.dockerignore` keeps target/ + .git out).
+#      X4 supply-chain floor: the Dockerfile FROMs are already @sha256-pinned.
+#   2. `wrangler containers push` authenticates the managed registry and pushes
+#      the local image. A disk guard prunes the local image and unreferenced
+#      layers after the push.
 #   3. Emit the pushed `@sha256:` digest as a job output AND to the run summary,
 #      with the exact line to pin in wrangler.jsonc.
 #
@@ -96,39 +91,41 @@ jobs:
       - name: Sanity — the docker shim (nerdctl/buildkit) answers
         run: docker version
 
-      # Plain `docker build` (the shim runs nerdctl/buildkit into the containerd
-      # image store — no buildx, no daemon). Context = repo ROOT (COPY . .);
-      # Dockerfile = crates/corelink-fabric-server/Dockerfile. The FROMs are
-      # @sha256-pinned in that Dockerfile — X4 floor, left intact.
-      - name: Build fabricd image (docker build)
-        run: |
-          set -euo pipefail
-          docker build \
-            --file "${DOCKERFILE}" \
-            --tag "${IMAGE_NAME}:${GITHUB_SHA}" \
-            .
+      - name: Guard — reclaim local containerd space before building
+        run: bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192
 
-      # Push the locally-built image to the CF managed registry. wrangler reads
-      # CLOUDFLARE_API_TOKEN from the env and mints the registry credential — no
-      # `docker login registry.cloudflare.com` required. Capture the pushed
-      # `@sha256:` reference for pinning.
-      - name: Push to Cloudflare managed registry
+      # Build locally because the locked Wrangler command loads this image before
+      # it can inspect/authenticate/tag/push it.
+      - name: Build + push fabricd image (bounded local store)
         id: push
-        working-directory: deploy/cloudflare-fabricd
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2329
+          cleanup() {
+            bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+              --image "${IMAGE_NAME}:${GITHUB_SHA}" --prune-only || true
+          }
+          trap cleanup EXIT
+          docker build --file "${DOCKERFILE}" --tag "${IMAGE_NAME}:${GITHUB_SHA}" .
+          OUT="$(cd deploy/cloudflare-fabricd && npx wrangler containers push "${IMAGE_NAME}:${GITHUB_SHA}" 2>&1 | tee /dev/stderr)"
           IMG="registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE_NAME}"
-          OUT="$(npx wrangler containers push "${IMAGE_NAME}:${GITHUB_SHA}" 2>&1 | tee /dev/stderr)"
-          # Resolve the pushed image's @sha256 DIGEST for an immutable X4 pin, in
-          # order of preference; each step is best-effort and the next covers it.
+          # Resolve the pushed image's @sha256 DIGEST for an immutable X4 pin;
+          # every resolution path is checked and unresolved output is fatal.
           # 1. The push output may already carry the …@sha256:… ref.
           REF="$(printf '%s\n' "${OUT}" | grep -oE 'registry\.cloudflare\.com/[^ ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
-          # 2. Resolve the just-pushed tag's manifest digest from the registry.
-          #    `wrangler containers push` authenticates docker to the managed
-          #    registry, so `imagetools inspect` can read the manifest here even
-          #    though a cold shell cannot. Any failure ⇒ empty ⇒ fall through.
+          # 2. A successful local nerdctl push records the remote RepoDigest on
+          #    the exact local tag. Read only that digest; never convert the tag
+          #    itself into a deployment reference.
+          if [ -z "${REF}" ]; then
+            LOCAL_REFS="$(docker image inspect "${IMAGE_NAME}:${GITHUB_SHA}" \
+              --format '{{json .RepoDigests}}' 2>/dev/null || true)"
+            REF="$(printf '%s\n' "${LOCAL_REFS}" | grep -oE 'registry\.cloudflare\.com/[^" ]+@sha256:[0-9a-f]{64}' | head -n1 || true)"
+          fi
+          # 3. Resolve the just-pushed tag's manifest digest from the registry.
+          #    The shim fails loudly when imagetools is unavailable; any failure
+          #    is fatal below and there is no mutable-tag fallback.
           if [ -z "${REF}" ]; then
             DIGEST="$(docker buildx imagetools inspect "${IMG}:${GITHUB_SHA}" --format '{{ .Manifest.Digest }}' 2>/dev/null || true)"
             if printf '%s' "${DIGEST}" | grep -qE '^sha256:[0-9a-f]{64}$'; then
@@ -136,15 +133,14 @@ jobs:
               echo "resolved @sha256 digest via imagetools: ${REF}"
             fi
           fi
-          # 3. Last resort: pin the immutable git-SHA TAG (CI-pushed, content-derived
-          #    name ⇒ stable) — functional, but re-pin @sha256 once resolvable.
           if [ -z "${REF}" ]; then
-            echo "::warning::Could not resolve an @sha256 digest (push output + imagetools both empty)." \
-                 "Pinning the git-SHA tag; re-pin @sha256 when resolvable."
-            REF="${IMG}:${GITHUB_SHA}"
+            echo "::error::Could not resolve an immutable @sha256 digest from push output or imagetools." >&2
+            exit 1
           fi
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "fabricd image pushed: ${REF}"
+          bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+            --image "${IMAGE_NAME}:${GITHUB_SHA}" --prune-only
 
       - name: Summary — how to pin + roll the new fabricd binary
         run: |
