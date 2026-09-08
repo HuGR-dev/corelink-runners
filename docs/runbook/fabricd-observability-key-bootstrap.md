@@ -16,12 +16,12 @@ two identical provider version/digest samples, the pinned image, an existing
 `FABRIC_ADMISSION_PAUSED=1` binding, zero busy/unverifiable fleet items, and a
 valid introspection response for the stated tenant.
 
-The live stability window is 120 seconds by default. The script records both
-sample timestamps and takes the second sample immediately before local key
-generation and the first provider mutation; a live `--stability-seconds 0` is
-rejected. Zero is accepted only by the explicit network-free `--mode mock` test
-path. A version or digest drift during the wait is RED and prevents the secret
-write.
+The live stability window is exactly 120 seconds. The script records both
+sample timestamps and prepares the local key before sample 1; sample 2 is taken
+after the wait immediately before the first provider mutation. Any live value
+other than `--stability-seconds 120` is rejected. Other values, including zero,
+are accepted only by the explicit network-free `--mode mock` test path. A
+version or digest drift during the wait is RED and prevents the secret write.
 
 After the gates pass it writes only `FABRIC_OBSERVABILITY_KEY` through
 `wrangler secret put`, deletes the exact named fabricd container, and recreates
