@@ -102,6 +102,7 @@ RUN curl -fsSL -o /tmp/code-server.tar.gz \
 # STAGE 3: Final Runtime Image
 # ══════════════════════════════════════════════════════════════════════
 FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 ARG VCS_REF
 ARG BUILD_DATE
@@ -196,17 +197,37 @@ COPY entrypoint.sh /entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 RUN set +e; \
-    private_key_files="$(grep -RIlE -- '-----BEGIN [A-Z0-9][A-Z0-9 ]*PRIVATE KEY-----' /opt/code-server)"; \
+    candidate_files="$(grep -RIlE --binary-files=without-match -- '^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$' /opt/code-server)"; \
     scan_rc=$?; \
-    set -e; \
-    if [ "${scan_rc}" -eq 0 ]; then \
+    scanner_error=0; \
+    private_key_files=''; \
+    if [ "${scan_rc}" -gt 1 ]; then \
+      scanner_error="${scan_rc}"; \
+    elif [ "${scan_rc}" -eq 0 ]; then \
+      while IFS= read -r candidate; do \
+        [ -n "${candidate}" ] || continue; \
+        awk 'BEGIN { in_pem=0; found=0 } { line=$0; sub(/\r$/, "", line); if (line ~ /^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { in_pem=1; next } if (in_pem && line ~ /^[[:space:]]*-----END (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { found=1; exit } if (in_pem) { payload=line; gsub(/[[:space:]]/, "", payload); if (length(payload) >= 16 && payload ~ /^[A-Za-z0-9+\/=]+$/) { found=1; exit } } } END { exit(found ? 0 : 1) }' "${candidate}" >/dev/null 2>&1; \
+        candidate_rc=$?; \
+        if [ "${candidate_rc}" -eq 0 ]; then \
+          private_key_files="${private_key_files}${candidate}"$'\n'; \
+        elif [ "${candidate_rc}" -gt 1 ]; then \
+          scanner_error="${candidate_rc}"; \
+        fi; \
+      done <<< "${candidate_files}"; \
+    fi; \
+    private_name_files="$(find /opt/code-server -type f \( -iname '*.key' -o -iname '*.key.pem' -o -iname 'id_rsa' -o -iname 'id_dsa' -o -iname 'id_ecdsa' -o -iname 'id_ed25519' -o -iname 'private.key' -o -iname 'private.pem' \) -print)"; \
+    find_rc=$?; \
+    if [ "${find_rc}" -ne 0 ]; then scanner_error="${find_rc}"; fi; \
+    private_key_files="${private_key_files}${private_name_files}"; \
+    if [ "${scanner_error}" -ne 0 ]; then \
+      echo "private-key scanner failed (rc=${scanner_error})" >&2; \
+      exit 1; \
+    elif [ -n "${private_key_files}" ]; then \
       echo "private-key material found in /opt/code-server:" >&2; \
       printf '%s\n' "${private_key_files}" >&2; \
       exit 1; \
-    elif [ "${scan_rc}" -ne 1 ]; then \
-      echo "private-key scanner failed (grep rc=${scan_rc})" >&2; \
-      exit 1; \
-    fi \
+    fi; \
+    set -e \
  && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
  && chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd \
               /opt/code-server/bin/code-server /opt/code-server/lib/node \
