@@ -2,13 +2,13 @@
 
 **Scope:** CoreLink Runners Sprint 2 bundle only
 **Recorded:** 2026-09-08
-**Stakeholder authorization:** gustavomalleths@gmail.com
+**Stakeholder authorization:** repository stakeholder (campaign authorization)
 **Reviewed tip:** dfa39eb830bc0a1b61b86667bc2f044fe546922e
-**Base:** origin/main (0cc2d823)
+**Base:** origin/main at merge-base ec9b6d69 (current main); prior campaign baseline 0cc2d823
 
 ## Decision
 
-This is a narrow, human-authorized exception for the B2 bundle's hosted DCO execution mechanism while GitHub billing is unavailable. It records provenance and authorizes the bundle merge workflow; it does **not** declare DCO PASS, waive attribution, or sign any commit on behalf of the stakeholder. The repository's DCO checker remains unchanged and must continue to run locally against the exact merge range.
+This is a narrow, owner-accepted exception for merging the B2 bundle without hosted GitHub Actions while GitHub billing is unavailable. It records provenance and the merge path; it does **not** authorize DCO content, declare DCO PASS, waive attribution, or sign any commit on behalf of the repository stakeholder. The repository's DCO checker remains unchanged and must continue to run locally against the exact merge range.
 
 The integrated campaign contains 102 commits from origin/main..dfa39eb (101 non-merge commits plus one merge commit). Rewriting that 102-commit history to append trailers would create new commit SHAs and invalidate the reviewed SHAs, evidence bindings, manifests, and audit references already attached to this campaign. The exception preserves those immutable references and makes the residual DCO state explicit.
 
@@ -113,4 +113,3 @@ All commits created after this record, including the B2 bundle commit, require a
 ## Promotion boundary
 
 The B2 bundle may use the stakeholder-authorized local Docker CI substitution already recorded in [WAIVERS.md](../WAIVERS.md), then undergo the documented objective review and merge gates. Hosted GitHub Actions execution remains pending billing recovery. The DCO outcome is carried as **EXCEPTION / NOT PASS** until the 102-commit campaign is superseded by a separately reviewed history or the owner explicitly resolves the repository policy through an approved process.
-
