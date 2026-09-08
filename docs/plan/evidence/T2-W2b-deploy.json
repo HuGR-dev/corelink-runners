@@ -1,0 +1,90 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w2b-deploy-20260908",
+  "kind": "probe",
+  "status": "RED",
+  "observed_at": "2026-09-08T01:10:20Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "5cede249c578315621d20a3ba85729c54d5c04e8",
+    "path": "docs/plan/evidence/T2-W2b-deploy.json"
+  },
+  "claims": ["A2.5", "A2.7"],
+  "version": {"id": "5cede249c578315621d20a3ba85729c54d5c04e8"},
+  "evidence": {
+    "A2.5": {
+      "status": "PASS",
+      "provider": {
+        "app_id": "a0337af9-26db-42c0-a816-0a63ba0e58a3",
+        "app_name": "corelink-fabricd-fabricdcontainer",
+        "version": 26,
+        "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
+        "instance": {
+          "id": "12e222c7ce4f7e3854933755482a6d74d8ff9b14bec171966f0a5947984db3f4",
+          "name": "fabricd-singleton-enam",
+          "state": "running",
+          "location": "gig10",
+          "version": 26
+        },
+        "configuration_digest_matches_instance_report": true,
+        "health_summary": {"active": 1, "assigned": 0, "healthy": 0, "failed": 0}
+      },
+      "build_provenance": {
+        "build_sha": "3f7afa9224340120de690170d5e5fe5ce8cd58ef",
+        "build_sha_contains_or_is_after_515": true,
+        "fix_515_commit": "313185850eeddc66bb4833598e4acc1e97ad128d",
+        "fix_515_is_ancestor_of_build_sha": true,
+        "source": "deploy/cloudflare-fabricd/wrangler.jsonc provenance comments and repository ancestry"
+      },
+      "health_probes": [
+        {"url": "https://corelink-fabricd.gmhelmold.workers.dev/health", "http": 200, "body": "ok"},
+        {"url": "https://corelink-fabricd.gmhelmold.workers.dev/v1/health", "http": 200, "body": "ok"}
+      ],
+      "commands": [
+        "npx wrangler containers info a0337af9-26db-42c0-a816-0a63ba0e58a3 --json",
+        "npx wrangler containers instances a0337af9-26db-42c0-a816-0a63ba0e58a3 --json",
+        "curl -sS https://corelink-fabricd.gmhelmold.workers.dev/health",
+        "curl -sS https://corelink-fabricd.gmhelmold.workers.dev/v1/health"
+      ]
+    },
+    "A2.7": {
+      "status": "RED",
+      "reason": "The documented deploy workflow's local CI substitution did not pass its test gate: 85 test files passed and 5 failed (10 tests failed out of 1119). The Worker deploy and post-deploy health proof succeeded, but the full CI path cannot be promoted while the required test job is red.",
+      "documented_workflow": ".github/workflows/deploy-spawn-worker.yml",
+      "owner_authorized_local_substitution": true,
+      "local_ci_substitution": {
+        "working_directory": "deploy/cloudflare",
+        "commands": ["npm ci", "npm run typecheck", "npm run test"],
+        "npm_ci": {"exit": 0, "audit_summary": "12 vulnerabilities reported by npm audit; no auto-fix applied"},
+        "typecheck": {"exit": 0},
+        "test": {"exit": 1, "test_files_passed": 85, "test_files_failed": 5, "tests_total": 1119, "tests_failed": 10},
+        "failed_files": ["test/reconciler-wave-acceptance.test.ts", "test/retry-epoch-integration.test.ts", "test/teardown-permutation.test.ts", "two additional files reported by the same vitest summary"],
+        "ci_substitution_verdict": "RED"
+      },
+      "deploy_proof": {
+        "command": "npx wrangler deploy --config wrangler.jsonc --name corelink-spawn-worker",
+        "worker_deployment_id": "7e60acfb-acf2-4df0-a496-52ee7460ca19",
+        "worker_version": "cb704a9d-f6e0-45d7-9e68-89a263a77993",
+        "traffic_percentage": 100,
+        "devenv_app_id": "a037c709-9f21-493c-8dcb-2414a588a1cd",
+        "devenv_state": "ready",
+        "devenv_image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+      },
+      "health_and_auth": {
+        "fabricd_contractual_health": {"url": "https://corelink-fabricd.gmhelmold.workers.dev/v1/health", "http": 200, "body": "ok"},
+        "spawn_worker_root_expected_auth": {"url": "https://corelink-spawn-worker.gmhelmold.workers.dev/", "http": 401},
+        "spawn_worker_metrics_expected_auth": {"url": "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/metrics", "http": 401},
+        "spawn_worker_fleet_gate_expected_auth": {"url": "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy", "http": 401}
+      },
+      "fleet_gates": {
+        "pre": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false, "status": "PASS"},
+        "post": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false, "status": "PASS"}
+      },
+      "paused_flags": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1", "unpaused": false}
+    },
+    "transcripts": [
+      "docs/plan/evidence/T2-W2b-deploy-20260908.md"
+    ],
+    "scope_note": "A2.5 is proven. A2.7 remains RED specifically because the locally substituted CI test gate failed; no green credit is inferred from a successful deploy alone."
+  }
+}
