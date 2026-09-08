@@ -1,0 +1,80 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w2b-deploy-final-20260908",
+  "kind": "probe",
+  "status": "PASS",
+  "observed_at": "2026-09-08T01:51:18Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "fa13e8a305b13f1dcbfa4cf0ebd15f83f1f1da52",
+    "path": "docs/plan/evidence/T2-W2b-deploy-final.json"
+  },
+  "claims": ["A2.4", "A2.5", "A2.7"],
+  "version": {"id": "fa13e8a305b13f1dcbfa4cf0ebd15f83f1f1da52"},
+  "evidence": {
+    "source_and_local_ci": {
+      "tip_clean": true,
+      "tip": "fa13e8a305b13f1dcbfa4cf0ebd15f83f1f1da52",
+      "product_source_same_as": "48052654943cffaf6827a2a7a729012d2aa2df5b",
+      "local_ci_evidence": "docs/plan/evidence/T2-W2b-deploy.json",
+      "green_gate_commit": "9273080e0485a202bdca5f1c2899e5169fb48e45",
+      "current_tip_delta_from_green_gate": "docs/evidence-only",
+      "local_ci_result": "npm ci, typecheck, and vitest 90 files/1119 tests PASS recorded at the product source; no code delta after that green gate"
+    },
+    "preflight": {
+      "dry_run": "PASS",
+      "bindings": ["RunnerContainer", "CheckHostContainer", "CredStashDO", "MetricsDO", "ConcurrencySlotsDO", "RunnerDevEnvDO", "ContainmentDO"],
+      "paused_flags": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"},
+      "fleet_gate": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false, "status": "PASS"}
+    },
+    "worker_deploy": {
+      "command": "npx wrangler deploy --config wrangler.jsonc --name corelink-spawn-worker",
+      "deployment_id": "215138ea-1201-4e3d-ba27-ed20837aaa13",
+      "version_id": "1418af47-d71a-488f-89a6-cbb9173402bd",
+      "traffic_percentage": 100,
+      "rollback": "not performed"
+    },
+    "devenv": {
+      "app_id": "a037c709-9f21-493c-8dcb-2414a588a1cd",
+      "name": "corelink-spawn-worker-runnerdevenvdo",
+      "state": "ready",
+      "version": 1,
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+    },
+    "unchanged_refs": {
+      "runner_app_id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "runner_version": 21,
+      "runner_image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      "checkhost_app_id": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
+      "checkhost_version": 4,
+      "checkhost_image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      "fabricd_changed": false
+    },
+    "fabricd_A2_5": {
+      "app_id": "a0337af9-26db-42c0-a816-0a63ba0e58a3",
+      "version": 26,
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
+      "instance_id": "12e222c7ce4f7e3854933755482a6d74d8ff9b14bec171966f0a5947984db3f4",
+      "instance_name": "fabricd-singleton-enam",
+      "instance_state": "running",
+      "instance_version": 26,
+      "location": "gig10",
+      "wake_routes": [
+        {"url": "https://corelink-fabricd.gmhelmold.workers.dev/v1/health", "http": 200, "body": "ok"},
+        {"url": "https://corelink-fabricd.gmhelmold.workers.dev/v1/attestation/key", "http": 200, "key_id": "faa5b7726ccd2c52"}
+      ],
+      "detailed_instance_poll": {"target_instance_id": "12e222c7ce4f7e3854933755482a6d74d8ff9b14bec171966f0a5947984db3f4", "observed_until": "running/version-26", "stale_summary_ignored": true}
+    },
+    "worker_authenticated_probe": {
+      "route": "/internal/v1/fleet/busy",
+      "auth_header": "X-Corelink-Internal-Auth",
+      "http": 200,
+      "schema_keys": ["busy", "checked", "runners", "unverifiable"],
+      "busy": 0,
+      "checked": 0,
+      "unverifiable": 0
+    },
+    "post_gate": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false, "status": "PASS"},
+    "scope_note": "Final promotion remains active; no rollback was required. Intake and redrive stayed paused throughout."
+  }
+}
