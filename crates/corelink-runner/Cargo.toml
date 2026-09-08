@@ -1,0 +1,47 @@
+# Runner implementation transferred into the CoreLink workspace (runner-transfer
+# campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+[package]
+name = "corelink-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# WP-A (defense-in-depth): the Actions-YAML EQUIVALENCE SHIM (`pub mod shim`)
+# is a NON-PRODUCTION migration/equivalence-verification harness whose
+# step-execution is SIMULATED (`simulate_run_digest` — a deterministic
+# stand-in, never a real execution result). It must never compile into a
+# release binary. The module is `#[cfg(any(test, feature = "shim-dev"))]`, so
+# it is present only for unit tests (`cfg(test)`) and when this feature is
+# explicitly requested. The self dev-dependency below turns it on for the
+# integration-test build, which links the lib as a normal (non-`cfg(test)`)
+# dependency and would otherwise not see the module.
+shim-dev = []
+
+[dependencies]
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+anyhow = { workspace = true }
+# WP-S13.5: serde-Serialize for the wrapper-level `CloseReason`
+# (`normal|expired|crashed`) close-metadata — NOT inside the frozen §13.4
+# IntentMetrics vector.
+serde = { workspace = true }
+# WP-R4: fence materialization content digests (SHA-256 lowercase hex, the
+# frozen WP-00 scalar convention).
+sha2    = { workspace = true }
+# WP-2 (moat build): BLAKE3 is the native CAS/AC content-addressed key type
+# (A9b: SHA-256 MUST NOT be used as a native-CAS key; only BLAKE3 hex).
+blake3  = { workspace = true }
+# WP-ATT1a: attestation sign/verify (ratified decision #2: ed25519, fabric
+# key) + standard-base64 wire encoding of signature/public key.
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# WP-A: enable the `shim-dev` feature for the test build only. Integration
+# tests (`tests/acceptance_e4.rs`) link this crate as a normal dependency
+# (no `cfg(test)` on the lib), so they need the feature turned on to see the
+# gated `shim` module. Dev-dependencies are excluded from `cargo build
+# --release`, so this never pulls the simulated shim into a release binary.
+corelink-runner = { path = ".", features = ["shim-dev"] }

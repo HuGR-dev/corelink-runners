@@ -1,0 +1,81 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+# Error handling — exact-pinned (transplanted runner core; scout dep budget)
+anyhow     = "=1.0.103"
+# Serialization — exact-pinned for the frozen wire-contract vectors
+serde      = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+# JSON Schema — exact-pinned for the frozen wire-contract schemas (schemars 1.x)
+schemars   = { version = "=1.2.1", features = ["derive"] }
+# Cryptography — exact-pinned for fence materialize's content digests and the
+# X4 supply-chain pin convention (WP-R4)
+sha2       = "=0.10.9"
+# BLAKE3 content-addressed keys for the native CAS/AC HTTP plane (WP-2: moat
+# build). The native CAS uses BLAKE3, not SHA-256 (A9b: digest discipline).
+# Exact-pinned; MIT/Apache-2.0; no new duplicate versions (blake3's only
+# transitive dep is `constant_time_eq`, which is not elsewhere in the lock).
+blake3     = "=1.8.2"
+# Attestation signing — exact-pinned (WP-ATT1a; ratified decision #2:
+# ed25519, fabric key; base64 = standard alphabet for sig/pubkey wire form)
+base64        = "=0.22.1"
+ed25519-dalek = "=2.2.0"
+# HTTP server stack — exact-pinned, MINIMAL feature sets (WP-API1; house
+# stack: corelink-server runs axum 0.7 minimal — mirrored, not forked).
+# tower: `util` (ServiceExt::oneshot in acceptance tests) + `limit`/`load-shed`
+# (the global concurrency cap + 503 shedding layer wired in app_full). All three
+# features reuse crates already in the lock (futures-*, pin-project-lite,
+# sync_wrapper, tower-layer/-service) — ZERO new dependencies.
+axum  = { version = "=0.7.9", default-features = false, features = ["http1", "tokio", "json"] }
+# `sync` carries Semaphore (the bounded ack-window gate in close.rs) and is
+# already present transitively via `rt-multi-thread` — naming it is explicit, not
+# new (no Cargo.lock change).
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tower = { version = "=0.5.3", default-features = false, features = ["util", "limit", "load-shed"] }
+# Outbound HTTP client — exact-pinned (WP-CLOUD1: the CloudSandboxEngine's
+# Northflank adapter). Sync/blocking by design (no tokio contagion into the sync
+# `Engine` seam); quarantined behind the crate's `HttpTransport` trait — ureq is
+# named in exactly one impl (`UreqTransport`), never in the engine logic or tests.
+ureq = "=3.3.0"
+# Persistent lease ledger — exact-pinned (WP-3-PGLEDGER: the production
+# cross-instance cap-safe `PgLedger`). Owner-ratified dep adoption; recon
+# confirmed MIT/Apache, no duplicate-version collision, `rsa` not reachable.
+# The sync `LeaseLedger` trait stays sync — `PgLedger` bridges via
+# block_in_place on the server's rt-multi-thread runtime (never made async).
+tokio-postgres    = "=0.7.18"
+deadpool-postgres = "=0.14.1"
+deadpool-runtime  = "=0.3.1"
+postgres-types    = "=0.2.14"
+postgres-protocol = "=0.6.12"
+# Opt-in TLS for the Postgres ledger connection (WP-B). PURE-RUST stack — NO
+# OpenSSL / NO system trust store (this workspace is hermetic; deny.toml is
+# crates.io-only). `rustls` (ring crypto provider — already in the lock via
+# ureq's TLS, so zero new crypto crates) + `webpki-roots` (bundled Mozilla CA
+# set — already in the lock via ureq) + `tokio-postgres-rustls` (the deadpool/
+# tokio-postgres <-> rustls bridge). Default-OFF: the connection stays `NoTls`
+# unless `FABRIC_PG_TLS=require` is set. Public-CA verify-full only.
+rustls = { version = "=0.23.40", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "=1.0.7"
+tokio-postgres-rustls = "=0.13.0"
+# Lease-id minting — exact-pinned (WP-FIX-LEASE-ID-UUID). UUID v4 gives a
+# globally-unique lease id with no coordination, so the persistent PgLedger is
+# safe for instances > 1 and across restarts (no pre/post-restart or
+# cross-instance PRIMARY KEY collision on the mint). MIT/Apache-2.0; v4-only
+# feature set (pulls `getrandom` for the RNG).
+uuid = { version = "=1.23.3", features = ["v4"] }
+# RS256 signing for the GitHub-App runner-registration broker (WP-BROKER,
+# ADR-0007 C1). `ring`'s `RSA_PKCS1_SHA256` IS the RS256 algorithm GitHub App
+# auth requires. `ring` is ALREADY in the lock (rustls's crypto provider, via
+# ureq's TLS) — naming it as a direct dep adds ZERO new crates. The RS256
+# signing is quarantined behind the broker's `AppJwtSigner` trait (named only in
+# `RingRsaJwtSigner`), so the mint FLOW is testable with a mock signer — no real
+# RSA key in any test. MIT/ISC/OpenSSL — crates.io registry, deny.toml-clean.
+ring = "=0.17.14"

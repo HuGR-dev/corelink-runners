@@ -1,0 +1,85 @@
+# cargo-deny configuration — supply-chain policy for the corelink-runners
+# workspace. CoreLink supply-chain policy for the runner workspace.
+# Run: cargo deny check
+
+[licenses]
+# Allow only these SPDX identifiers for dependency licenses (the workspace
+# allow-set).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSD-3-Clause",
+    "ISC",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    # blake3 (WP-2 BLAKE3 CAS keys) publishes under CC0-1.0 OR Apache-2.0 OR
+    # Apache-2.0 WITH LLVM-exception. cargo-deny requires all OR alternatives to
+    # be listed; Apache-2.0 and WITH LLVM-exception are above. CC0-1.0 is the
+    # public-domain dedication — no restrictions.
+    "CC0-1.0",
+    # arrayref v0.3.9 (transitive dep of blake3, WP-2). BSD-2-Clause is the
+    # two-clause BSD ("Simplified BSD") — a permissive license, FSF/OSI approved,
+    # strictly less restrictive than BSD-3-Clause (already in the allow-set).
+    "BSD-2-Clause",
+]
+# Our own crates are closed-source / no SPDX license — ignore them.
+private = { ignore = true }
+
+[bans]
+# Deny multiple versions of the same crate. Skips are documented and added ONLY
+# when a transitive duplicate genuinely cannot be collapsed.
+multiple-versions = "deny"
+skip = [
+    # windows-sys 0.52.0 is pulled by `ring` (← rustls ← ureq, the
+    # CloudSandboxEngine's HTTP/TLS stack); the workspace's other copy is 0.61.2
+    # (← mio ← tokio). Both are **Windows-only** target-gated deps — neither is
+    # ever compiled on our mac/Linux build+CI targets (`cargo tree -i
+    # windows-sys@0.52.0` is empty without `--target all`). The two majors are
+    # pinned by upstreams we do not control (ring vs mio), so the duplicate is
+    # irreducible without an upstream change. Scoped to the exact version so any
+    # NEW/unexpected duplicate still trips the gate.
+    { crate = "windows-sys@0.52.0", reason = "Windows-only (never built on our targets); ring/rustls (ureq) vs mio/tokio pin different majors — irreducible transitive dup." },
+    # OWNER-GATED (WP-3-PGLEDGER): the modern crypto stack pulled by
+    # `postgres-protocol 0.6.12` (SCRAM/MD5 auth uses sha2 0.11 / hmac 0.13 /
+    # rand 0.10). The workspace's OTHER copies are the X4-pinned `sha2 =0.10.9`
+    # line (fence digests, wire-contract conformance) + tokio's getrandom 0.2.
+    # postgres-protocol 0.6.12 is the FLOOR that fixes three RUSTSEC advisories
+    # (RUSTSEC-2026-0178 tokio-postgres DataRow panic, -0179 SCRAM-iteration DoS,
+    # -0180 hstore panic); downgrading reintroduces all three. Bumping the X4
+    # sha2 pin to 0.11 is out of this WP's scope and risks wire-contract drift.
+    # So these two-major splits are irreducible here — a clean security trade
+    # (kill 3 real vulns, accept benign duplicate hashing/RNG crates). Each is
+    # scoped to the EXACT newer version so any NEW/unexpected dup still trips.
+    { crate = "sha2@0.11.0",          reason = "postgres-protocol 0.6.12 SCRAM auth; X4 pins sha2 0.10.9. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "digest@0.11.3",        reason = "← sha2 0.11 / hmac 0.13 (postgres-protocol 0.6.12); X4 stack is digest 0.10. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "block-buffer@0.12.1",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is block-buffer 0.10. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "crypto-common@0.2.2",  reason = "← digest 0.11 (postgres-protocol 0.6.12); X4 stack is crypto-common 0.1. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "cpufeatures@0.3.0",    reason = "← chacha20/rand 0.10 (postgres-protocol 0.6.12); other copy is cpufeatures 0.2. OWNER-GATED, WP-3-PGLEDGER." },
+    { crate = "getrandom@0.4.3",      reason = "← rand 0.10 (postgres-protocol 0.6.12); tokio pulls getrandom 0.2. OWNER-GATED, WP-3-PGLEDGER. Updated 0.4.2→0.4.3 by lock refresh (blake3 dep addition)." },
+    # WASM-only tail of the getrandom 0.4 stack (← rand 0.10 ← postgres-protocol
+    # 0.6.12). wasi 0.14 is pulled ONLY on the wasm32-wasi target; never compiled
+    # on our mac/Linux build+CI targets. The other wasi copy (wasi 0.11) comes
+    # from the older getrandom 0.2 line. Same irreducibility as the crypto split
+    # above. (audit r9: dropped the stale `wit-bindgen@0.57.1` skip — Cargo.lock
+    # now resolves a SINGLE wit-bindgen, so there is no duplicate to skip; an
+    # unnecessary skip masks a future real duplicate. Re-add scoped only if a
+    # getrandom/wasm bump reintroduces a second wit-bindgen major.)
+    { crate = "wasi@0.14.7+wasi-0.2.4", reason = "wasm-only (getrandom 0.4 ← postgres-protocol 0.6.12); never built on our targets. OWNER-GATED, WP-3-PGLEDGER." },
+    # WP-B (opt-in pg TLS): `tokio-postgres-rustls 0.13` pulls `x509-cert 0.2 ←
+    # spki 0.7 ← der 0.7`, which pins `const-oid 0.9.6` for channel-binding cert
+    # parsing. The workspace's OTHER copy is `const-oid 0.10.2` (← digest 0.11 ←
+    # hmac 0.13 ← postgres-protocol 0.6.12, the SCRAM stack already gated above).
+    # The two majors are pinned by upstreams we do not control (der 0.7 vs digest
+    # 0.11), so the split is irreducible without an upstream bump. Scoped to the
+    # exact 0.9.6 so any NEW/unexpected const-oid dup still trips the gate.
+    { crate = "const-oid@0.9.6",        reason = "← der 0.7 ← x509-cert 0.2 (tokio-postgres-rustls 0.13, WP-B pg TLS); other copy is const-oid 0.10 (postgres-protocol SCRAM). Irreducible upstream pin." },
+]
+
+[sources]
+# Only allow dependencies from crates.io; deny unknown registries and git deps.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
