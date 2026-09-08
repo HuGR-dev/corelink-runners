@@ -86,17 +86,103 @@ on:
         required: false
         type: boolean
         default: false
+      rotate_metrics:
+        description: "Rotate only METRICS_OBSERVABILITY_KEY and query the aggregate; skip tests and deploy."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  # Narrow operator path for the write-only metrics key. This intentionally
+  # does not invoke the deploy job, which would roll the container fleet.
+  rotate-metrics:
+    if: inputs.rotate_metrics == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: deploy/cloudflare/package-lock.json
+
+      - name: Install Wrangler
+        run: npm ci
+
+      - name: Guard rotation inputs
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          METRICS_OBSERVABILITY_KEY: ${{ secrets.METRICS_OBSERVABILITY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || {
+            echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1;
+          }
+          test -n "${METRICS_OBSERVABILITY_KEY:-}" || {
+            echo "::error::Missing METRICS_OBSERVABILITY_KEY"; exit 1;
+          }
+
+      - name: Detect optional canary consumer
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if npx wrangler secret list --name corelink-canary >/dev/null 2>&1; then
+            echo "CANARY_PRESENT=1" >> "$GITHUB_ENV"
+          else
+            echo "CANARY_PRESENT=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Update spawn-worker metrics key
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          METRICS_OBSERVABILITY_KEY: ${{ secrets.METRICS_OBSERVABILITY_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$METRICS_OBSERVABILITY_KEY" \
+            | npx wrangler secret put METRICS_OBSERVABILITY_KEY --name corelink-spawn-worker
+
+      - name: Probe aggregate-only production evidence
+        working-directory: ${{ github.workspace }}
+        env:
+          METRICS_OBSERVABILITY_KEY: ${{ secrets.METRICS_OBSERVABILITY_KEY }}
+        run: |
+          set -euo pipefail
+          body="$(curl --fail --silent --show-error --max-time 20 \
+            -H "X-Corelink-Internal-Auth: ${METRICS_OBSERVABILITY_KEY}" \
+            "https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/metrics")"
+          count="$(printf '%s' "$body" | jq -er '
+            .counters.capability_claim_unserved
+            | if (type == "number" and . >= 0 and . == floor) then .
+              else error("aggregate missing or invalid") end')"
+          printf 'capability_claim_unserved=%s\n' "$count"
+
+      - name: Update optional canary consumer
+        if: env.CANARY_PRESENT == '1'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          METRICS_OBSERVABILITY_KEY: ${{ secrets.METRICS_OBSERVABILITY_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$METRICS_OBSERVABILITY_KEY" \
+            | npx wrangler secret put METRICS_OBSERVABILITY_KEY --name corelink-canary
+
   # Gate: the spawn-Worker's own test suite must pass before we deploy it.
   # Self-hosted `corelink` (zero-hosted mandate): the hosted ubuntu-latest lane is
   # dead under the billing block. Node 22 is baked into the runner image + on PATH,
   # so no actions/setup-node is needed; checkout resolves from the baked
   # action-archive cache (0 codeload).
   test:
+    if: inputs.rotate_metrics != true
     runs-on: corelink
     timeout-minutes: 15
     defaults:
@@ -115,6 +201,7 @@ jobs:
         run: npm run test
 
   deploy:
+    if: inputs.rotate_metrics != true
     needs: test
     runs-on: corelink
     permissions:
