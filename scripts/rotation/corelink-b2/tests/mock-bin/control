@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_LOG:?}"
+: "${MOCK_SPAWN_HASH:?}"
+: "${MOCK_FABRICD_HASH:?}"
+scenario="${MOCK_SCENARIO:-success}"
+action="${1:-}"
+printf 'control:<%s>' "$action" >> "$MOCK_LOG"
+shift
+for arg in "$@"; do printf '<%s>' "$arg" >> "$MOCK_LOG"; done
+printf '\n' >> "$MOCK_LOG"
+preflight() {
+  local nonce="$1" freeze=1 busy=0 unverifiable=0 pending_terminalized=1 held_terminalized=1 impact=1 pending=0 held=0 boxes=0 current=1 cfg="$MOCK_SPAWN_HASH" spawn='corelink-spawn-worker' runner_image="$MOCK_RUNNER_IMAGE"
+  case "$scenario" in
+    preflight_freeze) freeze=0 ;;
+    preflight_fleet) busy=1 ;;
+    preflight_unverifiable) unverifiable=1 ;;
+    preflight_pending) pending=1 ;;
+    preflight_unterminalized) pending_terminalized=0 ;;
+    preflight_impact) impact=0 ;;
+    preflight_work) held=1 ;;
+    preflight_boxes) boxes=1 ;;
+    preflight_stale) current=0 ;;
+    preflight_identity) spawn='wrong-worker' ;;
+    preflight_image) runner_image='registry.example/wrong@sha256:9999999999999999999999999999999999999999999999999999999999999999' ;;
+    preflight_pin) cfg='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' ;;
+  esac
+  printf '%s\n' "nonce=$nonce" "admission_freeze_deployed=$freeze" 'admission_paused=1' 'fleet_endpoint=/internal/v1/fleet/busy' "fleet_busy=$busy" "fleet_unverifiable=$unverifiable" 'ledger_backend=in_memory' "pending_terminalized=$pending_terminalized" "held_terminalized=$held_terminalized" "maintenance_impact_recorded=$impact" "durable_pending=$pending" "durable_held=$held" "active_boxes=$boxes" "dynamic_current=$current" "spawn_worker=$spawn" 'fabricd_worker=corelink-fabricd' "spawn_runner_image=$runner_image" "spawn_check_image=$MOCK_CHECK_IMAGE" "fabricd_image=$MOCK_FABRIC_IMAGE" "spawn_config_sha256=$cfg" "fabricd_config_sha256=$MOCK_FABRICD_HASH"
+}
+corelink_stage() {
+  local nonce="$1" key_id="$2" pub="$3" derived=1 contract=corelink-keys-v1-v2 old_attestations=recorded
+  [ "$scenario" != corelink_key ] || key_id=deadbeefdeadbeef
+  [ "$scenario" != corelink_derivation ] || derived=0
+  [ "$scenario" != corelink_contract ] || contract=wrong-contract
+  [ "$scenario" != corelink_attestations ] || old_attestations=missing
+  printf '%s\n' "nonce=$nonce" "corelink_expected_key_id=$key_id" "corelink_expected_pubkey_b64=$pub" "corelink_material_derived=$derived" "corelink_contract_version=$contract" "corelink_prior_attestations=$old_attestations"
+}
+postflight() {
+  local nonce="$2" key_id="$3" pub="$4" health=200 ready=200 spawn_health=200 provider=1 image="$MOCK_FABRIC_IMAGE" config="$MOCK_FABRICD_HASH" boot=1 container_key="$3" shape='keys:[{key_id,pubkey_b64,expires_ms:null}]' v2=accepted
+  [ "$scenario" != post_health ] || health=503
+  [ "$scenario" != post_ready ] || ready=503
+  [ "$scenario" != post_spawn_health ] || spawn_health=503
+  [ "$scenario" != post_provider ] || provider=0
+  [ "$scenario" != post_image ] || image='registry.example/wrong@sha256:9999999999999999999999999999999999999999999999999999999999999999'
+  [ "$scenario" != post_config ] || config='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+  [ "$scenario" != post_boot ] || boot=0
+  [ "$scenario" != post_container ] || container_key=deadbeefdeadbeef
+  [ "$scenario" != post_keyshape ] || shape='keys:[{key_id,pubkey_b64,expires_ms:123}]'
+  old_rejected=rejected
+  [ "$scenario" != post_corelink_contract ] || v2=rejected
+  [ "$scenario" != post_corelink_old_key ] || old_rejected=accepted
+  printf '%s\n' "nonce=$nonce" "health_status=$health" "fabricd_ready_status=$ready" "spawn_health_status=$spawn_health" "attestation_body_shape=$shape" 'attestation_keys_count=1' "attestation_key_id=$key_id" "attestation_pubkey_b64=$pub" "fabricd_provider_version_changed=$provider" "fabricd_provider_image=$image" "fabricd_deployed_config_sha256=$config" "fabricd_container_boot_after_rollout=$boot" "fabricd_container_key_id=$container_key" "corelink_config_key_id=$key_id" "corelink_config_pubkey_b64=$pub" 'corelink_binding_v1=accepted' "corelink_binding_v2=$v2" "corelink_old_key_rejected=$old_rejected" 'prior_attestations=recorded'
+}
+lifecycle() {
+  local nonce="$1" key_id="$2" close=200 teardown=1 busy=0 unverifiable=0
+  [ "$scenario" != lifecycle_fail ] || close=500
+  printf '%s\n' "nonce=$nonce" 'lifecycle_safe=1' 'acquire_status=200' 'acquire_created=1' "close_status=$close" "teardown_complete=$teardown" "fleet_busy=$busy" "fleet_unverifiable=$unverifiable" 'attestation_v1=accepted' 'attestation_v2=accepted' "attestation_key_id=$key_id"
+}
+release() {
+  local nonce="$1" state=0
+  [ "$scenario" != release_fail ] || state=1
+  [ "$scenario" != release_evidence_fail ] || chmod 500 "${MOCK_EVIDENCE_DIR:?}/v1"
+  printf '%s\n' "nonce=$nonce" "admission_paused=$state"
+}
+refreeze() {
+  local nonce="$1" paused=1 busy=0 unverifiable=0
+  [ "$scenario" != release_evidence_fail ] || chmod 700 "${MOCK_EVIDENCE_DIR:?}/v1"
+  [ "$scenario" != refreeze_fail ] || paused=0
+  printf '%s\n' "nonce=$nonce" "admission_paused=$paused" "fleet_busy=$busy" "fleet_unverifiable=$unverifiable"
+}
+case "$action" in
+  preflight) [ "$#" -eq 1 ] || exit 2; preflight "$1" ;;
+  corelink-stage) [ "$#" -eq 3 ] || exit 2; corelink_stage "$@" ;;
+  postflight) [ "$#" -eq 4 ] || exit 2; postflight "$@" ;;
+  lifecycle) [ "$#" -eq 2 ] || exit 2; lifecycle "$@" ;;
+  release-freeze) [ "$#" -eq 2 ] || exit 2; release "$1" ;;
+  refreeze) [ "$#" -eq 2 ] || exit 2; refreeze "$1" ;;
+  *) exit 2 ;;
+esac

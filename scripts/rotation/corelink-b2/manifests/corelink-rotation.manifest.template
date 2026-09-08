@@ -1,0 +1,37 @@
+# Nonsecret template. Replace angle-bracket paths with owner-controlled values
+# and recompute the whole manifest SHA-256 before a controller invocation.
+schema=corelink-b2-rotation-local-controller-v1
+integration_root=<B2_CHECKOUT>
+integration_commit=27c08dd76650bc3385c69ce60f7fea5726d05a82
+cloudflare_account_id=6a1fc1c626fc2628823e60b9db01f5cd
+spawn_worker=corelink-spawn-worker
+fabricd_worker=corelink-fabricd
+spawn_config=<B2_CHECKOUT>/deploy/cloudflare/wrangler.jsonc
+fabricd_config=<B2_CHECKOUT>/deploy/cloudflare-fabricd/wrangler.jsonc
+spawn_worker_url=https://corelink-spawn-worker.gmhelmold.workers.dev
+fabricd_worker_url=https://corelink-fabricd.gmhelmold.workers.dev
+fleet_busy_url=https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy
+spawn_runner_image=<registry.cloudflare.com/account/corelink-spawn-worker-runnercontainer@sha256:64-hex>
+spawn_check_image=<registry.cloudflare.com/account/corelink-spawn-worker-checkhostcontainer@sha256:64-hex>
+fabricd_image=<registry.cloudflare.com/account/corelink-fabricd-fabricdcontainer@sha256:64-hex>
+spawn_config_sha256=<64-hex>
+fabricd_config_sha256=<64-hex>
+oauth_config=<owner-controlled-oauth-config>
+fleet_read_token_file=<owner-controlled-0600-fleet-token>
+corelink_control_token_file=<owner-controlled-0600-corelink-token>
+lifecycle_token_file=<owner-controlled-0600-lifecycle-token>
+state_file=<owner-controlled-0700-dir>/state
+wrangler_bin=<owner-controlled-pinned-wrangler>
+curl_bin=<owner-controlled-pinned-curl>
+op_preflight=<owner-controlled-preflight-op>
+sha_op_preflight=<64-hex>
+op_corelink_stage=<repo-root>/scripts/rotation/corelink-b2/bin/op_corelink_stage.sh
+sha_op_corelink_stage=378cae5e86f99d3d00ae4f078965cf46336bb53efbae6373d01a67a31afae5d8
+op_postflight=<repo-root>/scripts/rotation/corelink-b2/bin/op_postflight.sh
+sha_op_postflight=fa61cf9ad4a41c2ee5deba0e826a6d75e8bf02bdb529eac23d129f2170d2e66b
+op_release_freeze=<owner-controlled-release-op>
+sha_op_release_freeze=<64-hex>
+op_lifecycle=<owner-controlled-lifecycle-op>
+sha_op_lifecycle=<64-hex>
+op_refreeze=<owner-controlled-refreeze-op>
+sha_op_refreeze=<64-hex>
