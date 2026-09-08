@@ -160,6 +160,31 @@ async function queuedWebhook(
   );
 }
 
+async function completedWebhook(env: Env, ctx: unknown, jobId: string): Promise<Response> {
+  const body = JSON.stringify({
+    action: "completed",
+    workflow_job: {
+      id: Number(jobId),
+      labels: ["corelink-dogfood"],
+      runner_name: "runner-completed",
+    },
+    repository: { full_name: "acme/api" },
+  });
+  return worker.fetch(
+    new Request("https://w/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "workflow_job",
+        "x-hub-signature-256": await ghSign(SECRET, body),
+      },
+      body,
+    }),
+    env,
+    ctx as never,
+  );
+}
+
 // ── A global fetch router for the two external calls the drive makes:
 //    • POST …/actions/runners/generate-jitconfig  (the GitHub JIT mint)
 //    • POST …/internal/v1/runner/mint             (the CAS-PAT warm mint)
@@ -285,6 +310,21 @@ describe("/webhook queued — authentication gate (real HMAC)", () => {
 });
 
 describe("/webhook queued — the authenticated spawn orchestration", () => {
+  it("shared admission pause blocks queued but still routes completed cleanup", async () => {
+    const kv = fakeKv();
+    const env = baseEnv({ RUNNER_JOB_PATS: kv as never, FABRIC_ADMISSION_PAUSED: "1" });
+    const queuedCtx = makeCtx();
+    const queued = await queuedWebhook(env, queuedCtx, { jobId: "1000", repo: "acme/api" });
+    expect(queued.status).toBe(503);
+    expect(queued.headers.get("retry-after")).toBe("60");
+    expect(kv.store.has("spawn:1000")).toBe(false);
+    expect(containers).toHaveLength(0);
+
+    const completed = await completedWebhook(env, makeCtx(), "1000");
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({ ok: true, job_id: "1000" });
+  });
+
   it("claims → mints the GitHub JIT → issues the runner spawn → moves golden metrics", async () => {
     const kv = fakeKv();
     const metrics = fakeMetrics();
