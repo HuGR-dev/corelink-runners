@@ -1,0 +1,92 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w2b-rollout-20260908",
+  "kind": "deploy+rollback+probe",
+  "status": "ROLLBACK",
+  "observed_at": "2026-09-08T00:38:10Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "15d85a5dd703f4a64101b7de64a2e5b8a3ba7815",
+    "path": "docs/plan/evidence/T2-W2b-rollout-20260908.json"
+  },
+  "claims": ["T2-W2b:rollout-attempt", "T2-W2b:rollback-recovery"],
+  "version": {"id": "15d85a5dd703f4a64101b7de64a2e5b8a3ba7815"},
+  "evidence": {
+    "precondition": {
+      "tip_clean": true,
+      "tip": "15d85a5dd703f4a64101b7de64a2e5b8a3ba7815",
+      "fleet_gate": {
+        "started_at": "2026-09-08T00:33:56Z",
+        "finished_at": "2026-09-08T00:34:00Z",
+        "force": false,
+        "polls": 1,
+        "busy": 0,
+        "checked": 0,
+        "unverifiable": 0,
+        "status": "PASS"
+      }
+    },
+    "deploy_attempt": {
+      "command": "npx wrangler deploy --config wrangler.jsonc --name corelink-spawn-worker",
+      "result": "FAILED_AFTER_UPLOAD",
+      "error_class": "container_application_binding_missing",
+      "error_redacted": "Could not deploy container application as durable object was not found in list of bindings",
+      "worker_version_created": "9a456fa5-e30b-44cc-a638-f78da8fc02cc",
+      "worker_deployment_id": "8a13d7f3-11a1-4215-aad9-75de93c6070f",
+      "worker_percentage_observed": 100,
+      "runner_devenv_app_created": false
+    },
+    "rollback": {
+      "command": "npx wrangler rollback 43df9d2b-7a83-437b-ba11-aa40ddef1b42 --name corelink-spawn-worker --yes --message 'rollback T2-W2b failed RunnerDevEnvDO binding'",
+      "result": "PASS",
+      "deployment_id": "269cf612-f9df-4ef1-b944-59e4417c4c59",
+      "active_worker_version": "43df9d2b-7a83-437b-ba11-aa40ddef1b42",
+      "traffic_percentage": 100
+    },
+    "post_rollback": {
+      "unauthenticated_health_expectations": [
+        {"route": "/", "http": 401},
+        {"route": "/internal/v1/metrics", "http": 401},
+        {"route": "/internal/v1/fleet/busy", "http": 401}
+      ],
+      "runner_app": {
+        "id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+        "name": "corelink-spawn-worker-runnercontainer",
+        "state": "ready",
+        "version": 21,
+        "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029"
+      },
+      "checkhost_app": {
+        "id": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
+        "name": "corelink-spawn-worker-checkhostcontainer",
+        "state": "ready",
+        "version": 4,
+        "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851"
+      },
+      "fabricd_untouched": {
+        "id": "a0337af9-26db-42c0-a816-0a63ba0e58a3",
+        "version": 26,
+        "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565"
+      },
+      "runner_devenv_app": "ABSENT_FROM_REMOTE_APPLICATION_LIST"
+    },
+    "post_rollback_fleet_gate": {
+      "started_at": "2026-09-08T00:38:10Z",
+      "finished_at": "2026-09-08T00:38:10Z",
+      "force": false,
+      "polls": 1,
+      "busy": 0,
+      "checked": 0,
+      "unverifiable": 0,
+      "status": "PASS"
+    },
+    "scope": {
+      "worker_config_mutated": true,
+      "worker_active_state": "RESTORED_TO_43df9d2b",
+      "fabricd_mutated": false,
+      "runner_or_checkhost_image_changed": false,
+      "runner_devenv_live_rollout": false,
+      "conclusion": "ROLLBACK_RECOVERED; DevEnv binding/application creation remains a blocker"
+    }
+  }
+}
