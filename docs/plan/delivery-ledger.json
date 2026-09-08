@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "local fail-closed preflight approved; O-FLEETBUSY is now bound and proven; external/live remains blocked by O1, O-DEVENV-PIN and deploy evidence",
+        "T2-W2b": "rollout attempt failed after upload and rollback recovered. Fleet gates were 0/0/0 without FORCE; RunnerDevEnvDO binding/application creation remains the blocker",
         "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,17 +1643,21 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Local fail-closed preflight is approved at 20d1eb5 and O-FLEETBUSY is proven. Bind O1 and O-DEVENV-PIN, then collect version-bound deploy evidence at docs/plan/evidence/T2-W2b-deploy.json; do not claim implementation or live completion.",
-      "blockers": ["O1", "O-DEVENV-PIN", "deploy evidence absent"],
-      "commits": ["20d1eb5d40f10ba949e16ba72a75048ae10d61b0"],
+      "next_action": "Establish the Cloudflare Durable Object/container binding required to create RunnerDevEnvDO, then re-attempt the approved rollout and capture a version-bound deploy artifact. The recorded attempt failed after upload and rollback recovered; do not claim implementation or live completion.",
+      "blockers": ["RunnerDevEnvDO binding/application absent"],
+      "commits": [
+        "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
+        "b610a924edaa224db46320d3993bea797bbe2504"
+      ],
       "review": {
         "status": "pending",
         "commit": null,
         "evidence": []
       },
       "evidence": [
-        "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not remove O1, O-DEVENV-PIN, deploy-evidence, implementation, or live blockers.",
-        "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false."
+        "Local fail-closed preflight approved at 20d1eb5; it establishes only local preparation and does not grant implementation or live credit.",
+        "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false.",
+        "docs/plan/evidence/T2-W2b-rollout-20260908.json: deploy attempt created Worker version 9a456fa5-e30b-44cc-a638-f78da8fc02cc but failed because the container Durable Object binding was absent. Rollback recovered active version 43df9d2b-7a83-437b-ba11-aa40ddef1b42 at 100%; pre/post fleet gates were busy=0, checked=0, unverifiable=0 with force=false. RunnerContainer, CheckHostContainer and fabricd were unchanged."
       ],
       "historical_sprint": 2
     },
@@ -3205,6 +3209,25 @@
       "conclusion": "Registry ship evidence is PASS and RunnerDevEnvDO desired configuration is pinned to the immutable remote digest. No Worker deploy, container rollout, or live qualification occurred or is claimed.",
       "evidence": [
         "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+      ]
+    },
+    {
+      "at": "2026-09-08T00:38:10+00:00",
+      "task": "T2-W2b failed rollout and rollback recovery evidence",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W2b-rollout-20260908.json",
+        "docs/plan/evidence/T2-W2b-rollout-20260908.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commit": "b610a924edaa224db46320d3993bea797bbe2504",
+      "conclusion": "Worker deployment failed after upload because the RunnerDevEnvDO container Durable Object binding was absent. Rollback recovered the active Worker at 100%; this is not a successful rollout or live qualification.",
+      "evidence": [
+        "Pre/post fleet gate: busy=0, checked=0, unverifiable=0, force=false.",
+        "RunnerContainer, CheckHostContainer and fabricd refs unchanged; RunnerDevEnvDO application absent from the remote application list."
       ]
     }
   ],
