@@ -18,6 +18,11 @@ import { shardOf } from "./shard";
 
 export interface Env {
   FABRICD: DurableObjectNamespace<FabricdContainer>;
+  // Emergency edge kill-switch for NEW lease/admission/mint work. The Worker
+  // checks this before any container lookup, so existing lease lifecycle calls
+  // can drain while new work is refused. Absent or exact "0" is fail-open;
+  // every other value is treated as paused (fail-closed).
+  FABRIC_ADMISSION_PAUSED?: string;
   // Shard count (multi-instance fabricd, option 3). String in wrangler vars,
   // parsed to int; absent/invalid ⇒ 1 (inert singleton). MUST be raised in
   // lockstep with `max_instances` in wrangler.jsonc — see the comment there.
@@ -173,6 +178,47 @@ export function pgLedgerEnvVars(
       ? { FABRIC_BILLING_EXPORT_INTERVAL_SECS: env.FABRIC_BILLING_EXPORT_INTERVAL_SECS }
       : {}),
   };
+}
+
+/**
+ * Whether the Worker edge should refuse new lease/admission/mint requests.
+ *
+ * This is intentionally exact in the fail-open direction: only an absent
+ * binding or the literal string "0" leaves admissions open. A malformed or
+ * whitespace-padded value therefore pauses admissions rather than silently
+ * allowing new work during a config mistake.
+ */
+export function admissionPaused(
+  env: Pick<Env, "FABRIC_ADMISSION_PAUSED">,
+): boolean {
+  return env.FABRIC_ADMISSION_PAUSED !== undefined && env.FABRIC_ADMISSION_PAUSED !== "0";
+}
+
+/**
+ * Routes that can start NEW work. Lease-scoped operations deliberately do not
+ * belong here: status, execution/trigger, credential redemption, cancel, and
+ * close/teardown must remain available so already-issued leases can drain.
+ */
+export function isNewAdmissionRoute(method: string, pathname: string): boolean {
+  return (
+    method === "POST" &&
+    (pathname === "/v1/leases" ||
+      pathname === "/webhooks/github" ||
+      pathname === "/v1/test/mint-cred-ticket")
+  );
+}
+
+const ADMISSION_PAUSE_RETRY_AFTER_SECONDS = "60";
+
+function admissionPausedResponse(): Response {
+  return new Response(JSON.stringify({ error: "fabric admission paused" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "retry-after": ADMISSION_PAUSE_RETRY_AFTER_SECONDS,
+    },
+  });
 }
 
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
@@ -948,6 +994,14 @@ export default {
     if (pathname.startsWith("/__do/")) {
       return new Response("not found", { status: 404 });
     }
+
+    // Global admission freeze is an edge decision: refuse before choosing a
+    // shard or waking a container. Existing lease-scoped status, execution,
+    // credential redemption, cancel, and close/teardown routes fall through.
+    if (admissionPaused(env) && isNewAdmissionRoute(request.method, pathname)) {
+      return admissionPausedResponse();
+    }
+
     // Non-long-lived routes get the per-request timeout → clean 503 on a wedged
     // upstream; exec/close/queue-trigger forward unbounded (isLongLivedRoute).
     const applyTimeout = !isLongLivedRoute(request.method, pathname);
