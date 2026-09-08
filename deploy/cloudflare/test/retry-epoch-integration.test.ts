@@ -57,7 +57,10 @@ describe("retry epoch authority through ConcurrencySlotsDO", () => {
     const env = {
       RUNNER_JOB_PATS: kv,
       CONTAINMENT: containment.binding,
-      CONCURRENCY_SLOTS: { idFromName: () => "global", get: () => ({ recordRetry: authority.recordRetry.bind(authority), readRetry: authority.readRetry.bind(authority) }) },
+      // This is the real ConcurrencySlotsDO RPC surface.  The old fixture only
+      // exposed retry methods, but the contained retry path now claims through
+      // the same authority using generation/owner fencing before driving.
+      CONCURRENCY_SLOTS: { idFromName: () => "global", get: () => authority },
     } as unknown as Env;
     const drive = async (_env: Env, opts: { jobId: string; repo: string }) => providerReceipt(opts);
     await retryOrphanedSpawns(env, {} as never, Date.now(), drive);
