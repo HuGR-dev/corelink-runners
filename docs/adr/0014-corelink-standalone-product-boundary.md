@@ -1,7 +1,7 @@
 # ADR-0014 — CoreLink operates independently of Hugit
 
-**Status:** accepted  
-**Date:** 2026-09-08  
+**Status:** accepted
+**Date:** 2026-09-08
 **Owner:** CoreLink product and techlead
 
 ## Decision

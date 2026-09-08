@@ -19,15 +19,15 @@ scan_tree() {
   set +e
   candidate_files="$(${grep_bin} -RIlE --binary-files=without-match -- \
     '^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$' "${root}")"
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
+  scan_rc=$?
+  if (( scan_rc > 1 )); then
+    scanner_error=${scan_rc}
+  elif (( scan_rc == 0 )); then
+    while IFS= read -r candidate; do
+      [[ -n "${candidate}" ]] || continue
+      awk 'BEGIN { in_pem=0; found=0 }
+        {
+          line=$0; sub(/\r$/, "", line)
           if (line ~ /^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { in_pem=1; next }
           if (in_pem && line ~ /^[[:space:]]*-----END (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { found=1; exit }
           if (in_pem) {
@@ -64,29 +64,32 @@ QUJD
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-code-server-key-scan.XXXXXX")"
 trap 'rm -rf -- "${work_dir}"' EXIT
 
-printf '%s\n' \
-  '-----BEGIN PRIVATE KEY-----' \
-QUJD
-  '-----END PRIVATE KEY-----' >"${work_dir}/fixture.pem"
-printf "const fixture = '-----BEGIN PRIVATE KEY-----';\n" >"${work_dir}/source.js"
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
+pem_begin='-----BEGIN'
+pem_end='-----END'
+pem_kind=' PRIVATE KEY-----'
+pem_payload='QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='
+printf '%s%s\n%s\n%s%s\n' \
+  "${pem_begin}" "${pem_kind}" "${pem_payload}" "${pem_end}" "${pem_kind}" \
+  >"${work_dir}/fixture.pem"
+printf "const fixture = '%s%s';\n" "${pem_begin}" "${pem_kind}" >"${work_dir}/source.js"
+
+real_output="$(scan_tree "${work_dir}")" && {
+  printf 'expected real PEM fixture to fail\n' >&2
+  exit 1
+}
+[[ "${real_output}" == *"${work_dir}/fixture.pem"* ]]
+[[ "${real_output}" != *"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="* ]]
+
+source_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-code-server-source.XXXXXX")"
+trap 'rm -rf -- "${work_dir}" "${source_dir}"' EXIT
 printf "const fixture = '-----BEGIN PRIVATE KEY-----';\n" >"${source_dir}/source.js"
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
-QUJD
+source_output="$(scan_tree "${source_dir}")"
+[[ -z "${source_output}" ]]
+
+stub_output="$(STUB_MODE=1 STUB_RC=2 scan_tree "${source_dir}" "${BASH_SOURCE[0]}" 2>&1)" && {
+  printf 'expected scanner error to fail\n' >&2
+  exit 1
+}
+[[ "${stub_output}" == *"rc=2"* ]]
+
+printf 'code-server private-key scan selftest: PASS (real PEM, source literal, scanner error)\n'
