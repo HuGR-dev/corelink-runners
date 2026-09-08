@@ -1414,7 +1414,7 @@ mod tests {
     /// — the exact lease-kind fork the hybrid routes on.
     fn runner_and_check_specs() -> (ContainerSpec, ContainerSpec) {
         let runner = ContainerSpec {
-            name: "runner-box".to_string(),
+            name: "corelink-job-runner-box".to_string(),
             image: "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1425,7 +1425,7 @@ mod tests {
             env: vec![],
         };
         let check = ContainerSpec {
-            name: "check-box".to_string(),
+            name: "corelink-job-check-box".to_string(),
             image: "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1779,7 +1779,7 @@ mod tests {
     /// A RUNNER spec (`allow_egress == true`, runner-direct) with a pinned image.
     fn runner_spec() -> ContainerSpec {
         ContainerSpec {
-            name: "runner-job".to_string(),
+            name: "corelink-job-runner".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1858,7 +1858,7 @@ mod tests {
         let registry = BoxRegistry::new();
         let prov = cf_provisioner(500, "boom", registry.clone_handle());
         let hermetic = ContainerSpec {
-            name: "offbox-a-path".to_string(),
+            name: "corelink-job-offbox-a-path".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1904,7 +1904,7 @@ mod tests {
         let registry = BoxRegistry::new();
         let prov = cf_provisioner(200, r#"{"handle":"cf-ch"}"#, registry.clone_handle());
         let check_host = ContainerSpec {
-            name: "check-host".to_string(),
+            name: "corelink-job-check-host".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),

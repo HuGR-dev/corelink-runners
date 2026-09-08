@@ -176,7 +176,7 @@ fn response(status: u16, body: &str) -> HttpResponse {
 
 fn cloudflare_spec() -> corelink_runner::lease::ContainerSpec {
     corelink_runner::lease::ContainerSpec {
-        name: "cleanup-runner".to_owned(),
+        name: "corelink-job-cleanup-runner".to_owned(),
         image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
             .to_owned(),
         tmp_root: "/tmp/cleanup".to_owned(),

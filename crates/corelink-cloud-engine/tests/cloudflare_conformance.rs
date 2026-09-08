@@ -115,7 +115,7 @@ fn spec_from_vector(req: &serde_json::Value) -> ContainerSpec {
     }
 
     ContainerSpec {
-        name: "cf-conformance-job".to_string(),
+        name: "corelink-job-cf-conformance".to_string(),
         image,
         tmp_root: "/tmp/job".to_string(),
         // A RUNNER lease (allow_egress == true, no_network == false): the only

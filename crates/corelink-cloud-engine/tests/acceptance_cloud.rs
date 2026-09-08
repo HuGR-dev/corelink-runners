@@ -193,7 +193,7 @@ fn spawn_rejects_unpinned_image_before_provider() {
     let (engine, fake) = engine_shared(vec![]); // empty script
 
     let spec = ContainerSpec {
-        name: "test-unpinned".to_string(),
+        name: "corelink-job-test-unpinned".to_string(),
         image: UNPINNED.to_string(),
         tmp_root: "/tmp/job".to_string(),
         no_network: true,
@@ -219,7 +219,7 @@ fn spawn_rejects_non_isolated_spec() {
     let (engine, fake) = engine_shared(vec![]); // empty script
 
     let spec = ContainerSpec {
-        name: "test-non-isolated".to_string(),
+        name: "corelink-job-test-non-isolated".to_string(),
         image: PINNED.to_string(),
         tmp_root: "/tmp/job".to_string(),
         no_network: false, // violates isolation floor
@@ -251,7 +251,7 @@ fn every_request_carries_bearer_token() {
     ];
     let (engine, fake) = engine_shared(responses);
 
-    let spec = pinned_spec("job1");
+    let spec = pinned_spec("corelink-job-job1");
     engine.spawn(&spec).expect("spawn");
     let c = container("job1");
     engine.exec(&c, &["echo", "hi"]).expect("exec");
@@ -397,7 +397,7 @@ fn provider_5xx_fails_closed() {
     // Case A: spawn with 500 create-job response
     {
         let (engine, _fake) = engine_shared(vec![resp(500, "Internal Server Error")]);
-        let spec = pinned_spec("myjob");
+        let spec = pinned_spec("corelink-job-myjob");
         assert!(
             engine.spawn(&spec).is_err(),
             "spawn with 500 create-job must fail closed"
@@ -675,7 +675,7 @@ fn probe_reports_isolation_by_presence() {
     {
         let (engine, _fake) = engine_shared(vec![resp(200, r#"{"data":{"id":"job1"}}"#)]);
         let c = container("job1");
-        let spec = pinned_spec("job1");
+        let spec = pinned_spec("corelink-job-job1");
         let probe = engine.probe(&c, &spec).expect("probe should succeed");
         assert_eq!(
             probe,
@@ -695,7 +695,7 @@ fn probe_reports_isolation_by_presence() {
     {
         let (engine, _fake) = engine_shared(vec![resp(404, "Not Found")]);
         let c = container("job1");
-        let spec = pinned_spec("job1");
+        let spec = pinned_spec("corelink-job-job1");
         let probe = engine.probe(&c, &spec).expect("probe should succeed");
         assert_eq!(
             probe,
@@ -778,7 +778,7 @@ fn bearer_on_every_request_in_full_flow() {
     ];
     let (engine, fake) = engine_shared(responses);
 
-    let spec = pinned_spec("job1");
+    let spec = pinned_spec("corelink-job-job1");
     let c = engine.spawn(&spec).expect("spawn");
     engine
         .exec_captured(&c, &["echo", "hi"])
@@ -974,7 +974,7 @@ fn probe_non_2xx_reports_not_isolated() {
     // never as falsely isolated.
     let (engine, _fake) = engine_shared(vec![resp(500, "Internal Server Error")]);
     let c = container("job1");
-    let spec = pinned_spec("job1");
+    let spec = pinned_spec("corelink-job-job1");
     let probe = engine
         .probe(&c, &spec)
         .expect("probe must return Ok on a non-2xx HTTP response (transport succeeded)");
@@ -1000,7 +1000,7 @@ fn probe_transport_error_fails_closed() {
     // A network-layer failure must surface as Err — never fabricate isolation state.
     let engine = engine_failing();
     let c = container("job1");
-    let spec = pinned_spec("job1");
+    let spec = pinned_spec("corelink-job-job1");
     assert!(
         engine.probe(&c, &spec).is_err(),
         "probe must return Err on transport-layer failure (fail-closed)"
@@ -1016,7 +1016,7 @@ fn spawn_sends_pinned_image_verbatim() {
     let create_resp = resp(200, r#"{"data":{"id":"job1"}}"#);
     let (engine, fake) = engine_shared(vec![create_resp]);
 
-    let spec = pinned_spec("job1"); // uses PINNED constant
+    let spec = pinned_spec("corelink-job-job1"); // uses PINNED constant
     engine.spawn(&spec).expect("spawn");
 
     let req = fake.nth_request(0);

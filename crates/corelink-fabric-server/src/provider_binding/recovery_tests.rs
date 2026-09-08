@@ -101,7 +101,7 @@ fn pending(id: &str) -> LeaseRecord {
 }
 fn spec(check_host: bool) -> ContainerSpec {
     ContainerSpec {
-        name: "lease-1".into(),
+        name: "corelink-job-lease-1".into(),
         image: format!("alpine@sha256:{}", "a".repeat(64)),
         tmp_root: "/tmp/job".into(),
         no_network: check_host,
