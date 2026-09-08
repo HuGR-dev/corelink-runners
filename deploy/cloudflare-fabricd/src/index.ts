@@ -221,6 +221,24 @@ function admissionPausedResponse(): Response {
   });
 }
 
+/**
+ * During an admission freeze, a GitHub workflow completion must still reach
+ * the Rust handler so it can revoke credentials and tear down the runner.
+ * Read only the event envelope here; the Rust handler remains responsible for
+ * signature and full payload validation.
+ */
+function isWorkflowJobCompletedWebhook(request: Request, rawBody: ArrayBuffer): boolean {
+  if (request.headers.get("x-github-event") !== "workflow_job") return false;
+  try {
+    const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(rawBody)) as {
+      action?: unknown;
+    };
+    return payload !== null && typeof payload === "object" && payload.action === "completed";
+  } catch {
+    return false;
+  }
+}
+
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
 export class FabricdContainer extends Container<Env> {
   defaultPort = 8080;
@@ -998,8 +1016,18 @@ export default {
     // Global admission freeze is an edge decision: refuse before choosing a
     // shard or waking a container. Existing lease-scoped status, execution,
     // credential redemption, cancel, and close/teardown routes fall through.
+    // The one webhook exception is workflow_job.completed: it is parsed just
+    // enough to let Rust perform credential revoke and runner teardown.
+    let requestForForwarding = request;
     if (admissionPaused(env) && isNewAdmissionRoute(request.method, pathname)) {
-      return admissionPausedResponse();
+      if (pathname !== "/webhooks/github") return admissionPausedResponse();
+      const rawBody = await request.arrayBuffer();
+      if (!isWorkflowJobCompletedWebhook(request, rawBody)) return admissionPausedResponse();
+      requestForForwarding = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: rawBody,
+      });
     }
 
     // Non-long-lived routes get the per-request timeout → clean 503 on a wedged
@@ -1062,7 +1090,7 @@ export default {
     // (same pattern as ACQUIRE). At N=1 this is inert → falls through to shard 0.
     if (N > 1 && request.method === "POST" && pathname === "/webhooks/github") {
       const k = ((webhookCursor++ % N) + N) % N;
-      const modified = new Request(request);
+      const modified = new Request(requestForForwarding);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
       return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
@@ -1086,7 +1114,7 @@ export default {
     }
 
     // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
-    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), requestForForwarding, applyTimeout);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
