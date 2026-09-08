@@ -284,32 +284,15 @@
       // not leave it at 1 afterwards.
       "max_instances": 1
     },
-    // ⛔ RunnerDevEnvDO's container entry is REMOVED until its image exists.
-    //
-    // It referenced `corelink-runner-devenv:latest`, and BOTH halves of that were
-    // broken: the Containers API rejects the deploy outright — "VALIDATE_INPUT
-    // image Invalid image. Latest tags are not allowed on images." — and the image
-    // is not in the managed registry at all (`GET /v2/…/manifests/latest` → 404;
-    // `wrangler containers images list` has no `corelink-runner-devenv`). So the
-    // pin could not even be repaired by resolving a digest; there is nothing to
-    // resolve.
-    //
-    // The cost of leaving it here was not the DevEnv feature, which nothing calls
-    // (`RunnerDevEnvDO` is exported and bound, and has no call site in
-    // src/index.ts). The cost was that EVERY `wrangler deploy` of this Worker
-    // failed validation — so no fix to the spawn path, the reaper, or anything else
-    // could reach production. It blocked the runner-leak fix that ships with this
-    // change.
-    //
-    // The DO binding and its `v6` migration stay exactly as they are, so no state
-    // is touched and no migration is rewound. Restore this entry when the DevEnv
-    // image is actually built and pushed — pinned by @sha256, never by a tag.
-    //
-    // That last sentence is now ENFORCED, not advised: `test/container-image-pins.test.ts`
-    // fails the suite on any `"image"` in this file that is not an @sha256 digest,
-    // and fails vacuously-empty scans too. It is what stops a later rebase (PR #516
-    // owns `RunnerDevEnvDO` and touches this file) from re-introducing a tag pin and
-    // breaking every `wrangler deploy` again.
+    {
+      // Registry push is evidenced at T2-W4-image-ship-20260908. This immutable
+      // pin updates desired configuration only; it does not deploy, roll out, or
+      // qualify a live DevEnv runner.
+      "class_name": "RunnerDevEnvDO",
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c",
+      "instance_type": "standard-4",
+      "max_instances": 10
+    }
   ]
 
   // R2 binding (in-network CAS hydration — the moat win) is a Cache-TL
