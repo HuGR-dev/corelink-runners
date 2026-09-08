@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. Canonical provider-lifecycle evidence proves A2.5; A2.7 local test/typecheck gate recovered at 9273080 (90 files / 1119 tests), but the documented CI deploy and current Worker /health proof remain pending, so the WP remains partial",
+        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. A2.7 local test/typecheck gate remains green at 9273080 (90 files / 1119 tests), but the final candidate deploy was rolled back after A2.5 provider evidence found fabricd stopped; the WP remains partial without A2.7 credit",
         "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,8 +1643,8 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Run the documented CI deploy path from 9273080e0485a202bdca5f1c2899e5169fb48e45 after its local test/typecheck gate passed, then record the deployed Worker version and its /health response. The canonical provider-lifecycle artifact proves A2.5; the historical retry deployment predates the current G1-G5 source tip.",
-      "blockers": ["A2.7 documented CI deploy has not run for 9273080e0485a202bdca5f1c2899e5169fb48e45", "A2.7 current deployed Worker /health proof absent"],
+      "next_action": "Restore a provider-reported running/healthy fabricd instance, then rerun the documented control-plane deploy from the green 9273080 source and record the candidate Worker /health response before any completion claim. The final candidate deployment was rolled back to cb704 after the stopped-instance finding.",
+      "blockers": ["A2.5 provider instance stopped: active=0, healthy=0, assigned=1 despite HTTP health 200", "A2.7 candidate Worker 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977 was rolled back to cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%", "A2.7 new candidate Worker /health proof absent after provider recovery"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
         "b610a924edaa224db46320d3993bea797bbe2504",
@@ -1653,7 +1653,8 @@
         "98dc349174812408432ba4c5897f65d5ee58df00",
         "0b7633f8b875c79b452a54b9f896fbc39cf8413b",
         "9463dc87620424142bfb62ed9a72cfbbbba40d0b",
-        "9273080e0485a202bdca5f1c2899e5169fb48e45"
+        "9273080e0485a202bdca5f1c2899e5169fb48e45",
+        "31742786e3dbe55139a19f0790ede8542e854686"
       ],
       "review": {
         "status": "pending",
@@ -1665,7 +1666,8 @@
         "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false.",
         "docs/plan/evidence/T2-W2b-rollout-20260908.json: deploy attempt created Worker version 9a456fa5-e30b-44cc-a638-f78da8fc02cc but failed because the container Durable Object binding was absent. Rollback recovered active version 43df9d2b-7a83-437b-ba11-aa40ddef1b42 at 100%; pre/post fleet gates were busy=0, checked=0, unverifiable=0 with force=false. RunnerContainer, CheckHostContainer and fabricd were unchanged.",
         "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only.",
-        "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence proves A2.5 with the running fabricd instance reporting the configured immutable digest and both fabricd health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history. The current tip still lacks the documented CI deploy and new Worker /health proof, so A2.7 and WP completion remain uncredited."
+        "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence previously proved A2.5 with a running fabricd instance reporting the configured immutable digest and both health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history.",
+        "docs/plan/evidence/T2-W2b-A2.7-final-20260908.json: the final candidate Worker 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977 deployed at 100% with authenticated fleet gate 0/0/0, but provider fabricd state was stopped (active=0, healthy=0, assigned=1) despite HTTP health 200. The Worker was rolled back to cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; fleet returned 0/0/0 without FORCE, references remained unchanged, and A2.7 remains RED/uncredited."
       ],
       "historical_sprint": 2
     },
@@ -3305,6 +3307,26 @@
         "npm run test: 90 files / 1119 tests PASS in 26.67 seconds at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
         "npm run typecheck: PASS at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
         "Focused recovery evidence: SJ2 25/25, reconciler+retry 6/6, admission/SJ5 adjacencies 79/79, teardown 7/7."
+      ]
+    },
+    {
+      "at": "2026-09-08T01:37:55+00:00",
+      "task": "T2-W2b final A2.7 deploy rollback evidence integration",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W2b-A2.7-final-20260908.json",
+        "docs/plan/evidence/T2-W2b-A2.7-final-20260908.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commit": "31742786e3dbe55139a19f0790ede8542e854686",
+      "conclusion": "Candidate Worker deployment reached 100%, but the final provider check found fabricd stopped. Rollback recovered cb704 at 100%; retain A2.7 RED and T2-W2b partial, while preserving the green local 1119/1119 test gate.",
+      "evidence": [
+        "Candidate 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977: authenticated fleet gate HTTP 200, busy=0, checked=0, unverifiable=0; no FORCE.",
+        "A2.5 final provider state: active=0, healthy=0, assigned=1 and instance stopped; HTTP /health endpoints alone do not override provider state.",
+        "Rollback deployment 3d7050d1-f72f-4e46-ab61-3c790cd0b2ca restored cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; post-rollback fleet gate 0/0/0 and Runner/CheckHost refs unchanged."
       ]
     }
   ],
