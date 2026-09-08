@@ -1,0 +1,7 @@
+{
+  "digest": "sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
+  "build_sha": "3f7afa9224340120de690170d5e5fe5ce8cd58ef",
+  "fix_515_sha": "313185850eeddc66bb4833598e4acc1e97ad128d",
+  "fix_515_ancestor": true,
+  "source": "pinned digest/build release metadata"
+}
