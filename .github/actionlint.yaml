@@ -1,0 +1,9 @@
+self-hosted-runner:
+  # The image build and validation lanes run on the CoreLink ephemeral fleet.
+  # Keep this label explicit so actionlint checks the workflow without treating
+  # the custom runner label as an unknown typo.
+  labels:
+    - corelink
+
+# No repository-level configuration variables are assumed by the static lint.
+config-variables: null
