@@ -198,8 +198,22 @@ else
   [[ "${CLOUDFLARE_API_TOKEN:-}" =~ ^[A-Za-z0-9._~+/=-]{16,}$ ]] || refuse
 fi
 
-if ! (secure_config "${M[spawn_config]}" && secure_config "${M[fabricd_config]}" && secure_manifest "${M[oauth_config]}" && secure_secret_file "${M[fleet_read_token_file]}" && secure_secret_file "${M[corelink_control_token_file]}" && secure_secret_file "${M[lifecycle_token_file]}"); then refuse; fi
-if ! ([ "$(hash_file "${M[spawn_config]}")" = "${M[spawn_config_sha256]}" ] && [ "$(hash_file "${M[fabricd_config]}")" = "${M[fabricd_config_sha256]}" ]); then refuse; fi
+if ! {
+  secure_config "${M[spawn_config]}" &&
+    secure_config "${M[fabricd_config]}" &&
+    secure_manifest "${M[oauth_config]}" &&
+    secure_secret_file "${M[fleet_read_token_file]}" &&
+    secure_secret_file "${M[corelink_control_token_file]}" &&
+    secure_secret_file "${M[lifecycle_token_file]}"
+}; then
+  refuse
+fi
+if ! {
+  [ "$(hash_file "${M[spawn_config]}")" = "${M[spawn_config_sha256]}" ] &&
+    [ "$(hash_file "${M[fabricd_config]}")" = "${M[fabricd_config_sha256]}" ]
+}; then
+  refuse
+fi
 
 # OAuth config intentionally holds only the token environment variable's name,
 # never a token value. It prevents a manifest from redirecting this controller
