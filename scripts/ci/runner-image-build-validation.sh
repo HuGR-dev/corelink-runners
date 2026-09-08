@@ -53,6 +53,7 @@ if [[ -z "$repo" ]]; then
 fi
 repo="$(cd -- "$repo" && pwd -P)"
 repo="$(git -C "$repo" rev-parse --show-toplevel)"
+repo="$(cd -- "$repo" && pwd -P)"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 impact_output="$(bash "$script_dir/image-build-impact.sh" --repo "$repo" --base "$base" --head "$head")"
@@ -66,10 +67,25 @@ if ! grep -q '^IMAGE_BUILD_REQUIRED image=corelink-spawn-worker-runnercontainer 
   exit 0
 fi
 
-context="$repo/deploy/runner"
+deploy_dir="$repo/deploy"
+context="$deploy_dir/runner"
 dockerfile="$context/Dockerfile"
-if [[ ! -d "$context" || -L "$context" || ! -f "$dockerfile" || -L "$dockerfile" ]]; then
-  echo 'runner-image-build-validation: unsafe or missing deploy/runner context' >&2
+for ancestor in "$deploy_dir" "$context"; do
+  if [[ ! -d "$ancestor" || -L "$ancestor" ]]; then
+    echo "runner-image-build-validation: unsafe or missing context ancestor: $ancestor" >&2
+    exit 1
+  fi
+  canonical_ancestor="$(cd -- "$ancestor" && pwd -P)"
+  case "$canonical_ancestor" in
+    "$repo"/*) ;;
+    *)
+      echo "runner-image-build-validation: context ancestor escapes repo: $ancestor -> $canonical_ancestor" >&2
+      exit 1
+      ;;
+  esac
+done
+if [[ ! -f "$dockerfile" || -L "$dockerfile" ]]; then
+  echo 'runner-image-build-validation: unsafe or missing deploy/runner Dockerfile' >&2
   exit 1
 fi
 if [[ -n "$(find -P "$context" -type l -print -quit)" ]]; then

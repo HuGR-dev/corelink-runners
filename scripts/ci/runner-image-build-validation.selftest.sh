@@ -56,6 +56,23 @@ grep -q 'RUNNER_IMAGE_BUILD_NOT_REQUIRED' "$fixture/no-build.out"
 [[ ! -e "$fixture/no-build.log" ]]
 echo 'PASS validator skips unrelated changes'
 
+outside="$fixture/outside"
+mkdir -p "$outside/deploy/runner"
+printf '%s\n' 'FROM scratch' > "$outside/deploy/runner/Dockerfile"
+mv "$fixture/deploy" "$fixture/deploy-original"
+ln -s "$outside/deploy" "$fixture/deploy"
+if PATH="$fixture/bin:$PATH" "$validator" --repo "$fixture" \
+  --base "$base" --head "$head" > "$fixture/escape.out" 2>&1; then
+  echo 'validator accepted a deploy-parent symlink escape' >&2
+  exit 1
+fi
+grep -q 'runner-image-build-validation: .*context ancestor' "$fixture/escape.out"
+echo 'PASS validator rejects deploy-parent symlink escape'
+
+# Restore the fixture context before the workflow mutations below.
+find "$fixture/deploy" -maxdepth 0 -type l -delete
+mv "$fixture/deploy-original" "$fixture/deploy"
+
 # Mutation tests for the workflow's trust and publication contract. Each
 # mutation must make the structural checker fail; a green mutation means the
 # guard is vacuous.
@@ -189,16 +206,32 @@ expect_step_rejected 'docker login action' '      - name: Forbidden login
           registry: registry.example
           username: attacker
           password: ignored'
+# shellcheck disable=SC2016
 expect_step_rejected 'github token interpolation' '      - name: Forbidden token
         uses: actions/checkout@v6
         with:
           token: ${{ github.token }}'
+# shellcheck disable=SC2016
 expect_step_rejected 'runtime token interpolation' '      - name: Forbidden runtime token
         uses: actions/checkout@v6
         with:
           token: ${{ env.ACTIONS_RUNTIME_TOKEN }}'
+# shellcheck disable=SC2016
 expect_step_rejected 'shell token interpolation' '      - name: Forbidden shell token
         uses: actions/checkout@v6
         with:
           token: $GITHUB_TOKEN'
+
+expect_step_rejected 'inline run publisher' '      - name: Forbidden inline run
+        run: '\''docker image push registry.example/image:tag'\'''
+expect_step_rejected 'folded run publisher' '      - name: Forbidden folded run
+        run: >-
+          docker buildx build
+            --push .'
+expect_step_rejected 'literal chomping run publisher' '      - name: Forbidden literal run
+        run: |+
+          nerdctl push registry.example/image:tag'
+expect_step_rejected 'explicit-indent run publisher' '      - name: Forbidden explicit-indent run
+        run: |2-
+          docker manifest push registry.example/image:tag'
 echo 'PASS workflow trust and publisher mutations are rejected'

@@ -6,7 +6,7 @@
 # build, while the manual publication workflow remains the only registry path.
 name: image-build-impact
 
-on:
+"on":
   pull_request:
     paths:
       - 'deploy/runner/**'

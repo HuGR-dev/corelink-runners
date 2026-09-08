@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Verify that the PR runner-image lane is structurally build-only.
 
-This intentionally reads only the workflow's ``run: |`` command blocks. A
-publisher-looking word in a prose comment is not a command, while a command
-split across shell continuation lines is normalized before policy matching.
+This structurally reads every workflow ``run`` scalar, including inline,
+literal, folded, and chomping forms. A publisher-looking word in a prose
+comment is not a command, while a command split across YAML or shell
+continuation lines is normalized before policy matching.
 """
 
 from __future__ import annotations
@@ -100,28 +101,75 @@ def action_push_value(block: str) -> str | None:
     return match.group(1).strip().strip("'\"").lower() if match else None
 
 
-def run_blocks(text: str) -> list[str]:
-    """Extract YAML literal ``run`` blocks without needing PyYAML."""
+def yaml_comment_cut(value: str) -> str:
+    """Remove an unquoted YAML comment from an inline scalar."""
+
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if char in "'\"":
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value.strip()
+
+
+def block_scalar(
+    lines: list[str], start: int, parent_indent: int, indicator: str
+) -> tuple[str, int]:
+    """Decode the command text of a literal/folded YAML scalar."""
+
+    body: list[str] = []
+    index = start
+    nonblank_indents = [
+        len(line) - len(line.lstrip())
+        for line in lines[start:]
+        if line.strip() and len(line) - len(line.lstrip()) > parent_indent
+    ]
+    content_indent = min(nonblank_indents) if nonblank_indents else parent_indent + 2
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and len(line) - len(line.lstrip()) <= parent_indent:
+            break
+        body.append(line[content_indent:] if line else "")
+        index += 1
+    if indicator.startswith(">"):
+        value = " ".join(part.strip() for part in body if part.strip())
+    else:
+        value = "\n".join(body)
+    return value, index
+
+
+def run_scalars(text: str) -> list[str]:
+    """Extract every YAML ``run`` scalar without requiring PyYAML."""
 
     lines = text.splitlines()
-    blocks: list[str] = []
+    scalars: list[str] = []
     index = 0
     while index < len(lines):
-        match = re.match(r"^(\s*)run:\s*\|\s*$", lines[index])
+        match = re.match(r"^(?P<indent>\s*)run:\s*(?P<value>.*)$", lines[index])
         if not match:
             index += 1
             continue
-        parent_indent = len(match.group(1))
-        command_lines: list[str] = []
+        parent_indent = len(match.group("indent"))
+        value = yaml_comment_cut(match.group("value"))
+        if re.fullmatch(r"[|>](?:[1-9][+-]?|[+-]?[1-9]?)", value):
+            scalar, index = block_scalar(lines, index + 1, parent_indent, value)
+            scalars.append(scalar)
+            continue
+        scalars.append(value)
         index += 1
-        while index < len(lines):
-            line = lines[index]
-            if line.strip() and len(line) - len(line.lstrip()) <= parent_indent:
-                break
-            command_lines.append(line[parent_indent + 2 :] if line else "")
-            index += 1
-        blocks.append("\n".join(command_lines))
-    return blocks
+    return scalars
 
 
 def normalized_commands(block: str) -> str:
@@ -186,10 +234,10 @@ def verify(workflow_path: Path, validator_path: Path) -> int:
         if match:
             return fail(f"{description} found: {match.group(0)}")
 
-    blocks = run_blocks(workflow)
-    if not blocks:
+    scalars = run_scalars(workflow)
+    if not scalars:
         return fail("workflow has no executable run block")
-    command_text = "\n".join(normalized_commands(block) for block in blocks)
+    command_text = "\n".join(normalized_commands(scalar) for scalar in scalars)
     for description, pattern in DENIED_COMMANDS:
         match = pattern.search(command_text)
         if match:
@@ -197,7 +245,10 @@ def verify(workflow_path: Path, validator_path: Path) -> int:
 
     for reference, block in action_blocks(workflow):
         reference_lower = reference.lower()
-        if re.search(r"(?:^|/)(?:docker|azure|redhat-actions)/.*(?:build-push|login)", reference_lower):
+        if re.search(
+            r"(?:^|/)(?:docker|azure|redhat-actions)/.*(?:build-push|login)",
+            reference_lower,
+        ):
             return fail(f"publication-capable action found: {reference}")
         push_value = action_push_value(block)
         if push_value is not None and push_value not in {"false", "0", "no", "off"}:
