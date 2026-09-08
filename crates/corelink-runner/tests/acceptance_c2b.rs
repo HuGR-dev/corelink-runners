@@ -30,7 +30,7 @@ use corelink_runner::concurrency::{C2B_PREFIX, Scheduler, c2b_container_name, c2
 use corelink_runner::expiry::{enforce_expiry, is_expired};
 use corelink_runner::isolation::{DockerEngine, Engine, RunningContainer};
 use corelink_runner::lease::{BoxExec, SshBox};
-use corelink_runner::namespace::JOB_TMP_ROOT;
+use corelink_runner::namespace::{JOB_TMP_ROOT, historical_cleanup_names, is_corelink_owned_name};
 use corelink_runner::recovery::{LostDisposition, detect_and_recover};
 use corelink_runner::teardown::teardown;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
@@ -121,11 +121,37 @@ fn live_box() -> SshBox {
 /// Best-effort sweep of **only** `corelink-c2b-*` containers, so a prior aborted
 /// run never poisons a census. Never touches other WPs' containers.
 fn sweep_c2b(boxx: &SshBox) {
-    let _ = boxx.run(&[
-        "sh",
-        "-c",
-        &format!("docker ps -aq --filter name={C2B_PREFIX} | xargs -r docker rm -f"),
+    let listing = boxx.run(&[
+        "docker",
+        "ps",
+        "-aq",
+        "--filter",
+        &format!("name={C2B_PREFIX}"),
+        "--format",
+        "{{.Names}}",
     ]);
+    if let Ok(listing) = listing {
+        for name in listing
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|name| is_corelink_owned_name(name) && name.starts_with(C2B_PREFIX))
+        {
+            let _ = boxx.run(&["docker", "rm", "-f", name]);
+        }
+    }
+}
+
+/// One-shot migration cleanup for containers created before the namespace
+/// cutover. It is intentionally separate from the active sweep and deletes
+/// only exact historical prefixes after parsing Docker's name listing.
+fn sweep_historical_legacy(boxx: &SshBox) {
+    let listing = boxx.run(&["docker", "ps", "-aq", "--format", "{{.Names}}"]);
+    if let Ok(listing) = listing {
+        for name in historical_cleanup_names(&listing.stdout) {
+            let _ = boxx.run(&["docker", "rm", "-f", name]);
+        }
+    }
 }
 
 // ── ③ expiry hard-kill ──────────────────────────────────────────────────────
@@ -141,6 +167,7 @@ fn item_3_expiry_hard_kill() {
     }
     let boxx = live_box();
     let image = pinned_image(&boxx);
+    sweep_historical_legacy(&boxx);
     sweep_c2b(&boxx);
 
     // An already-expired lease (expiry in the past relative to "now").
@@ -207,6 +234,7 @@ fn item_4_concurrent_ge8_per_box() {
     }
     let boxx = live_box();
     let image = pinned_image(&boxx);
+    sweep_historical_legacy(&boxx);
     sweep_c2b(&boxx);
 
     const N: usize = 8;
@@ -256,6 +284,7 @@ fn item_5_crash_recovery_lost_detected() {
     }
     let boxx = live_box();
     let image = pinned_image(&boxx);
+    sweep_historical_legacy(&boxx);
     sweep_c2b(&boxx);
 
     // Spawn a long-running job (the "in-flight" job).
