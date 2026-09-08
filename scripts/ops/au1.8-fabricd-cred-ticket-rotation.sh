@@ -59,6 +59,7 @@ FLEET_BUSY_URL="${AU18_FLEET_BUSY_URL:-https://corelink-spawn-worker.gmhelmold.w
 OBSERVABILITY_URL="${AU18_OBSERVABILITY_URL:-$BASE_URL/internal/v1/occupancy}"
 STATUS_URL="${AU18_STATUS_URL:-$BASE_URL/internal/v1/status}"
 USAGE_URL="${AU18_USAGE_URL:-$BASE_URL/v1/usage}"
+PROVIDER_STABILITY_SECS="${AU18_PROVIDER_STABILITY_SECS:-5}"
 EVIDENCE_PATH="$REPO_ROOT/docs/plan/evidence/au1.8-fabricd-secret-rotation.json"
 TENANT="ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"
 REPO_FULL_NAME="HuGR-Labs/corelink-runners"
@@ -86,10 +87,46 @@ validate_status_report() {
   jq -e '(.num_shards | tonumber) == 1 and .ledger_cross_instance_safe == true' <<<"$1" >/dev/null
 }
 
+provider_stability_pair_ok() {
+  local first="$1" second="$2"
+  [[ -n "$first" && -n "$second" && "$first" == "$second" ]]
+}
+
+file_owner_mode_ok() {
+  local file="$1" mode owner
+  [[ -f "$file" && ! -L "$file" && -r "$file" && -s "$file" ]] || return 1
+  case "$(uname -s)" in
+    Darwin) mode="$(stat -f '%Lp' "$file")"; owner="$(stat -f '%u' "$file")" ;;
+    Linux) mode="$(stat -c '%a' "$file")"; owner="$(stat -c '%u' "$file")" ;;
+    *) return 1 ;;
+  esac
+  [[ "$mode" == 600 && "$owner" == "$(id -u)" ]]
+}
+
+oob_file_gate() {
+  local label="$1" file="$2"
+  file_owner_mode_ok "$file" || {
+    echo "$label OOB file must be a non-empty regular 0600 file owned by this operator" >&2
+    return 1
+  }
+}
+
+if ! [[ "$PROVIDER_STABILITY_SECS" =~ ^[0-9]+$ ]]; then
+  echo "refusing: AU18_PROVIDER_STABILITY_SECS must be a non-negative integer" >&2
+  exit 1
+fi
+
 source_tree_gate || exit 1
 if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
+  if [[ "${AU18_VALIDATE_FILE_METADATA_ONLY:-0}" == 1 ]]; then
+    oob_file_gate FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE" || exit 1
+    oob_file_gate FABRIC_OBSERVABILITY_KEY "$OBSERVABILITY_KEY_FILE" || exit 1
+  fi
   if [[ -n "${AU18_STATUS_REPORT_JSON:-}" ]]; then
     validate_status_report "$AU18_STATUS_REPORT_JSON" || exit 1
+  fi
+  if [[ -n "${AU18_PROVIDER_STABILITY_SAMPLE_1:-}" || -n "${AU18_PROVIDER_STABILITY_SAMPLE_2:-}" ]]; then
+    provider_stability_pair_ok "${AU18_PROVIDER_STABILITY_SAMPLE_1:-}" "${AU18_PROVIDER_STABILITY_SAMPLE_2:-}" || exit 1
   fi
   exit 0
 fi
@@ -134,6 +171,7 @@ REMOTE_BASELINE_FILE=""
 REMOTE_TEMP_VAR_STATE="unknown"
 QUIESCENCE_STATE="not-checked"
 LEDGER_CROSS_INSTANCE_SAFE="not-checked"
+PROVIDER_STABILITY_STATE="not-checked"
 CAS_PAT_PROOF="not-checked"
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
@@ -179,17 +217,6 @@ capture_json() {
   return "$rc"
 }
 
-file_owner_mode_ok() {
-  local file="$1" mode owner
-  [[ -f "$file" && ! -L "$file" && -r "$file" ]] || return 1
-  case "$(uname -s)" in
-    Darwin) mode="$(stat -f '%Lp' "$file")"; owner="$(stat -f '%u' "$file")" ;;
-    Linux) mode="$(stat -c '%a' "$file")"; owner="$(stat -c '%u' "$file")" ;;
-    *) return 1 ;;
-  esac
-  [[ "$mode" == 600 && "$owner" == "$(id -u)" ]]
-}
-
 resolve_app_id() {
   local out="$TMP_DIR/container-list.json"
   capture_json containers-list "$out" "${WRANGLER[@]}" containers list --json || return 1
@@ -210,11 +237,13 @@ else
   }
 fi
 
-for protected in "$OLD_SECRET_FILE" "$TEST_MINT_KEY_FILE" "$PAT_FILE"; do
-  file_owner_mode_ok "$protected" || { echo "OOB file must be a regular 0600 file owned by this operator" >&2; exit 1; }
+for protected in "$OLD_SECRET_FILE" "$PAT_FILE"; do
+  oob_file_gate "secret/PAT" "$protected" || exit 1
 done
+oob_file_gate FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE" || exit 1
+oob_file_gate FABRIC_OBSERVABILITY_KEY "$OBSERVABILITY_KEY_FILE" || exit 1
 for gate_key in "$INTROSPECT_KEY_FILE" "$FLEET_BUSY_KEY_FILE" "$OBSERVABILITY_KEY_FILE"; do
-  [[ -n "$gate_key" ]] && file_owner_mode_ok "$gate_key" || {
+  [[ -n "$gate_key" ]] && oob_file_gate internal-auth "$gate_key" || {
     echo "introspection, fleet-busy, and observability OOB key paths must be supplied and 0600" >&2
     exit 1
   }
@@ -254,6 +283,40 @@ capture_state() {
   esac
   CURRENT_WORKER_VERSION="$worker"
   log_event "$label health=200 worker_version_id=$worker container_version_id=$container image_digest=$digest"
+}
+
+provider_snapshot() {
+  local label="$1"
+  local deploys="$TMP_DIR/$label-deployments.json"
+  local info="$TMP_DIR/$label-container.json"
+  local worker container digest
+  capture_json "$label-deployments" "$deploys" "${WRANGLER[@]}" deployments list --name "$WORKER_NAME" --json || return 1
+  capture_json "$label-container-info" "$info" "${WRANGLER[@]}" containers info "$APP_ID" || return 1
+  jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
+  worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
+  container="$(jq -er 'first(.. | objects | to_entries[] | select((.key | ascii_downcase | test("version(_id)?$")) and ((.value | type) == "string")) | .value)' "$info")" || return 1
+  digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
+  printf '%s\t%s\t%s\n' "$worker" "$container" "$digest"
+}
+
+provider_stability_gate() {
+  local expected_worker="${1:-}" expected_container="${2:-}" expected_digest="${3:-}"
+  local first second
+  first="$(provider_snapshot provider-stability-1)" || return 1
+  if [[ "$PROVIDER_STABILITY_SECS" -gt 0 ]]; then
+    sleep "$PROVIDER_STABILITY_SECS"
+  fi
+  second="$(provider_snapshot provider-stability-2)" || return 1
+  provider_stability_pair_ok "$first" "$second" || {
+    log_event "provider-stability=RED sample_mismatch"
+    return 1
+  }
+  if [[ -n "$expected_worker" && "$first" != "$expected_worker"$'\t'"$expected_container"$'\t'"$expected_digest" ]]; then
+    log_event "provider-stability=RED baseline_mismatch"
+    return 1
+  fi
+  PROVIDER_STABILITY_STATE="green"
+  log_event "provider-stability=GREEN samples=2 worker_container_digest=$second interval_seconds=$PROVIDER_STABILITY_SECS"
 }
 
 hash_file() {
@@ -348,12 +411,16 @@ recreate() {
   delete_and_confirm || return 1
   if [[ "$arm" == 1 ]]; then
     assert_remote_bindings pre-deploy-arm "$CURRENT_WORKER_VERSION" "$([[ "$REMOTE_TEMP_VAR_STATE" == armed ]] && echo armed || echo baseline)" || return 1
-    run_quiet deploy-arm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:$TENANT" --containers-rollout=none || return 1
+    # `none` only updates Worker configuration and can leave a deleted
+    # Containers application absent. Immediate rollout recreates the exact
+    # configured application from the immutable digest and waits for provider
+    # readiness; capture_state below verifies that digest after every rollout.
+    run_quiet deploy-arm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:$TENANT" --containers-rollout=immediate || return 1
   else
     # Keep every unknown remote binding and explicitly blank only the temporary
     # tenant allowlist. Strict mode rejects accidental config drift.
     assert_remote_bindings pre-deploy-disarm "$CURRENT_WORKER_VERSION" armed || return 1
-    run_quiet deploy-disarm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:" --containers-rollout=none || return 1
+    run_quiet deploy-disarm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:" --containers-rollout=immediate || return 1
   fi
   for i in $(seq 1 20); do
     if new_id="$(resolve_app_id 2>/dev/null)"; then APP_ID="$new_id"; return 0; fi
@@ -576,15 +643,16 @@ write_evidence() {
     --arg container_before "${BEFORE_CONTAINER_VERSION:-}" --arg container_rotated "${ROTATED_CONTAINER_VERSION:-}" --arg container_final "${FINAL_CONTAINER_VERSION:-}" \
     --arg digest_before "${BEFORE_DIGEST:-}" --arg digest_rotated "${ROTATED_DIGEST:-}" --arg digest_final "${FINAL_DIGEST:-}" \
     --arg baseline_sha256 "$REMOTE_BASELINE_SHA256" --arg log_path "$EVENT_LOG" \
-    --arg quiescence "$QUIESCENCE_STATE" --arg ledger_safe "$LEDGER_CROSS_INSTANCE_SAFE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
-    --argjson elapsed "$elapsed" \
+    --arg quiescence "$QUIESCENCE_STATE" --arg ledger_safe "$LEDGER_CROSS_INSTANCE_SAFE" --arg stability "$PROVIDER_STABILITY_STATE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
+    --argjson stability_interval "$PROVIDER_STABILITY_SECS" --argjson elapsed "$elapsed" \
     '{schema_version:"evidence/v1", artifact_id:"au1.8-fabricd-secret-rotation", kind:"probe", status:$status, observed_at:$observed,
       source:{repository:"corelink-runners", commit_sha:$commit, path:"docs/plan/evidence/au1.8-fabricd-secret-rotation.json"},
       claims:["AU1.8","AU1.8:secret-rotation"], version:{id:$commit},
       evidence:{operation:{app_name:$app_name, app_id_before:$app_id_before, worker_versions:{before:$worker_before, rotated:$worker_rotated, final:$worker_final}, container_versions:{before:$container_before, rotated:$container_rotated, final:$container_final}, image_digests:{before:$digest_before, rotated:$digest_rotated, final:$digest_final}},
       proofs:{old_hmac_prevalidated:true, old_hmac_redeem_status:401, new_hmac_redeem_status:200, replay_status:410, redeemed_cas_pat_clw:$cas_probe},
       quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, ledger_cross_instance_safe:($ledger_safe == "true"), intake_paused:true, redrive_paused:true},
-      remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict"]},
+      provider_stability:{gate:$stability, samples:2, interval_seconds:$stability_interval},
+      remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict","--containers-rollout=immediate"]},
       secret_handling:{old_rollback_path:$ENV_OLD_SECRET_FILE, new_operational_path:$ENV_NEW_SECRET_FILE, values:"excluded", oob_mode:"0600"},
       timing:{maximum_seconds:600, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
       logs:{status_path:$log_path, secrets:"excluded", mode:"0600"}}}' \
@@ -633,6 +701,13 @@ REMOTE_TEMP_VAR_STATE="baseline"
 log_event "remote-binding-baseline=GREEN sha256=$REMOTE_BASELINE_SHA256"
 preflight_dogfood_pat || { echo "dogfood PAT tenant/scope preflight failed" >&2; exit 1; }
 quiescence_gate || { echo "authoritative quiescence gate failed; refusing mutation" >&2; exit 1; }
+# Provider state is sampled twice immediately before the first secret write.
+# Both the Worker deployment and the Containers application version/digest must
+# remain byte-identical to the captured baseline; a concurrent deploy is RED.
+provider_stability_gate "$BEFORE_WORKER_VERSION" "$BEFORE_CONTAINER_VERSION" "$BEFORE_DIGEST" || {
+  echo "provider deployment changed or was unstable before mutation; refusing AU1.8" >&2
+  exit 1
+}
 
 MUTATION_STARTED=1
 WINDOW_START="$(date +%s)"

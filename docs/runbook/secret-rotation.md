@@ -103,11 +103,21 @@ npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$NEW_SECRET_FI
 ```
 
 The delete/redeploy pair is a controlled mutation and requires the approved
-change window, monitoring, and the rollback value. `wrangler deploy
---containers-rollout=none` preserves the existing container image rollout
-while applying the secret configuration; a new image build is outside AU1.8.
-A failed delete or deploy is fail-closed: surface the failure, do not claim
-proof, and run the recovery block immediately.
+change window, monitoring, and the rollback value. After deleting the
+application, use `wrangler deploy --containers-rollout=immediate`: the
+`none` mode can update the Worker while leaving a deleted Containers
+application absent. Immediate rollout recreates the current application from
+the immutable digest already pinned in `deploy/cloudflare-fabricd/wrangler.jsonc`.
+The post-rollout provider read must prove the exact application name and the
+same image digest. A failed delete or deploy is fail-closed: surface the
+failure, do not claim proof, and run the recovery block immediately.
+
+Immediately before the first secret write, take two read-only provider samples
+of the active Worker version, Containers application version, and image digest,
+with the bounded stability interval configured by the harness (5 seconds by
+default). The two samples must match each other and the recorded baseline. A
+concurrent provider change or an unavailable sample is `RED`; do not start the
+change window or mutate a secret.
 
 ```sh
 delete_and_confirm_absence() {
@@ -133,7 +143,7 @@ rollback_fabricd() {
   set +x
   npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || return 1
   delete_and_confirm_absence || return 1
-  npx wrangler deploy --containers-rollout=none || return 1
+  npx wrangler deploy --containers-rollout=immediate || return 1
   curl --fail --silent "$HEALTH_URL" >/dev/null || return 1
   # Run the owner-supplied PROOF_ROUTE fixture with the old value here. Record
   # only its contract status; a missing or failed proof keeps rollback RED.
@@ -147,7 +157,7 @@ if test "$delete_status" -ne 0; then
   set -e
   exit 1
 fi
-npx wrangler deploy --containers-rollout=none
+npx wrangler deploy --containers-rollout=immediate
 deploy_status=$?
 if test "$deploy_status" -ne 0; then
   echo "fabricd deploy failed; rotation is RED and recovery is required" >&2
@@ -183,10 +193,11 @@ The probe is eligible for PASS only when all of these are true:
 
 1. the old value is rejected by the exact authenticated route;
 2. the new value is accepted by that same route;
-3. the worker and container version ids before and after are recorded;
-4. the image digest before and after is identical;
-5. the complete elapsed time is at most 600 seconds; and
-6. no secret value occurs in terminal output, tail output, or evidence.
+3. the two pre-mutation provider samples agree with the baseline;
+4. the worker and container version ids before and after are recorded;
+5. the image digest before and after is identical;
+6. the complete elapsed time is at most 600 seconds; and
+7. no secret value occurs in terminal output, tail output, or evidence.
 
 If the old value is accepted, the new value is rejected, the route is
 unavailable, the image digest changes, a version cannot be captured, or the
@@ -202,7 +213,7 @@ boot reload through the recovery function above. The explicit commands are:
 set +x
 npx wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || exit 1
 delete_and_confirm_absence || exit 1
-npx wrangler deploy --containers-rollout=none || exit 1
+npx wrangler deploy --containers-rollout=immediate || exit 1
 curl --fail --silent "$HEALTH_URL" >/dev/null || exit 1
 # Run the owner-supplied PROOF_ROUTE fixture with the old value and record its
 # contract status before claiming that rollback recovered the service.
