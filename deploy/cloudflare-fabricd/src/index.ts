@@ -1,7 +1,9 @@
 // corelink-fabricd on Cloudflare Containers — the proxy Worker (gap-#1 option b).
 //
-// The Rust control plane runs as ONE long-lived singleton container; this Worker
-// routes EVERY request to it and keeps it warm via a cron ping. The control plane
+// The Rust control plane runs as ONE singleton container; this Worker routes EVERY
+// request to it. Recent real activity permits the cron watchdog's health probe;
+// after 5m idle, the container may scale to zero and a later request cold-starts it.
+// The control plane
 // holds the lease ledger in memory, so all /v1 traffic MUST reach the same
 // instance — enforced by a fixed DO id (SINGLETON) + max_instances:1 (wrangler).
 //
@@ -69,7 +71,7 @@ export interface Env {
   //
   // It exists because `PgLedger::connect` fail-closes BEFORE `TcpListener::bind`:
   // when the database refuses connections the control plane cannot start, the
-  // keep-warm cron retries every minute, and every retry is another connection
+    // activity-gated cron retries every minute, and every retry is another connection
   // attempt against a database that is already refusing. On a scale-to-zero
   // provider that is worse than useless — a database woken every 60 s never
   // autosuspends, so the crash loop itself consumes the compute allowance whose
@@ -177,7 +179,7 @@ export function pgLedgerEnvVars(
 export class FabricdContainer extends Container<Env> {
   defaultPort = 8080;
   // Zero-idle-cost: sleep 5m after the last REAL request. The scheduled() cron no
-  // longer force-keeps it warm — it reads a container-free activity marker first
+  // longer probes an idle container — it reads a container-free activity marker first
   // (see fetch() override + the idle gate in scheduled()) and skips the health
   // probe once a shard is idle, so an idle fabricd actually sleeps and stops
   // billing memory. Lease state is pg-durable (DATABASE_URL), so sleeping loses
@@ -1032,8 +1034,8 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    // Keep-alive ping so the singleton never sleeps (the 24/7 knob) — AND a
-    // liveness watchdog + self-heal (2026-07-08 recurring-hang incident: the
+    // Conditional keep-alive probe for recently active shards — plus a liveness
+    // watchdog + self-heal (2026-07-08 recurring-hang incident: the
     // singleton went dark on its own, `/v1/health` timing out, needing a MANUAL
     // delete+redeploy each time).
     //
