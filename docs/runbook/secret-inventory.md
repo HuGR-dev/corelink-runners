@@ -76,7 +76,9 @@ Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 Non-secret `vars` here (not secrets): `FABRIC_NUM_SHARDS`,
 `CORELINK_INTROSPECT_URL`, `BILLING_INGEST_URL`, `BILLING_REGION`,
 `CLOUDFLARE_SPAWN_WORKER_URL`, `FABRIC_PUBLIC_BASE_URL`, `CLW_ENDPOINT`,
-`CORELINK_RUNNER_MINT_URL`, `FABRIC_EMIT_INTENT_METRICS_SIG`.
+`CORELINK_RUNNER_MINT_URL`, `FABRIC_EMIT_INTENT_METRICS_SIG`,
+`FABRIC_ADMISSION_PAUSED` (absent/exact `0` fail-open; other values pause new
+lease/admission/mint routes at the Worker edge with `503` + `Retry-After`).
 
 ## Repository, CI, and runtime surfaces
 
