@@ -21,7 +21,7 @@ redefined per story.
 | 🟢 | **LIVE-proven** — proven on the live Cloudflare deploy (dogfood/first-party) or by a green test proving the exact behavior. |
 | 🟡 | **built-not-proven** — code + tests exist behind a seam; no live end-to-end proof yet (often DEFAULT-OFF, fail-closed until armed). |
 | 🔵 | **owner-gated** — built or specced, blocked on an owner decision / deploy / purchase / GA-billing flip / real volume. |
-| ⚪ | **X4-external** — provable only with an external credential/dispatch we cannot fabricate here (a real CoreLink PAT, a real hugit dispatch, a live-account Cloudflare SDK smoke). |
+| ⚪ | **X4-external** — provable only with an external credential/dispatch we cannot fabricate here (a real CoreLink PAT, a direct customer fixture, a live-account Cloudflare SDK smoke). |
 | ⚫ | **INERT/planned** — built-but-unwired into the live composition, or planned (Workspaces SKUs, multi-size resolver, durable queue). |
 
 **Standing tense discipline (a single caveat, referenced — never repeated per story).** Production
@@ -249,7 +249,7 @@ this path today (MEMORY: rota-a).
   label outside the corelink family, the Worker refuses to serve it (no partial
   match) so GitHub never assigns a job the runner can't satisfy.
 - *Full cache-warm `[clw] cache hit` smoke* is **⚪ X4-external** — needs a real
-  CoreLink PAT or a real hugit dispatch (MEMORY: rota-a correction-3).
+  CoreLink PAT or a direct customer fixture (MEMORY: rota-a correction-3).
 - *Baked toolchain menu (F4.1)* — 🟢 LIVE. ONE `runs-on: corelink` image serves the
   common toolchain menu, checked on a live lease (run 31743741259). Precisely what
   that run tested: **exercised** (compiled/ran real work) — **Rust 1.96** (`rustc m.rs
@@ -2094,7 +2094,7 @@ upgrade N (S12.3), never to bypass the cap.
 **Acceptance / evidence:** GitHub App live (installation 150584374); dogfood fleet uses it. Full
 cache-hit smoke is ⚪ X4-external.
 **Variations & failures:**
-- *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or hugit dispatch, S1.1.4).
+- *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or direct customer fixture, S1.1.4).
 - *Fall back to the builder Mac* — revert the `runs-on:` label in one line (S9.3); reserved `corelink-builder` is the self-hosted Mac, never a fleet label (S1.1.4).
 - *App creds absent* — the mint path is inert, jobs fall back (S1.1.3 uninstall = fail-safe).
 **Feature(s):** F-7.1 — Autoscaler Stage B · dogfood fleet.
@@ -4079,22 +4079,21 @@ S5.2.2).
 ## Theme 16.1 — The conformance-vector drift tripwire
 
 ### S16.1 — A vector diff caught (the drift tripwire fires) 🟢 LIVE-proven (golden tests)
-**As the seam owner**, **I want** any divergence between the fabric's wire types and the frozen contract to **break a test loudly**, **so that** a drift is caught in CI, never shipped as a silent incompatibility with hugit.
+**As the CoreLink contract owner**, **I want** any divergence between the fabric's wire types and the frozen contract to **break a test loudly**, **so that** a drift is caught in CI, never shipped as a silent incompatibility for a downstream client.
 **Flow:**
 1. Someone edits a wire type on the fabric side (adds a field, reorders, changes a tag)
 2. the **golden test** re-serializes the type and compares it **byte-exact** against the committed conformance vector (`conformance/*.json` + `conformance/manifest.sha256`) →
 
 **mismatch ⇒ the golden test FAILS** → CI is red → the drift is **caught before merge**.
-The vectors are **byte-identical in both repos** (CLAUDE.md), so the *same* divergence
-also breaks hugit's golden tests — neither side can drift silently.
+The CoreLink vector and `manifest.sha256` are canonical for this repository; historical
+external copies are provenance and are not release dependencies.
 **Expected:** The tripwire is **structural and bilateral**: a byte-exact round-trip
 against a committed vector (e.g. `RunnerLease.json` `ab1744c9…`, `FenceManifest.json`
 `07940b9a…`, `IntentMetrics.json` `2d8d2215…`) means **any** field/shape/order change
-fails the golden test on **whichever side changed** — and because the vectors are
-committed identically in both repos, hugit's tests break too. A drift is therefore
-**never silent**: it is a red build, not a production incompatibility discovered by a
-hugit customer. The seam owner's job is to **treat a golden-test failure as a
-contract-change gate**, not a test to "fix" by regenerating the vector unilaterally.
+fails the golden test on the changed CoreLink side. A drift is therefore **never
+silent**: it is a red build, not a production incompatibility discovered by a client.
+The contract owner's job is to **treat a golden-test failure as a contract-change
+review**, not a test to "fix" by regenerating the vector without compatibility evidence.
 **Acceptance / evidence:** Byte-exact golden round-trip tests
 (`crates/corelink-runners-contracts/tests/acceptance_cf0_transcriptions.rs` "round-trip is
 not byte-exact"; `acceptance_s13_contracts.rs` "IntentMetrics golden round-trip is not
@@ -4103,11 +4102,11 @@ vectors + `manifest.sha256` (`conformance/`); CLAUDE.md wire-contract law (trans
 frozen, byte-identical, drift-tripwire).
 **Variations & failures:**
 - *A benign-looking field add* — still breaks the byte-exact vector (correct); a new
-  field is a **contract change** that must be coordinated with hugit (S16.3), not slipped
-  in — the tripwire forces the conversation.
+  field is a **contract change** handled by the CoreLink-owned S16.3 process, not slipped
+  in — the tripwire forces the review.
 - *Regenerate the vector to "fix" the red test* — the **anti-pattern**: it hides the
-  drift instead of coordinating it. A vector change is a deliberate, cross-repo,
-  owner/hugit-techlead-gated act (S16.3), never a unilateral green-the-build move.
+  drift instead of reviewing it. A vector change is a deliberate, CoreLink-owned,
+  compatibility-checked act (S16.3), never a unilateral green-the-build move.
 - *Money/type mistyping* — the s13 golden also rejects a `cost_usd_micros` float where an
   integer is required (`float_money`/`int_money` cases, S2.2.1), catching an epsilon-drift
   class of bug.
@@ -4147,44 +4146,38 @@ in both repos (CLAUDE.md).
 **Feature(s):** F-3.1, F-3.3 — No-import law (`deny.toml`) · vector-as-contract-shadow · byte-exact = transcription proof · frozen-from-hugit · runner-only-field tolerance.
 **Reality:** 🟢 LIVE-proven (no-import law).
 
-### S16.3 — Adding a new conformance vector (a coordinated contract change) 🔵 owner-gated (hugit-side PR first)
-**As the seam owner**, **I want** to add a new shared type/vector (e.g. a new `IntentMetrics` field) **without** unilaterally breaking hugit, **so that** a contract *evolution* is a coordinated, gated act, not a drift.
+### S16.3 — Adding a new conformance vector (CoreLink-owned contract change) 🟡 built-not-proven
+**As the CoreLink contract owner**, **I want** to add a new shared type/vector (e.g. a new `IntentMetrics` field) with explicit compatibility evidence, **so that** contract evolution is deliberate and does not create drift for downstream clients.
 **Flow:**
 1. A new shared vector is needed
-2. the protocol (CLAUDE.md open cross-repo seams):
+2. CoreLink updates the canonical type, versioned vector, and local golden tests:
 
-**the hugit-side PR lands first** (historically the contract was **frozen on the hugit
-side** — hugit discontinued, so the fabric now owns this contract; the fabric never added
-a shared vector unilaterally) → then the fabric transcribes the type +
-commits the **byte-identical** vector under `conformance/` → both sides' golden tests go
-green against the *same* bytes → the drift tripwire (S16.1) now guards the new type too.
-Concretely: the `IntentMetrics` conformance vector and the `hugit-c9-` container-prefix
-decision are **named open seams** that are **owner/hugit-techlead-gated** (CLAUDE.md) —
-added hugit-side-first, never unilaterally.
-**Expected:** *(honest)* A contract change is **owner-gated and ordered**: hugit-side PR
-first (it owns the frozen contract), fabric transcribes second, both commit the vector
-byte-identically. This is the **opposite** of the S16.1 anti-pattern (regenerating a
-vector to green a build): here the vector change is *intentional*, *coordinated*, and
-*gated* — the seam owner's role is to **carry the cross-repo relay** (MEMORY: cross-TL
-relay = a committed handoff doc + the owner as courier), never to edit hugit's
-expectations on this side. Until the hugit-side lands, the fabric does **not** add the
-vector (owner-gated).
-**Acceptance / evidence:** Open cross-repo seams: `IntentMetrics` vector (hugit-side PR first) +
-`hugit-c9-` container-prefix, both owner/hugit-techlead-gated (CLAUDE.md); the seam was
-historically frozen on the hugit side (historical hugit framing — hugit discontinued;
-fabric wire/envelope contract at `docs/spec/hugit-integration-contract.md`); vectors
-committed byte-identical both repos (CLAUDE.md). The `intent_metrics_sig` vector
-(`conformance/intent_metrics_sig.json`) + IntentMetrics (`2d8d2215…`) are the live
-examples of a coordinated add (S2.2.1).
+CoreLink commits the **byte-identical** vector under `conformance/`, runs the local
+golden tests, and publishes the versioned compatibility record before any client
+upgrade. The drift tripwire (S16.1) then guards the new type. The old external
+Hugit-side-first process and `hugit-c9-` namespace are historical provenance only;
+they are not current owner, techlead, PR-order, acceptance, or release gates.
+**Expected:** *(honest)* CoreLink owns and orders the change: update the type and
+vector, prove byte identity and compatibility locally, then publish the contract
+version for clients. This is the **opposite** of the S16.1 anti-pattern (regenerating
+a vector to green a build): the vector change is intentional, reviewable, and
+covered by the local golden test. No external project approval is required to update
+the CoreLink contract.
+**Acceptance / evidence:** `conformance/intent_metrics_sig.json` and the
+`corelink-runners-contracts` golden tests prove the current vector; the historical
+external contract snapshot remains provenance at
+`docs/spec/hugit-integration-contract.md`. The `IntentMetrics` vector
+(`2d8d2215…`) is the existing example of a coordinated add (S2.2.1).
 **Variations & failures:**
-- *Fabric adds the vector first* — **forbidden** (unilateral contract change); it would
-  make the fabric's expectation diverge from hugit's frozen contract. Hugit-side first.
-- *The `hugit-c9-` prefix decision* — a named owner-gated cross-repo decision (CLAUDE.md);
-  the fabric doesn't decide it, it consumes the decision once made.
-- *A new runner-only field* — NOT a shared-vector change (S16.2); the forge ignores it,
-  so it needs no hugit coordination — only *shared* vocabulary changes are gated.
-**Feature(s):** F-3.3 — Hugit-side-PR-first ordering · byte-identical add · owner/hugit-techlead-gated · cross-repo relay discipline · named open seams.
-**Reality:** 🔵 owner-gated (hugit-side PR first).
+- *A client is still on the prior vector version* — retain the prior version and
+  reject incompatible bytes explicitly; no silent reinterpretation.
+- *The historical `hugit-c9-` prefix decision* — preserved as provenance; current
+  CoreLink runtime namespaces and tests use CoreLink-owned names.
+- *A new runner-only field* — NOT a shared-vector change (S16.2); it can land under
+  CoreLink's normal review without changing the published shared vocabulary.
+**Feature(s):** F-3.3 — CoreLink-owned vector versioning · byte-identical add · local
+golden tests · compatibility evidence · historical external provenance.
+**Reality:** 🟡 built-not-proven (CoreLink-owned process).
 
 ---
 
@@ -4348,9 +4341,9 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | `result_binding_sig_v2` full-outcome | 🟢 LIVE | conformance tamper-rejection + verify_strict |
 | Direct on-ramp spawn/teardown | 🟢 LIVE | dogfood fleet, App installation 150584374 |
 | Spawn retry / reconciler / dead-letter | 🟢 LIVE | #293 deadlock fix + reconcilers |
-| Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or hugit dispatch |
-| Memoized-check consumption (hugit was intended, discontinued) | ⚪ X4 | needs a real hugit / equivalent external dispatch |
-| Agent-exec real e2e | ⚪ X4 | when hugit dials it |
+| Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or direct customer fixture |
+| Memoized-check consumption (historical external persona) | ⚪ X4 | needs a direct CoreLink check/SDK or equivalent external fixture |
+| Agent-exec real e2e | ⚪ X4 | needs a direct CoreLink CLI/SDK/customer fixture |
 | Live-account Cloudflare Containers SDK smoke | ⚪ X4 | owner-gated at deploy |
 | vCPU-h loss-impossible wall | 🔵 owner-gated | built default-off; arm `FABRIC_RUNNER_VCPU`+`max_vcpu_h` |
 | CoreLink slot-billing entitlement flip | 🔵 owner-gated | corelink-server lookup + 1st `runners_entitlement` row |
@@ -4372,7 +4365,7 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | GDPR Art. 17 erasure (`billing_events`) | 🔵 owner-gated | `docs/privacy/gdpr-erasure-billing-events.md`; SQL designed, orchestration pending |
 | Data residency / region | 🟡 built / 🔵 multi-region | region-tagged billing (S5.3.1); multi-region = M3 |
 | Tier upgrade/downgrade (live cap change) | 🔵 owner-gated | composite plan source no-restart (S5.1.1); Stripe self-serve GA |
-| Reseller / invisible-COGS (hugit) | 🔵 owner-gated | raw occupancy + attested cost; packaging decision (product.md §9.3) |
+| Reseller / invisible-COGS (historical external proposal) | ⚫ withdrawn | Hugit/githugr was a discontinued external packaging proposal; it creates no CoreLink owner or go-live gate |
 | Billing/onboarding failure modes (dunning · trial-expiry) | 🔵 owner-gated | S1.1.5–7; entitlement-revoke = no-plan refusal; CoreLink-server-side Stripe |
 | GPU / capability-gap fallback | 🔵 owner-gated | S1.3.4; subset-gate refuses unofferable kinds; GPU = M4 adjacency |
 | Time/scheduling shapes (cron · dispatch · long-job vs TTL) | 🟢 LIVE (trigger-agnostic) / 🟡 TTL | S1.6.13–14; `workflow_job`-keyed, trigger-blind; hard lease `deadline_ms` |
@@ -4389,10 +4382,10 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | The 10k-jobs/day customer (sustained throughput) | 🟡 built / 🔵 N>1 | S1.3.5; rate-vs-instantaneous cap; memoization multiplier; N>1 flip trigger |
 | Brokered external network service (registry/license/VPN) | 🟡 built / 🔵 policy | S1.6.15; `net_policy` reach + env-0 cred; VPN/private = capability gap (hybrid) |
 | Power-user run edge cases (retry · partial · SDK drift · flaky) | 🟢 LIVE (exit contract) / ⚪ live-fabric | S8.4–6; total exit contract, no-lease-leak, conformance-locked SDKs |
-| hugit-door NEG (envelope-flood · ingest-replay · dedup-exhaust) | 🟢 LIVE (bounded/scoped) | S7.13–15; bounded surfaces + `MAX_DISTINCT_TOOLS`, lease-folded HMAC, 4096-cap |
+| Memoized-check NEG (envelope-flood · ingest-replay · dedup-exhaust) | 🟢 LIVE (bounded/scoped) | S7.13–15; CoreLink-owned bounded surfaces + `MAX_DISTINCT_TOOLS`, lease-folded HMAC, 4096-cap |
 | Webhook-secret rotation with jobs in flight | 🟡 built-not-proven | S5.4.7; single-secret 401 window fail-safe-to-queued; dual-secret overlap = hardening |
 | SRE runbook-in-anger (mint/spawn/capacity/flap/counter-reset) | 🟢 LIVE (counters+logs) / 🔵 N>1 | P15/S15.1–5; `mint_failures`/`spawn_failed`/`load_shed`/`/internal/v1/status`; counters reset on restart |
-| Conformance-vector drift tripwire (hugit↔fabric seam) | 🟢 LIVE (golden tests) | P16/S16.1–3; byte-exact vectors + `manifest.sha256`; no-import law; hugit-side-PR-first |
+| Conformance-vector drift tripwire (CoreLink contract) | 🟢 LIVE (golden tests) | P16/S16.1–3; CoreLink-owned byte-exact vectors + `manifest.sha256`; no-import law; historical external PR-first process removed |
 | Incident-comms / statuspage / a11y-i18n | 🔵 owner-gated (surfaces) / 🟢 signal substrate | P17/S17.1–3; truthful signals + fail-safe posture built; statuspage/console/comms = org deliverable |
 | User-visible failure vocabulary (exact status/text/latency) | 🟢 documented | consolidated table; every failure loud, no silently-wrong-result row |
 
@@ -4522,13 +4515,13 @@ Story primary-reality distribution (the leading badge in each story heading; man
 | 🟢 LIVE-proven | 57 | Proven on the live CF path or by a green test — the moat, isolation, attestation, recovery, CLI/verify, drift tripwire. |
 | 🟡 built-not-proven | 55 | Code + tests behind a seam, DEFAULT-OFF/fail-closed; no live e2e yet (billing, ceiling-wall, usage APIs, scale extremes). |
 | 🔵 owner-gated | 41 | Built or specced, blocked on an owner action / GA billing / N>1 flip / Workspaces campaign / legal. |
-| ⚪ X4-external | 2 | Provable only with an external credential/dispatch (real CoreLink PAT, real hugit dispatch, live-account CF SDK). |
+| ⚪ X4-external | 2 | Provable only with an external credential/dispatch (real CoreLink PAT, direct customer fixture, live-account CF SDK). |
 | ⚫ INERT/planned | 0 | Not wired into the live composition / planned. |
 | **Total** | **155** | 155 stories across 17 personas. |
 
 **Honest residual (what is NOT yet 🟢 with an in-repo proof).**
 
-- The full cache-warm `[clw] cache hit` smoke, hugit memoized-check / agent-exec consumption, and the live-account CF SDK smoke are **⚪ X4-external** — un-fabricable in-repo (S1.1.4, S1.2.1, S2.1.x, S2.3.x, S8.4).
+- The full cache-warm `[clw] cache hit` smoke, direct memoized-check / agent-exec customer fixture, and the live-account CF SDK smoke are **⚪ X4-external** — un-fabricable in-repo (S1.1.4, S1.2.1, S2.1.x, S2.3.x, S8.4).
 - GA **billing / entitlement / tiering** (Stripe dunning, trial, upgrade/downgrade, flat-bill forecast) is **🔵 owner-gated** on the CoreLink slot-billing flip (P6, P12, P13, S1.1.x).
 - The **loss-impossible vCPU-h wall** is built but has no armed-live proof (S5.3.2, S1.6.12); **N>1 scale** (shard rebalance, multi-region) is owner-gated on volume (S5.2.4, S5.5.x).
 - **Workspaces** SKUs (P3) and multi-size runners (S1.3.3) ride a LIVE spine but the SKUs are ⚫/🔵 (campaign #2).
