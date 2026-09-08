@@ -40,7 +40,7 @@ Durable Object or Container behind one of them.
 | Surface | URL | Config dir | Role |
 |---|---|---|---|
 | **spawn-worker** | `https://corelink-spawn-worker.gmhelmold.workers.dev` | [`deploy/cloudflare/`](../../deploy/cloudflare/) | Autoscaler (`/webhook`) + direct runner/check-host spawn (`/v1/spawn`). Mints JIT runners, mints per-job CAS PATs, drives the reconciler cron. Runs the `RunnerContainer` / `CheckHostContainer` DOs. |
-| **fabricd** | `https://corelink-fabricd.gmhelmold.workers.dev` | [`deploy/cloudflare-fabricd/`](../../deploy/cloudflare-fabricd/) | Rust control plane (RunnerLease API + §13 envelope + attestation key). A thin proxy Worker fronts ONE long-lived **singleton** container. |
+| **fabricd** | `https://corelink-fabricd.gmhelmold.workers.dev` | [`deploy/cloudflare-fabricd/`](../../deploy/cloudflare-fabricd/) | Rust control plane (RunnerLease API + §13 envelope + attestation key). A thin proxy Worker fronts ONE **singleton** container; after 5m idle it may scale to zero and cold-start on the next request. |
 
 The two are wired: fabricd dials the spawn-worker at `POST {url}/v1/spawn` to
 provision boxes (shared `CLOUDFLARE_SPAWN_AUTH_TOKEN`). The runner boxes always
@@ -149,7 +149,9 @@ owner-gated flip — see the RAISE-N handoff). Two consequences you must know at
 ### 2a. The activity-gated watchdog
 
 The proxy Worker's `scheduled()` cron runs **every minute** (`* * * * *`,
-`wrangler.jsonc` `triggers.crons`). The schedule is not a 24/7 keep-warm promise.
+`wrangler.jsonc` `triggers.crons`). It is a conditional watchdog, not a permanent
+keepalive: recent real activity permits the health probe; idle or uncertain state
+skips it so the container can scale to zero after its 5m idle window.
 For each shard it first reads the container-free activity marker; an idle,
 missing, malformed, future, or unreadable marker refuses the `/v1/health` probe,
 so uncertainty cannot wake the container. Only a recent valid marker permits it
@@ -162,10 +164,10 @@ to:
 3. On 3 consecutive failures it calls `container.destroy()`. A **fresh instance
    cold-boots on the next request** — no manual step.
 
-An idle container is expected to reach `sleepAfter`; the cron must not wake it.
+An idle container is expected to reach `sleepAfter = "5m"`; the cron must not wake it.
 For an active shard with failures, collect the timestamped watchdog events and
 instance state for ~2–3 ticks. A `keep-warm[...]` prefix is a legacy log label,
-not evidence that 24/7 warming is enabled. If recovery does not occur, escalate
+not evidence that a recent-activity probe was permitted. If recovery does not occur, escalate
 with that evidence. Do not force a restart as a diagnostic experiment.
 
 ### 2b. Restart/rollout is an approved recovery change, not diagnosis

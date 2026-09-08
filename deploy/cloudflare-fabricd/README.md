@@ -1,7 +1,9 @@
 # Deploying `corelink-fabricd` on Cloudflare Containers (gap-#1 option b)
 
-The Rust control plane (RunnerLease API · §13 envelope · attestation key) as ONE
-singleton CF Container, fronted by a thin proxy Worker. The minute cron is an
+The Rust control plane (RunnerLease API · §13 envelope · attestation key) runs as
+ONE singleton CF Container, fronted by a thin proxy Worker. The container stays
+available while real activity is recent; after 5m without a real request it may
+scale to zero and cold-start on the next request. The minute cron is an
 activity-gated watchdog: it probes only after a recent real request and refuses
 to wake an idle or uncertain shard. The runner BOXES still spawn on
 `../cloudflare` (the spawn-Worker); this is only the control-plane host. Env
@@ -186,9 +188,10 @@ the live smoke confirms the real backends. **Never claim boxes work off the boot
 
 On 2026-07-09, a bounded validation at
 `https://corelink-fabricd.gmhelmold.workers.dev` recorded the moat path working.
-The image observed in that snapshot was `@sha256:91f4b7ea…` (the #332
-cred-redemption-fix binary, tag
-`golive-20260709-credredemption` — see wrangler.jsonc for the pin). It adds the
+That snapshot used the #332 cred-redemption-fix binary, tag
+`golive-20260709-credredemption`. The canonical configured image reference is
+the `containers[0].image` value in [`wrangler.jsonc`](./wrangler.jsonc); this
+README intentionally does not duplicate a digest that can become stale. It adds the
 `validate_mint_arm` boot guard: a successful boot checks that
 `FABRIC_PUBLIC_BASE_URL` is wired when mint is armed (the earlier `cb6fca46…`
 moat-fix binary minted a
