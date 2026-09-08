@@ -20,13 +20,13 @@ set -e
 # nerdctl exposes BuildKit through `nerdctl build`, NOT a `buildx` subcommand, so
 # an unmodified `docker buildx build …` reaches `nerdctl buildx build …` and dies
 # with "unknown shorthand flag: 't' in -t". Tooling that shells to buildx —
-# notably `wrangler containers build` (used by build-cf-container-images.yml) —
-# therefore cannot build on a CoreLink lease unless we translate the two forms it
-# emits. Plain `docker build` already works here (containerd image store), so:
+# Tooling that shells to Docker buildx must be translated before it can build on
+# a CoreLink lease. Plain `docker build` already works here (containerd image
+# store), so:
 #   - `buildx build …`             -> `build …`     (drop the `buildx` word)
-#   - `buildx imagetools inspect …`-> best-effort no-op: nerdctl has no imagetools;
-#                                     our callers `|| true` and fall back to the
-#                                     tag when the metadata query yields nothing.
+#   - `buildx imagetools inspect …`-> fail loudly: nerdctl has no imagetools;
+#                                     callers must fail closed rather than fall
+#                                     back to a mutable tag.
 #   - `buildx version`             -> nerdctl --version (cheap; no daemon needed)
 #   - any other `buildx …`         -> pass the remainder through best-effort.
 # Placed BEFORE the daemon bring-up so the no-op paths never spin up containerd.
@@ -34,7 +34,10 @@ if [ "${1:-}" = "buildx" ]; then
   shift
   case "${1:-}" in
     build) : ;;                                    # falls through: nerdctl build …
-    imagetools) exit 0 ;;                          # best-effort; caller falls back
+    imagetools)
+      echo 'docker-shim: buildx imagetools is unavailable; digest resolution must fail closed' >&2
+      exit 127
+      ;;
     version|--version) exec sudo nerdctl --version ;;
     *) : ;;                                        # best-effort passthrough
   esac

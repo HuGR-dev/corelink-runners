@@ -45,9 +45,11 @@ gh workflow run build-cf-container-images.yml --ref main
 gh run watch "$(gh run list --workflow=build-cf-container-images.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-What it does (`.github/workflows/build-cf-container-images.yml`): on
-`ubuntu-latest`, `npx wrangler containers build ../runner --tag <image>:<sha> --push`
-for **both** container images —
+What it does (`.github/workflows/build-cf-container-images.yml`): on the
+`corelink` self-hosted runner, `docker build -t <image>:<sha> <context>` first
+loads each image into the local containerd store, then
+`(cd deploy/cloudflare && npx wrangler containers push <image>:<sha>)`
+publishes it for **both** container images —
 
 | DO class | build context | image name |
 |---|---|---|
@@ -58,11 +60,11 @@ Both are rebuilt every dispatch; there is no way to build only one. The
 check-host step also compiles `corelink-check-exec-server` for musl and stages it
 into that build context first.
 
-⚠️ Known flake: this workflow has previously failed where a **local**
-`wrangler containers build` from `deploy/cloudflare/` succeeded (see the
-2026-07-21 note in `deploy/cloudflare/wrangler.jsonc`). If CI fails and you fall
-back to a local build, you own producing the digest by hand — everything from
-step 2 on is identical.
+The locked Wrangler version consumes a local image for its inspect/auth/tag/push
+sequence. The workflow therefore runs the Docker build explicitly, then uses
+Wrangler only for the authenticated registry push; the disk guard prunes the
+local image after publication. If CI fails and you fall back to a local build,
+produce the immutable digest by hand — everything from step 2 on is identical.
 
 ---
 
@@ -75,10 +77,12 @@ to pin, per image:
 gh run view <run-id> --log | grep -E 'Runner image pushed|Check-host image pushed'
 ```
 
-The workflow prefers an immutable `…@sha256:<64-hex>` (it resolves the pushed
-tag's manifest digest via `docker buildx imagetools inspect`) and falls back to
-`…:<git-sha>` only if that resolution fails. **Pin the `@sha256:` form** — a tag
-pin violates the X4 supply-chain floor.
+The workflow captures Wrangler's push output and runs
+`scripts/ci/resolve-pushed-ref.sh`, which extracts an immutable
+`…@sha256:<64-hex>` from the manifest or pushed-image lines. A missing or
+malformed digest fails the job; there is no `imagetools` lookup and no mutable
+tag fallback. **Pin the `@sha256:` form** — a tag pin violates the X4
+supply-chain floor.
 
 Edit `deploy/cloudflare/wrangler.jsonc` → `containers[]` → the entry whose
 `class_name` is `RunnerContainer`, and replace its `"image"` value. This is the

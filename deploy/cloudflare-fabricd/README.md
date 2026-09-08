@@ -239,8 +239,9 @@ operation is the Cloudflare fabric directly; validate it with the CoreLink CLI/S
 and the public API, then re-pin the returned attestation key if the approved
 CoreLink deployment changes it.
 
-**Controlled-change note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
-root, `npx wrangler containers build <repo-root> -t corelink-fabricd-fabricdcontainer:<tag> --push`
+**Controlled-change note:** to rebuild the binary from the repository root, run
+`docker build -f crates/corelink-fabric-server/Dockerfile -t corelink-fabricd-fabricdcontainer:<tag> .`
+followed by `(cd deploy/cloudflare-fabricd && npx wrangler containers push corelink-fabricd-fabricdcontainer:<tag>)`
 (the root `.dockerignore` keeps the context small), pin the returned `@sha256` digest in
 `wrangler.jsonc`, `wrangler deploy` (a NEW digest forces the container rollout; a config-only change
 does not). This is an owner-approved release procedure, never a diagnostic step.

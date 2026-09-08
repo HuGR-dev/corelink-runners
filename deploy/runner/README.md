@@ -137,7 +137,8 @@ open before `run.sh` starts. The value is never baked into the image.
 RunnerLease {
   // Cloudflare-first: the runtime image lives in the CF managed registry
   // (registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer),
-  // built from this Dockerfile via `wrangler containers build`. NOT ghcr.
+  // built locally with Docker, then published via `wrangler containers push`.
+  // NOT ghcr.
   image: "registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer@sha256:<digest>",  // X4: pinned
   env: {
     "CORELINK_RUNNER_JITCONFIG": "<jit-config-token>",            // per-job credential
@@ -185,10 +186,11 @@ exact steps, with the Cloudflare Containers API calls and how to verify the new
 image is actually running, are in
 **[`docs/runbook/runner-image-rollout.md`](../../docs/runbook/runner-image-rollout.md)**.
 
-**Cloudflare-first (live path):** the runner image is built from THIS Dockerfile by
-`wrangler containers build` (in `deploy/cloudflare/`, CI workflow
-`build-cf-container-images.yml`) and pushed to the CF managed registry — that
-CF-registry `@sha256` is what the fabric pins. No ghcr anywhere in the loop.
+**Cloudflare-first (live path):** the runner image is built from THIS Dockerfile
+with `docker build` in CI, then the local tag is published with
+`(cd deploy/cloudflare && npx wrangler containers push <image>:<sha>)` by
+`build-cf-container-images.yml`. The CF-registry `@sha256` is what the fabric
+pins. No ghcr anywhere in the loop.
 
 **Fallback-substrate manual path** (`build-and-push.sh`) — ONLY for the ADR-0008
 Northflank fallback, which cannot pull from the CF-internal registry and so needs
@@ -211,7 +213,7 @@ in the fabric's runner-lease config.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REGISTRY` | **(required — no default)** | OCI registry host; the script fails closed if unset (CF-first builds go via `wrangler containers build`, not this script) |
+| `REGISTRY` | **(required — no default)** | OCI registry host; the script fails closed if unset (CF-first builds use local `docker build` plus `wrangler containers push`, not this script) |
 | `IMAGE` | `corelink-runner` | Image name (no tag) |
 | `TAG` | `latest` | Image tag |
 | `PLATFORM` | `linux/amd64` | Build platform |
