@@ -4,7 +4,8 @@ set -euo pipefail
 umask 077
 
 readonly SCHEMA='corelink-b2-corelink-postflight-v1'
-readonly PACKAGE_ROOT="$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd)"
+PACKAGE_ROOT="$(cd -P -- "${BASH_SOURCE[0]%/*}/.." && pwd)"
+readonly PACKAGE_ROOT
 
 fail() { exit 2; }
 json() {

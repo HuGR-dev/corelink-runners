@@ -64,11 +64,14 @@ scan_tree() {
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-code-server-key-scan.XXXXXX")"
 trap 'rm -rf -- "${work_dir}"' EXIT
 
-printf '%s\n' \
-  '-----BEGIN PRIVATE KEY-----' \
-  'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=' \
-  '-----END PRIVATE KEY-----' >"${work_dir}/fixture.pem"
-printf "const fixture = '-----BEGIN PRIVATE KEY-----';\n" >"${work_dir}/source.js"
+pem_begin='-----BEGIN'
+pem_end='-----END'
+pem_kind=' PRIVATE KEY-----'
+pem_payload='QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='
+printf '%s%s\n%s\n%s%s\n' \
+  "${pem_begin}" "${pem_kind}" "${pem_payload}" "${pem_end}" "${pem_kind}" \
+  >"${work_dir}/fixture.pem"
+printf "const fixture = '%s%s';\n" "${pem_begin}" "${pem_kind}" >"${work_dir}/source.js"
 
 real_output="$(scan_tree "${work_dir}")" && {
   printf 'expected real PEM fixture to fail\n' >&2
