@@ -19,10 +19,10 @@ make_fixture() {
 }
 
 run_case() {
-  local name="$1" scenario="$2" expected="$3"; make_fixture "$name"
+  local name="$1" scenario="$2" expected="$3" stability="${4:-0}"; make_fixture "$name"
   export MOCK_STATE="$state" MOCK_SCENARIO="$scenario" MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION='version-good' MOCK_TENANT='tenant-test'
   set +e
-  "$harness" --mode mock --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --introspect-key-file "$oob/introspect" --introspect-pat-file "$oob/pat" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0 >/dev/null 2>"$tmp/$name.stderr"
+  "$harness" --mode mock --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --introspect-key-file "$oob/introspect" --introspect-pat-file "$oob/pat" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds "$stability" >/dev/null 2>"$tmp/$name.stderr"
   rc=$?; set -e
   if { [ "$expected" = pass ] && [ "$rc" = 0 ]; } || { [ "$expected" = fail ] && [ "$rc" != 0 ]; }; then :; else printf 'unexpected result for %s (rc=%s)\n' "$name" "$rc" >&2; exit 1; fi
   printf '%s\n' "$name=$expected"
@@ -34,6 +34,13 @@ test -f "$tmp/oob-success/fabric-observability-key-bootstrap.b64"
 test "$(stat -f '%Lp' "$tmp/oob-success/fabric-observability-key-bootstrap.b64")" = 600
 key_value="$(tr -d '\r\n' < "$tmp/oob-success/fabric-observability-key-bootstrap.b64")"
 if rg -F "$key_value" "$tmp/root-success/evidence" "$tmp/oob-success" -g '!fabric-observability-key-bootstrap.b64' >/dev/null; then exit 1; fi
+
+start="$(date +%s)"; run_case elapsed success pass 1; elapsed_seconds=$(( $(date +%s) - start )); test "$elapsed_seconds" -ge 1
+events="$(jq -r '.logs.events' "$tmp/root-elapsed/evidence/result.json")"
+line_one="$(rg -n 'stability_sample_1_at=' "$events" | cut -d: -f1)"
+line_two="$(rg -n 'stability_sample_2_at=' "$events" | cut -d: -f1)"
+line_put="$(rg -n 'secret-put rc=0' "$events" | cut -d: -f1)"
+test "$line_one" -lt "$line_two" && test "$line_two" -lt "$line_put"
 
 run_case drift drift fail
 test ! -f "$tmp/state-drift.secret-put"

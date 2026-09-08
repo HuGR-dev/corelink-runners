@@ -9,7 +9,7 @@ cmd="${1:-} ${2:-} ${3:-}"
 case "$cmd" in
   'deployments list --name')
     n=0; [ -f "$state.deployments" ] && n="$(cat "$state.deployments")"; n=$((n+1)); printf '%s\n' "$n" > "$state.deployments"
-    if [ "$scenario" = drift ] && [ "$n" -ge 2 ]; then version='version-drift'; fi
+    if [ "$scenario" = drift ] && [ "$n" -ge 3 ]; then version='version-drift'; fi
     printf '[{"created_on":"2026-09-08T00:00:00Z","versions":[{"version_id":"%s"}]}]\n' "$version";;
   'containers info '* )
     actual="$digest"
