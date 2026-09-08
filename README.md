@@ -2,8 +2,9 @@
 
 **Ephemeral, cache-warm CI/build compute — billed by concurrency, not minutes.**
 
-CoreLink expansion campaign #1. The compute substrate beneath CoreLink Cache and
-beneath hugit's memoized-CI forge:
+CoreLink expansion campaign #1. The compute substrate for CoreLink Cache and
+direct CoreLink consumers. The former Hugit memoized-CI integration was a
+discontinued external design and is retained only in historical provenance:
 
 ```
 HuGR (the company / brand)
@@ -11,7 +12,6 @@ HuGR (the company / brand)
      ├─ Cache        — content-addressed CAS + Action Cache   (live)
      ├─ Runners      — ephemeral compute on the cache         (THIS REPO)
      └─ Workspaces   — workspace-as-object                    (campaign #2)
-   hugit (the forge for agent fleets)                         (BUILT)
 ```
 
 ## What it is
@@ -118,7 +118,7 @@ Northflank remains the ADR-0008 fallback substrate (not the live one) — see
 
 What remains before paying customers: the CoreLink auth+billing flip
 (`FABRIC_AUTH_BACKEND=corelink`, pending corelink-server `runners_entitlement`),
-hugit adopting `result_binding_sig_v2`, and M2 self-serve onboarding.
+M2 self-serve onboarding, and the direct customer validation/GA checklist.
 
 ## Quickstart — local single-tenant fabric
 
