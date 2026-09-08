@@ -1,8 +1,8 @@
 # Direct production rotation runbook
 
 `bin/direct-rotate-production.sh` is the approved direct path for the exposed
-Corelink secrets. It has no Hugit, Githugr, GitHub-action, controller, nonce, or
-external-verifier dependency. GitHub remains a provider used by the existing
+Corelink secrets. It has no external-project, GitHub-action, controller, nonce,
+or external-verifier dependency. GitHub remains a provider used by the existing
 Corelink fleet-busy implementation.
 
 It defaults to an inert plan. A live invocation must supply the two exact
