@@ -1,0 +1,9 @@
+{
+  "cycles": 10,
+  "mutated": false,
+  "observed_at": "2026-09-08T03:43:19.198903Z",
+  "raw_logs_retained": false,
+  "schema": "corelink/b2-worker-matrix/v1",
+  "stable_version": "1418af47-d71a-488f-89a6-cbb9173402bd",
+  "status": "PLAN_ONLY"
+}

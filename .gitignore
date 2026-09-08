@@ -1,0 +1,25 @@
+# Rust (once code exists)
+/target
+**/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# TechLead profile — never committed (owner mandate)
+/.techlead/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Agent worktrees / scratch
+/.claude/worktrees/
+
+# wrangler local state
+.wrangler/
+deploy/check-host/corelink-check-exec-server
+
+# Python operational harnesses
+**/__pycache__/
+**/*.pyc
+# wrangler deploy --outdir output
+deploy/cloudflare/dist/
