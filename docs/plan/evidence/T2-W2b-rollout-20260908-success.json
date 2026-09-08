@@ -1,0 +1,65 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w2b-rollout-20260908-success",
+  "kind": "deploy+probe",
+  "status": "PASS",
+  "observed_at": "2026-09-08T00:59:10Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "9fb7cc4890ee83248caf2694bfb5d39f4e45c7d8",
+    "path": "docs/plan/evidence/T2-W2b-rollout-20260908-success.json"
+  },
+  "claims": ["T2-W2b:devenv-rollout", "T2-W2b:rollback-recovery-validated"],
+  "version": {"id": "9fb7cc4890ee83248caf2694bfb5d39f4e45c7d8"},
+  "evidence": {
+    "precondition": {
+      "tip_clean": true,
+      "tip": "9fb7cc4890ee83248caf2694bfb5d39f4e45c7d8",
+      "dry_run": {
+        "result": "PASS",
+        "bindings": ["RunnerContainer", "CheckHostContainer", "CredStashDO", "MetricsDO", "ConcurrencySlotsDO", "RunnerDevEnvDO", "ContainmentDO"],
+        "containers": {
+          "runner": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+          "checkhost": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+          "devenv": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+        },
+        "paused_flags": {"AUTOSCALER_INTAKE_PAUSED": "1", "AUTOSCALER_REDRIVE_PAUSED": "1"}
+      },
+      "fleet_gate": {"started_at": "2026-09-08T00:56:26Z", "finished_at": "2026-09-08T00:56:26Z", "force": false, "polls": 1, "busy": 0, "checked": 0, "unverifiable": 0, "status": "PASS"}
+    },
+    "deploy": {
+      "command": "npx wrangler deploy --config wrangler.jsonc --name corelink-spawn-worker",
+      "worker_deployment_id": "7e60acfb-acf2-4df0-a496-52ee7460ca19",
+      "worker_version": "cb704a9d-f6e0-45d7-9e68-89a263a77993",
+      "traffic_percentage": 100,
+      "runner_container": "unchanged",
+      "checkhost_container": "unchanged",
+      "fabricd": "not targeted"
+    },
+    "devenv_application": {
+      "id": "a037c709-9f21-493c-8dcb-2414a588a1cd",
+      "name": "corelink-spawn-worker-runnerdevenvdo",
+      "state": "ready",
+      "version": 1,
+      "admin_instances_field": 7,
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+    },
+    "unchanged_refs": {
+      "runner_app_id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "runner_version": 21,
+      "runner_image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      "checkhost_app_id": "a038b8b1-aeb8-4664-a9d6-ffe65e31f0f5",
+      "checkhost_version": 4,
+      "checkhost_image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      "fabricd_app_id": "a0337af9-26db-42c0-a816-0a63ba0e58a3",
+      "fabricd_version": 26
+    },
+    "auth_expectations": [
+      {"route": "/", "http": 401},
+      {"route": "/internal/v1/metrics", "http": 401},
+      {"route": "/internal/v1/fleet/busy", "http": 401}
+    ],
+    "post_gate": {"started_at": "2026-09-08T00:59:09Z", "finished_at": "2026-09-08T00:59:10Z", "force": false, "polls": 1, "busy": 0, "checked": 0, "unverifiable": 0, "status": "PASS"},
+    "scope": {"worker_deployed": true, "devenv_created": true, "intake_paused": true, "redrive_paused": true, "fabricd_changed": false, "rollback_required": false}
+  }
+}
