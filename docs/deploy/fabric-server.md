@@ -128,7 +128,7 @@ curl http://localhost:8080/v1/health
 
 Owner decision 2026-06-25 (gap #1 → b): the planned deployment places
 `corelink-fabricd` in the prod control-plane role. That plan would light up the
-killer (githugr/hugit per-PR attested cost) AND the M1 self-serve direct front door;
+killer (direct CoreLink per-job attested cost) AND the M1 self-serve direct front door;
 the CF spawn-Worker remains the GitHub-Actions autoscaler, while fabricd supplies
 the `RunnerLease` + §13 + attestation front door. Engineering work was completed
 and tested; the remaining work is deployment and secret provisioning.
@@ -170,19 +170,19 @@ hardening, not a checkpoint-A blocker. **This host choice is the owner's call.**
 
 ### Checkpoints (each unblocks the killer's render path independently)
 
-- **(A) reachable + `HUGIT_RUNNER_HOST` set** — after fabricd deployment with the env
-  above; `curl $HUGIT_RUNNER_HOST/v1/health → ok`; a lease acquire with a real
-  tenant PAT returns `200 Held`. Hand githugr/hugit `HUGIT_RUNNER_HOST` + the
-  spawn/lease PAT.
+- **(A) reachable + `CORELINK_URL` set** — after fabricd deployment with the env
+  above; `curl $CORELINK_URL/v1/health → ok`; a lease acquire with a real
+  tenant PAT returns `200 Held`. Configure the direct CoreLink CLI/SDK with the
+  URL and tenant PAT.
 - **(B) §13 ingest available** — acquire a lease, confirm
   `GET /v1/leases/{id}/envelope/meta` returns 200 (not 404) and the box can ingest;
   per-job metrics auto-stamp each land. (Code already wired — this confirms the
   deployed path, with no additional implementation.)
 - **(C) attestation key published + enforcement on** — `GET /v1/attestation/key`
-  returns the prod pubkey; githugr's v2 verifier flips to enforce (closes the P0
-  verdict-forgery window).
-- **(D) real-land smoke** — a fleet land on the named forge renders TRUE attested
-  per-PR cost on `/r/hugit/insights` and lights the `✓ cas:…` `spend_proof`.
+  returns the prod pubkey; the CoreLink CLI/SDK verifier enforces the key (closes
+  the P0 verdict-forgery window).
+- **(D) direct smoke** — a CoreLink CLI/SDK run renders the attested per-job cost
+  on the supported usage/attestation surface and records the `spend_proof`.
 
 (A)+(B) alone make per-PR cost real. Owner-gated steps: the host bring-up, the
 `FABRIC_SIGNING_KEY` generation (`head -c 32 /dev/urandom | base64`), and the

@@ -444,7 +444,7 @@ test('JOURNEY · the queue trigger is authed & tenant-scoped; the cap is at acqu
       return check(r.status === 401, `anon trigger → ${r.status} (authed, tenant-scoped — the dedup key folds tenant)`, {
         status: r.status,
         gap: 'The TRIGGER_DEDUP_CAP=4096 insertion-capped map (at-cap: serve-but-stop-memoizing → a later duplicate re-executes as a real, separately-metered, ceiling-bounded job) can only be exercised by a large flood of distinct (item_id, tree_hash) triggers on real leases.',
-        reachableFrom: 'a hugit-driven trigger flood on admitted leases — not a single API probe; and every re-exec is itself capped+metered, so waste is ceiling-bounded, never unbounded.',
+        reachableFrom: 'a direct CoreLink CLI/SDK trigger flood on admitted leases — not a single API probe; and every re-exec is itself capped+metered, so waste is ceiling-bounded, never unbounded.',
       });
     })
     .run();

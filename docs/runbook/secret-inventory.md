@@ -164,7 +164,8 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
    §4b App-JWT probe). A 401 after rotation = the two ends drifted; re-sync.
 7. **Special cases:**
    - `FABRIC_SIGNING_KEY` — rotation invalidates all live attestations; do it only
-     in a planned window and re-publish the new `key_id` to hugit's verifier.
+     in a planned window and re-publish the new `key_id` to the CoreLink CLI/SDK
+     verifier configuration.
    - `GITHUB_APP_PRIVATE_KEY` / `FABRIC_GITHUB_APP_PRIVATE_KEY_B64` — regenerate the
      key in the GitHub App settings, re-encode PKCS#8 (`openssl pkcs8 -topk8
      -nocrypt`), set the new value, then **delete every local copy of the old and
@@ -191,7 +192,7 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
 > machine that also runs the self-hosted CI runners (i.e. the box that executes
 > workflow code). Permissions were tightened to `600` immediately; that removes
 > the ongoing exposure but does **not** undo any read that already happened.
-> `~/Downloads/githugr-clerk-pubkey.pem` is a PUBLIC key and is irrelevant here.
+> An unrelated external public key is not a CoreLink secret and is irrelevant here.
 >
 > **Step 1 confirmed:** `GITHUB_APP_PRIVATE_KEY` IS bound on `corelink-spawn-worker`
 > (checked via the CF API secrets listing), so the running fabric does not read the
