@@ -57,32 +57,72 @@ grep -q 'RUNNER_IMAGE_BUILD_NOT_REQUIRED' "$fixture/no-build.out"
 echo 'PASS validator skips unrelated changes'
 
 # Mutation tests for the workflow's trust and publication contract. Each
-# mutation must make this small contract checker fail; a green mutation means
-# the guard is vacuous.
-check_contract() {
-  local candidate=$1
-  grep -qE '^  pull_request:[[:space:]]*$' "$candidate" || return 1
-  grep -qE '^  contents:[[:space:]]+read[[:space:]]*$' "$candidate" || return 1
-  grep -q 'persist-credentials: false' "$candidate" || return 1
-  grep -q 'github.event.pull_request.number' "$candidate" || return 1
-  grep -q 'runner-image-build-validation.sh' "$candidate" || return 1
-  ! grep -qE 'pull_request_target|secrets\.|docker push|containers push|wrangler deploy' "$candidate"
-}
-check_contract "$workflow"
+# mutation must make the structural checker fail; a green mutation means the
+# guard is vacuous.
+checker="$script_dir/verify_build_only_workflow.py"
+python3 "$checker" "$workflow" "$validator"
 mutated="$fixture/mutated-workflow.yml"
 sed '/persist-credentials: false/d' "$workflow" > "$mutated"
-if check_contract "$mutated"; then
+if python3 "$checker" "$mutated" "$validator"; then
   echo 'workflow mutation (credential persistence) was not detected' >&2
   exit 1
 fi
 sed 's/pull_request:/pull_request_target:/' "$workflow" > "$mutated"
-if check_contract "$mutated"; then
+if python3 "$checker" "$mutated" "$validator"; then
   echo 'workflow mutation (trusted trigger) was not detected' >&2
   exit 1
 fi
-awk '{ print } END { print "docker push attacker/image:latest" }' "$workflow" > "$mutated"
-if check_contract "$mutated"; then
-  echo 'workflow mutation (publication) was not detected' >&2
+sed "/scripts\/ci\/runner-image-static-check\.sh'/d" "$workflow" > "$mutated"
+if python3 "$checker" "$mutated" "$validator"; then
+  echo 'workflow mutation (static-check trigger path) was not detected' >&2
   exit 1
 fi
-echo 'PASS workflow trust/publication mutations are rejected'
+sed "/scripts\/ci\/runner-image-static-check\.selftest\.sh'/d" "$workflow" > "$mutated"
+if python3 "$checker" "$mutated" "$validator"; then
+  echo 'workflow mutation (static selftest trigger path) was not detected' >&2
+  exit 1
+fi
+
+mutate_command() {
+  local replacement=$1
+  python3 - "$workflow" "$mutated" "$replacement" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, replacement = sys.argv[1:]
+text = Path(source).read_text(encoding="utf-8")
+needle = "bash scripts/ci/image-build-impact.sh"
+if needle not in text:
+    raise SystemExit("mutation anchor disappeared")
+Path(destination).write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+PY
+}
+
+expect_rejected() {
+  local label=$1
+  shift
+  mutate_command "$1"
+  if python3 "$checker" "$mutated" "$validator"; then
+    echo "workflow mutation (${label}) was not detected" >&2
+    exit 1
+  fi
+}
+
+expect_rejected 'docker buildx --push' 'docker buildx build --push .'
+expect_rejected 'docker image push' 'docker image push registry.example/image:tag'
+expect_rejected 'buildx imagetools publisher' 'docker buildx imagetools create src dst'
+expect_rejected 'docker registry output' 'docker build --output type=registry .'
+expect_rejected 'build output push=true' 'docker buildx build --output type=image,push=true .'
+expect_rejected 'nerdctl publisher' 'nerdctl push registry.example/image:tag'
+expect_rejected 'buildctl publisher' 'buildctl build --output type=registry'
+expect_rejected 'crane publisher' 'crane push image.tar registry.example/image:tag'
+expect_rejected 'skopeo publisher' 'skopeo copy image.tar docker://registry.example/image:tag'
+expect_rejected 'oras publisher' 'oras push registry.example/image:tag image.tar'
+expect_rejected 'podman publisher' 'podman push registry.example/image:tag'
+expect_rejected 'buildah publisher' 'buildah push image registry.example/image:tag'
+expect_rejected 'regctl publisher' 'regctl image copy src dst'
+expect_rejected 'wrangler publisher' 'wrangler containers push image:tag'
+expect_rejected 'package publisher' 'npm publish image.tgz'
+expect_rejected 'HTTP registry publisher' 'curl -X PUT registry.example/v2/image'
+expect_rejected 'workflow dispatch' 'gh workflow run build-cf-container-images.yml'
+echo 'PASS workflow trust and publisher mutations are rejected'

@@ -1,3 +1,4 @@
+---
 # PR-only, secretless build validation for the production runner image.
 #
 # This workflow deliberately has no secrets, publication command, or deploy
@@ -15,6 +16,9 @@ on:
       - 'scripts/ci/image-build-impact.selftest.sh'
       - 'scripts/ci/runner-image-build-validation.sh'
       - 'scripts/ci/runner-image-build-validation.selftest.sh'
+      - 'scripts/ci/runner-image-static-check.sh'
+      - 'scripts/ci/runner-image-static-check.selftest.sh'
+      - 'scripts/ci/verify_build_only_workflow.py'
 
 permissions:
   contents: read
@@ -29,7 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+      # v6.0.3
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -41,7 +46,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-          bash scripts/ci/image-build-impact.sh --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          bash scripts/ci/image-build-impact.sh \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}"
 
       - name: Build changed runner image locally
         env:
