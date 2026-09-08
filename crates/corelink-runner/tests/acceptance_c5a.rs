@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/tests/acceptance_c5a.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence acceptance_c5a test @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! WP-C5a acceptance oracle — sparse fence materialization + path enforcement.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):

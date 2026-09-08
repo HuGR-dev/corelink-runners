@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Lease lifecycle: turn a frozen [`RunnerLease`] into a per-job container
 //! spec, and drive commands on the runner box.
 //!
@@ -19,7 +19,7 @@ use crate::namespace::JOB_PREFIX;
 ///
 /// C2a's isolation contract requires an **isolated network namespace**. The
 /// accepted isolated policy names are `none` · `isolated` · `deny-all` · `""`.
-/// (`hermetic` is deliberately NOT an alias — hugit uses `none`, which matches
+/// (`hermetic` is deliberately NOT an alias — the contract uses `none`, which matches
 /// the frozen rule; a second spelling is surface with no gain, 2026-07-07.) Any
 /// other policy name is rejected as out of scope for C2a (egress policies are a
 /// later, broker-mediated concern).
@@ -52,7 +52,7 @@ pub struct ContainerSpec {
     /// In-container path mounted as a private tmpfs (the lease's `tmp_root`).
     pub tmp_root: String,
     /// Whether the container runs with **no** network device (`--network
-    /// none`). `true` for every CHECK lease (the hermetic / hugit / §3 exec
+    /// none`). `true` for every CHECK lease (the hermetic / §3 exec
     /// path) — the C2a isolation floor. `false` ONLY for a runner lease, and
     /// only in concert with `allow_egress`.
     pub no_network: bool,
@@ -121,7 +121,7 @@ impl ContainerSpec {
     /// time, before `docker run`.
     pub fn from_lease(lease: &RunnerLease, image: &str) -> Result<Self> {
         Self::validate_lease_image(lease, image)?;
-        // CHECK lease (hermetic / hugit / §3 exec): network-isolated only.
+        // CHECK lease (hermetic / §3 exec): network-isolated only.
         if !requires_no_network(&lease.net_policy) {
             bail!(
                 "net_policy {:?} is not isolated; C2a v0 supports only \
@@ -182,7 +182,7 @@ impl ContainerSpec {
     }
 
     /// Derive an **agent-lease** spec (agent-exec, ratified (B) exec-server-drive
-    /// with hugit 2026-07-05): an egress-allowed, NON-memoized box that hugit's
+    /// with the contract owner 2026-07-05): an egress-allowed, NON-memoized box that an external
     /// OFF-box §13 agent loop drives via `POST /v1/leases/{id}/agent-exec`. Egress
     /// like a runner box, but WITHOUT the runner's GitHub-Actions machinery:
     /// `run_on_create = false` (the box is exec-driven — it waits for agent-exec
@@ -571,7 +571,7 @@ mod tests {
 
     /// RED TEAM: a CHECK lease that smuggles the runner egress policy string is
     /// REJECTED — the egress grant can never be obtained through `from_lease`,
-    /// so a forged/typo'd `net_policy` on a hugit/check lease cannot leak egress.
+    /// so a forged/typo'd `net_policy` on an external/check lease cannot leak egress.
     #[test]
     fn check_lease_forging_egress_policy_is_rejected_not_granted() {
         let mut l = lease();

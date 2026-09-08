@@ -1,5 +1,5 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
-//! corelink-runner — ephemeral runner v0 (WP-C2a, transplanted from hugit-runner).
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+//! corelink-runner — ephemeral runner v0 (WP-C2a, transplanted from transferred runner).
 //!
 //! The lifecycle + isolation half of the ephemeral runner: acquire a
 //! [`RunnerLease`](corelink_runners_contracts::RunnerLease), run **one** job in an
@@ -24,7 +24,7 @@
 //! load-bearing fence-materialized-escape that would go RED under a no-op
 //! classifier) and the WP-X4 supply-chain oracle ([`x4`]: content-pinning +
 //! verify-before-spawn fail-closed ordering over the LIVE spawn surface).
-//! The secrets broker (**C5b**) stays hugit-side (forge domain); it reaches
+//! The secrets broker (**C5b**) stays external-consumer side (forge domain); it reaches
 //! the job container over the wire seam, never via a crate link.
 //!
 //! # Runtime: container-per-job (Firecracker upgrade path)

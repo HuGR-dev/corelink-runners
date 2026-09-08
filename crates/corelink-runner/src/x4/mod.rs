@@ -1,5 +1,5 @@
-// Transplanted from hugit/crates/corelink-invariants/x4/lib.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
-//! WP-X4 — supply-chain invariant oracle (transferred from hugit-invariants).
+// Transplanted from the transferred X4 invariant module @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
+//! WP-X4 — supply-chain invariant oracle (transferred from the X4 invariant module).
 //!
 //! This crate proves the supply chain is **pinned and verified end-to-end**
 //! without owning any production path. It consumes the runner-spawn surface

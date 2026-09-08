@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! WP-E4 acceptance oracle — Actions-YAML compatibility shim.
 //!
 //! One `#[test]` per owned acceptance item:
