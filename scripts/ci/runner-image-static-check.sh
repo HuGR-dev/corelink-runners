@@ -50,7 +50,9 @@ if grep -q 'type=image,name=' "$shim" || grep -q '^ *--push)' "$shim"; then
   echo 'runner-image-static-check: unsupported direct-registry shim translation found' >&2
   exit 1
 fi
-if grep -q 'REF="\${IMG}:\${GITHUB_SHA}"' "$fabricd_workflow" ||
+# shellcheck disable=SC2016
+mutable_ref='REF="${IMG}:${GITHUB_SHA}"'
+if grep -qF "$mutable_ref" "$fabricd_workflow" ||
    grep -q 'imagetools) exit 0' "$shim"; then
   echo 'runner-image-static-check: mutable digest fallback or silent imagetools failure found' >&2
   exit 1
