@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 1 ] || exit 2
+case "${1##*/}" in
+  spawn.conf) printf '%s\n' "${MOCK_SPAWN_HASH:?}" ;;
+  fabricd.conf) printf '%s\n' "${MOCK_FABRICD_HASH:?}" ;;
+  *) exit 3 ;;
+esac

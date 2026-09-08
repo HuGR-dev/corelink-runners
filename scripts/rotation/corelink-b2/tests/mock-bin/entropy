@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = rand ] && [ "${2:-}" = -base64 ] && [ "${3:-}" = 32 ] || exit 2
+: "${MOCK_COUNTER_FILE:?}"
+n=0
+if [ -s "$MOCK_COUNTER_FILE" ]; then IFS= read -r n < "$MOCK_COUNTER_FILE"; fi
+n=$((n + 1))
+printf '%s\n' "$n" > "$MOCK_COUNTER_FILE"
+case "$n" in
+  1) printf '%s\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' ;;
+  2) printf '%s\n' 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=' ;;
+  3) printf '%s\n' 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=' ;;
+  4) printf '%s\n' 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=' ;;
+  *) exit 9 ;;
+esac
