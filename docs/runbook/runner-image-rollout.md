@@ -77,10 +77,12 @@ to pin, per image:
 gh run view <run-id> --log | grep -E 'Runner image pushed|Check-host image pushed'
 ```
 
-The workflow prefers an immutable `…@sha256:<64-hex>` (it resolves the pushed
-tag's manifest digest via `docker buildx imagetools inspect`) and falls back to
-`…:<git-sha>` only if that resolution fails. **Pin the `@sha256:` form** — a tag
-pin violates the X4 supply-chain floor.
+The workflow captures Wrangler's push output and runs
+`scripts/ci/resolve-pushed-ref.sh`, which extracts an immutable
+`…@sha256:<64-hex>` from the manifest or pushed-image lines. A missing or
+malformed digest fails the job; there is no `imagetools` lookup and no mutable
+tag fallback. **Pin the `@sha256:` form** — a tag pin violates the X4
+supply-chain floor.
 
 Edit `deploy/cloudflare/wrangler.jsonc` → `containers[]` → the entry whose
 `class_name` is `RunnerContainer`, and replace its `"image"` value. This is the
