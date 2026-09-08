@@ -4609,8 +4609,8 @@ const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
 const ORPHAN_SCAN_PER_PAGE = 2000;
 
 // The ONE container application whose instances this sweep may consider. The CF
-// account also hosts `corelink-prod-*` (five customer-serving CoreLink servers),
-// `githugr-*` (a separate product), the `corelink-fabricd-*` app, and this very
+// account also hosts `corelink-prod-*` (customer-serving CoreLink servers),
+// unrelated application instances, the `corelink-fabricd-*` app, and this very
 // worker's OWN `corelink-spawn-worker-checkhostcontainer` app — NONE of which
 // write `sbox:` records. Without this filter every long-running instance of every
 // one of them satisfies the "no sbox record + age>4h" orphan predicate and floods
@@ -4620,7 +4620,7 @@ const ORPHAN_SCAN_PER_PAGE = 2000;
 // signal. This is deliberately NOT a prefix match: `corelink-spawn-worker-*` also
 // matches the checkhost app (a DIFFERENT DO namespace this sweep must not reap via
 // the runner binding), and a bare `corelink` prefix would match the prod servers.
-// The app-id is the guarantee that keeps the sweep off prod and githugr.
+// The app-id is the guarantee that keeps the sweep scoped to runner instances.
 const RUNNER_APP_ID = "a03d11a2-7e03-48a4-96bb-4d2c43892cd4";
 const RUNNER_APP_NAME = "corelink-spawn-worker-runnercontainer";
 
