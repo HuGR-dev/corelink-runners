@@ -46,7 +46,9 @@ block and are not secrets.
 
 Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 `CORELINK_MINT_URL`, `RECONCILER_REPOS`, `REPO_INSTALLATION_MAP`,
-`SPAWN_WORKER_PUBLIC_URL`. KV binding `RUNNER_JOB_PATS`
+`SPAWN_WORKER_PUBLIC_URL`, `FABRIC_ADMISSION_PAUSED` (shared with fabricd;
+absent/exact `0` fail-open, other values pause new spawn admissions).
+KV binding `RUNNER_JOB_PATS`
 (id `4fb7e9c773d64f83ae3415c5a0879d66`).
 
 ---

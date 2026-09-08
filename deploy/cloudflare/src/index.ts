@@ -256,6 +256,9 @@ export interface Env {
   // Independent control domains; all three keys must differ. No shared-key fallback.
   CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
   CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
+  // Shared emergency edge freeze. Absent or exact "0" is fail-open; every
+  // other value pauses new admission/spawn work (fail-closed on bad config).
+  FABRIC_ADMISSION_PAUSED?: string;
   AUTOSCALER_INTAKE_PAUSED?: string;
   AUTOSCALER_REDRIVE_PAUSED?: string;
   CONTAINMENT_ADMIN_KEY?: string;
@@ -1921,6 +1924,28 @@ export function parseContainmentSwitch(raw: string | undefined): ContainmentSwit
   if (raw === undefined || raw === "0") return "normal";
   if (raw === "1") return "paused";
   return "invalid";
+}
+
+/**
+ * Shared cross-worker emergency freeze. Only an absent binding or exact "0"
+ * leaves new admissions open; malformed and whitespace-padded values pause
+ * them so a config mistake cannot silently re-enable spawning.
+ */
+export function admissionPaused(raw: string | undefined): boolean {
+  return raw !== undefined && raw !== "0";
+}
+
+const ADMISSION_PAUSE_RETRY_AFTER_SECONDS = "60";
+
+function admissionPausedResponse(): Response {
+  return new Response(JSON.stringify({ error: "fabric admission paused" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "retry-after": ADMISSION_PAUSE_RETRY_AFTER_SECONDS,
+    },
+  });
 }
 function trimAsciiWhitespace(value: string): string {
   // HTTP field-value whitespace is ASCII-only here. Include VT (0x0b), which
@@ -5101,6 +5126,10 @@ type ContainmentDrainDependencies = {
 };
 
 export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
+  // Containment drain creates NEW runner admissions. Completion/teardown is
+  // handled by the webhook completed leg and scheduled teardown retry below;
+  // pausing this drain leaves those lifecycle paths available.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   const claim = dependencies.claimSpawn ?? claimSpawn;
   const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
@@ -5182,6 +5211,10 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
 
 /** Recover normal arrivals without moving them into the containment backlog. */
 export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?: string): Promise<void> {
+  // Normal-intake drain creates NEW runner admissions. A completed webhook is
+  // intentionally independent and continues to revoke, tear down, and release
+  // capacity while this gate is active.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   const authority = containmentAuthority(env);
   for (const event of await authority.normalIntakePending(25)) {
     if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
@@ -5578,6 +5611,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (!mintLabels) {
         return json({ ok: true, ignored: "not our label" }, 200);
       }
+      // The shared freeze applies only to the NEW queued admission leg. Parse
+      // and route the event first so workflow_job.completed still reaches its
+      // revoke/teardown/slot-release cleanup path during containment.
+      if (evt.action === "queued" && admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
+      }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.
       const jobId = lexicalJobId;
@@ -5968,6 +6007,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
+      // This is a NEW provider admission. Existing status, exec, teardown, and
+      // egress-cutoff routes remain available so already-issued handles drain.
+      if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
+      }
       let body: SpawnBody;
       try {
         body = (await request.json()) as SpawnBody;
@@ -6235,6 +6279,9 @@ export async function redriveOrphanedJobs(
   now: number,
   dependencies: RedriveOrphanedJobsDependencies = {},
 ): Promise<void> {
+  // Re-drive is a NEW spawn admission; leave lifecycle cleanup to its own
+  // scheduled paths while the shared freeze is active.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   // Optional only for deterministic callers: production continues to invoke the
   // same functions at the same seams when no dependency object is supplied.
   const list = dependencies.listOrphanRunnerJobs ?? listOrphanRunnerJobs;
@@ -6488,6 +6535,9 @@ export async function retryOrphanedSpawns(
     installationId: string,
   ) => Promise<{ status?: string; runner_id?: number | null } | null> = fetchJobPlacement,
 ): Promise<void> {
+  // Dead-letter retry is also a NEW spawn admission. Existing teardown/status
+  // retries continue independently from the scheduled tick.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   let redriveState: ContainmentSwitch;
   try {
     redriveState = parseContainmentSwitch(env.AUTOSCALER_REDRIVE_PAUSED);
