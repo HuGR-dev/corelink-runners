@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use corelink_runner::isolation::DockerEngine;
 use corelink_runner::lease::{BoxExec, SshBox};
-use corelink_runner::namespace::JOB_TMP_ROOT;
+use corelink_runner::namespace::{JOB_TMP_ROOT, is_corelink_owned_name};
 use corelink_runner::teardown::teardown;
 use corelink_runner::ws::{
     DedupSpawner, WS_PREFIX, WorkspaceOrigin, WorkspaceState, attach_workspace, resume_workspace,
@@ -135,13 +135,41 @@ fn pinned_image(boxx: &SshBox) -> String {
         .to_string()
 }
 
+/// Select only actual C9-owned names from Docker's structured name listing.
+/// Docker's `name=` filter is substring-based, so the explicit prefix check is
+/// required to exclude names such as `other-corelink-ws-prod`.
+fn c9_sweep_candidates(listing: &str) -> impl Iterator<Item = &str> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|name| name.starts_with(WS_PREFIX) && is_corelink_owned_name(name))
+}
+
 /// Best-effort sweep of C9-prefix containers only. Scoped to `corelink-ws-`.
 fn sweep_c9(boxx: &SshBox) {
-    let _ = boxx.run(&[
-        "sh",
-        "-c",
-        &format!("docker ps -aq --filter name={WS_PREFIX} | xargs -r docker rm -f"),
+    let listing = boxx.run(&[
+        "docker",
+        "ps",
+        "-aq",
+        "--filter",
+        &format!("name={WS_PREFIX}"),
+        "--format",
+        "{{.Names}}",
     ]);
+    if let Ok(listing) = listing {
+        for name in c9_sweep_candidates(&listing.stdout) {
+            let _ = boxx.run(&["docker", "rm", "-f", name]);
+        }
+    }
+}
+
+#[test]
+fn c9_sweep_filter_excludes_other_corelink_ws_names() {
+    let listing = "corelink-ws-owned\nother-corelink-ws-prod\ncorelink-ws-\ncorelink-c2b-other\n";
+    assert_eq!(
+        c9_sweep_candidates(listing).collect::<Vec<_>>(),
+        ["corelink-ws-owned"]
+    );
 }
 
 // ── ① attach joins live workspace — no respawn ───────────────────────────────

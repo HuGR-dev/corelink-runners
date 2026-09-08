@@ -1182,7 +1182,7 @@ mod tests {
         let engine =
             NorthflankEngine::new(ExplodingTransport, NorthflankConfig::new("proj", "tok"));
         let mut bad = spec(vec![]);
-        bad.name = "hugit-job-foreign".to_string();
+        bad.name = "legacy-job-foreign".to_string();
         let err = engine
             .spawn(&bad)
             .expect_err("foreign resource names must fail before provider contact");

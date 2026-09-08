@@ -1130,7 +1130,7 @@ mod tests {
     fn spawn_rejects_foreign_resource_name_before_worker_contact() {
         let engine = CloudflareEngine::new(ExplodingTransport, cfg());
         let mut bad = runner_spec();
-        bad.name = "githugr-job-foreign".to_string();
+        bad.name = "foreign-job-foreign".to_string();
         let err = engine
             .spawn(&bad)
             .expect_err("foreign resource names must fail before Worker contact");
