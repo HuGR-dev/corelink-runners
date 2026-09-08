@@ -14,6 +14,17 @@ disk_guard="$repo/scripts/ci/container-build-disk-guard.sh"
   exit 1
 }
 
+# The locked Wrangler release does not implement a build-and-push command. Keep
+# operational docs and comments aligned with the supported local Docker build
+# followed by `wrangler containers push` flow. Assemble the probe so this check
+# cannot keep its own obsolete command alive as a false positive.
+obsolete_command='wrangler'
+obsolete_command+=' containers build'
+if git -C "$repo" grep -nFi -- "$obsolete_command" -- .; then
+  echo 'runner-image-static-check: obsolete Wrangler container-build command found' >&2
+  exit 1
+fi
+
 # These labels had no runtime consumer. Keeping them would make a stale image
 # appear to carry a trustworthy toolchain version, so the metadata contract is
 # explicit: the image may not reintroduce them without a reviewed consumer.
@@ -35,8 +46,8 @@ done
 
 # Locked Wrangler requires a locally loaded image. Verify the production path
 # explicitly prunes the exact tag and unreferenced content, with a pre-build
-# free-space guard, rather than pretending `containers build --push` streams
-# directly on this runner.
+# free-space guard, rather than relying on the unsupported Wrangler build-and-
+# push shortcut to stream directly on this runner.
 if ! grep -q 'docker build' "$build_workflow" ||
    ! grep -q 'containers push' "$build_workflow" ||
    ! grep -q 'docker build' "$fabricd_workflow" ||

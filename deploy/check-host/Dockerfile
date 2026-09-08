@@ -63,7 +63,7 @@ RUN mkdir -p /toolchain
 # COPY exec-server binary (W1, C4). Build context = deploy/check-host; the CI
 # workflow compiles `corelink-check-exec-server` for x86_64-unknown-linux-musl
 # (static — no glibc-version coupling to the runtime image) and copies the binary
-# into this directory before `wrangler containers build`.
+# into this directory before the local Docker build and Wrangler registry push.
 # -----------------------------------------------------------------------------
 COPY corelink-check-exec-server /usr/local/bin/corelink-check-exec-server
 

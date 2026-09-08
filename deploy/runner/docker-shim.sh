@@ -20,9 +20,9 @@ set -e
 # nerdctl exposes BuildKit through `nerdctl build`, NOT a `buildx` subcommand, so
 # an unmodified `docker buildx build …` reaches `nerdctl buildx build …` and dies
 # with "unknown shorthand flag: 't' in -t". Tooling that shells to buildx —
-# notably `wrangler containers build` (used by build-cf-container-images.yml) —
-# therefore cannot build on a CoreLink lease unless we translate the two forms it
-# emits. Plain `docker build` already works here (containerd image store), so:
+# Tooling that shells to Docker buildx must be translated before it can build on
+# a CoreLink lease. Plain `docker build` already works here (containerd image
+# store), so:
 #   - `buildx build …`             -> `build …`     (drop the `buildx` word)
 #   - `buildx imagetools inspect …`-> fail loudly: nerdctl has no imagetools;
 #                                     callers must fail closed rather than fall
