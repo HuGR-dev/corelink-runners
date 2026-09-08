@@ -5,8 +5,12 @@
 (per-turn checkpoint write) SHIPPED (PR #48, commit 78182c1) ·
 **Date:** 2026-06-14 · **Supersedes:** the per-instance in-memory side-table posture ·
 **Drivers:** post-go-live brutal audit finding **D3-P1** (deadline-locality cap-slot
-leak) + the hugit techlead ruling on **§13 Item 3** (durable-hook forensic SLA,
-`hugit/docs/handoff/2026-06-14-hugit-response-p2-transport-and-hook-locality.md`).
+leak) + the durable-hook forensic SLA ruling on **§13 Item 3**.
+
+> **Historical provenance:** The original §13 Item 3 and Q2 decisions were
+> recorded during the former Hugit integration. Hugit and Githugr are
+> discontinued external projects; they are not current consumers, owners,
+> dependencies, or go-live gates. The requirements below are now CoreLink-owned.
 
 ---
 
@@ -20,7 +24,7 @@ in-memory, per instance**, populated only on the instance that served the acquir
 | Side-table | Where | Failure at N>1 |
 |---|---|---|
 | `deadlines` (lease → expiry ms) | `AppState`, in-mem map | **D3-P1:** the `leases` row has no deadline column, so another instance's `reap_once` treats the lease as never-overdue and skips it. If the acquiring instance **dies/restarts** (every NEW BUILD restarts instances), its in-flight `Held` leases are unreapable by the deadline path → **cap-slot leak** until the provider hard-deadline. |
-| `hook_registry` (lease → `CaptureHook`) | `AppState`, in-mem map | **§13.5 hook-locality:** the abnormal-close partial envelope flushes only on the reaper instance that *wins* the terminal CAS; if that's not the instance holding the hook, the **forensic envelope is silently dropped**. hugit's zero-debt doctrine forbids the silent loss (Item 3 = YES, make it durable). |
+| `hook_registry` (lease → `CaptureHook`) | `AppState`, in-mem map | **§13.5 hook-locality:** the abnormal-close partial envelope flushes only on the reaper instance that *wins* the terminal CAS; if that's not the instance holding the hook, the **forensic envelope is silently dropped**. CoreLink's zero-debt doctrine forbids the silent loss (Item 3 = YES, make it durable). |
 | `slot_meter` (occupancy journal) | `AppState`, in-mem | **D3-P2:** per-instance peak ≠ global peak; the documented peak-vs-cap reconciliation lies at N>1. Observability only (cap is DB-global) — **out of scope here**, tracked separately. |
 
 Root cause is singular: **reap-critical state is not durable.** This ADR moves it
@@ -34,8 +38,9 @@ forensic envelope — never depending on the acquiring instance being alive.
    be the redacted summary — **raw `TranscriptEvent` bytes must never touch the DB.**
 2. **Frozen wire contract unchanged.** `IntentMetrics` (sha256 `2d8d2215…`) and the
    §13.5 wrapper markers stay byte-identical. This is storage, not shape.
-3. **at-least-once is sufficient** (hugit Q2d: hugit dedups by `lease_id` into an
-   append-only log). No durable exactly-once machine is required.
+3. **At-least-once is sufficient** (the accepted envelope contract permits a
+   downstream log to deduplicate by `lease_id`). No durable exactly-once machine
+   is required.
 4. **Additive, backward-compatible migration.** New **nullable** columns via
    idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in the existing self-applying
    DDL. A fresh and an already-populated DB both just work (ADR-0002 deploy posture).
@@ -58,7 +63,7 @@ map is removed (or kept only as a write-through cache).
 - **Cost:** one column, one write at acquire, one indexed read per sweep
   (partial index `WHERE state='held'` already exists; extend to carry `deadline_ms`).
 
-### Decision-2 — Durable envelope checkpoint (satisfies hugit Item 3)
+### Decision-2 — Durable envelope checkpoint (satisfies the §13.5 forensic requirement)
 
 Persist the **finalize-able redacted metrics summary** for an in-flight lease as a
 checkpoint on its row: `envelope_summary jsonb NULL` (the `IntentMetrics` scalars +
@@ -73,14 +78,14 @@ reaper (any instance):
    (`close_reason=expired|crashed`, `capture_incomplete=true`);
 3. else (no hook **and** no checkpoint — the lease died before its first turn) emits
    an explicit **`no_capture` marker** envelope — so the loss is **recorded, never
-   silent** (satisfies hugit's "never silently dropped").
+   silent** (satisfies CoreLink's "never silently dropped" requirement).
 
 - **Redaction:** the checkpoint is the **summary only** (Constraint 1). Raw
   trajectory never persists; full-fidelity capture still requires the live hook
   (step 1), and that is preserved.
-- **Delivery:** at-least-once; hugit dedups by `lease_id` (Q2d). The envelope is
-  retained until drained or the 24h TTL (hugit Q2c) — the durable row makes
-  "retain until drained" possible.
+- **Delivery:** at-least-once; downstream consumers may deduplicate by `lease_id`.
+  The envelope is retained until drained or the 24h contract TTL, and the durable
+  row makes "retain until drained" possible.
 
 ### Decision-3 — checkpoint cadence + `no_capture` acceptability ✅ (RATIFIED)
 
@@ -123,7 +128,7 @@ Both sub-points are **owner-ratified** (2026-06-14):
 - `LeaseLedger` trait grows (deadline carriage + an overdue query, and a checkpoint
   write). All three impls (`InMemory`, `File`, `Pg`) implement it; conformance suite
   extends. The frozen **wire** contract is untouched — this is the ledger's internal
-  storage contract, not the hugit seam.
+  storage contract, not a cross-project seam.
 - The multi-instance regression suite (`mod pg_runs`) extends: instance B reaps a
   lease instance A acquired (cross-instance deadline backstop); a non-owning instance
   emits the durable-checkpoint envelope.
