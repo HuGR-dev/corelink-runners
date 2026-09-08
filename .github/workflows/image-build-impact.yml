@@ -1,41 +1,33 @@
-# PR-only, detector-only guard for production image inputs.
+# PR-only, secretless build validation for the production runner image.
 #
-# This workflow deliberately has no secrets, no publication command, and no
-# Docker/BuildKit invocation. A PR that changes an image context or Dockerfile
-# gets a precise manual-build reminder without turning an untrusted checkout
-# into an image publisher.
+# This workflow deliberately has no secrets, publication command, or deploy
+# command. A pull_request checkout is untrusted; it gets a real local Docker
+# build, while the manual publication workflow remains the only registry path.
 name: image-build-impact
 
 on:
   pull_request:
     paths:
       - 'deploy/runner/**'
-      - 'deploy/check-host/**'
-      - 'deploy/**'
-      - '**/Dockerfile*'
-      - '**/*.dockerfile'
-      - 'deploy/cloudflare/Dockerfile.runner-devenv'
-      - 'deploy/cloudflare/entrypoint.sh'
-      - 'deploy/cloudflare/supervisord.conf'
-      - '.dockerignore'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
       - '.github/workflows/build-cf-container-images.yml'
-      - '.github/workflows/build-fabricd-image.yml'
+      - '.github/workflows/image-build-impact.yml'
       - 'scripts/ci/image-build-impact.sh'
       - 'scripts/ci/image-build-impact.selftest.sh'
-      - '.github/workflows/image-build-impact.yml'
+      - 'scripts/ci/runner-image-build-validation.sh'
+      - 'scripts/ci/runner-image-build-validation.selftest.sh'
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-image-build-validation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   detect:
-    name: Detect affected image inputs (no publish)
+    name: Build changed runner image (no publish)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
         with:
@@ -51,8 +43,21 @@ jobs:
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           bash scripts/ci/image-build-impact.sh --base "${BASE_SHA}" --head "${HEAD_SHA}"
 
+      - name: Build changed runner image locally
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/runner-image-build-validation.sh \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}"
+
       - name: Run detector selftest
         run: bash scripts/ci/image-build-impact.selftest.sh
+
+      - name: Run build-validation selftest
+        run: bash scripts/ci/runner-image-build-validation.selftest.sh
 
       - name: Verify image metadata and bounded publication path
         run: bash scripts/ci/runner-image-static-check.selftest.sh

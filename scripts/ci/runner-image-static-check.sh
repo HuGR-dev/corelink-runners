@@ -5,11 +5,15 @@ set -euo pipefail
 repo="$(git rev-parse --show-toplevel)"
 dockerfile="$repo/deploy/runner/Dockerfile"
 build_workflow="$repo/.github/workflows/build-cf-container-images.yml"
+validation_workflow="$repo/.github/workflows/image-build-impact.yml"
 fabricd_workflow="$repo/.github/workflows/build-fabricd-image.yml"
 shim="$repo/deploy/runner/docker-shim.sh"
 disk_guard="$repo/scripts/ci/container-build-disk-guard.sh"
+validation_script="$repo/scripts/ci/runner-image-build-validation.sh"
 
-[[ -f "$dockerfile" && -f "$build_workflow" && -f "$fabricd_workflow" && -f "$shim" && -f "$disk_guard" ]] || {
+[[ -f "$dockerfile" && -f "$build_workflow" && -f "$validation_workflow" &&
+   -f "$fabricd_workflow" && -f "$shim" && -f "$disk_guard" &&
+   -x "$validation_script" ]] || {
   echo 'runner-image-static-check: required image files are missing' >&2
   exit 1
 }
@@ -66,6 +70,32 @@ mutable_ref='REF="${IMG}:${GITHUB_SHA}"'
 if grep -qF "$mutable_ref" "$fabricd_workflow" ||
    grep -q 'imagetools) exit 0' "$shim"; then
   echo 'runner-image-static-check: mutable digest fallback or silent imagetools failure found' >&2
+  exit 1
+fi
+
+# The PR validation lane is intentionally a pull_request build-only path. It
+# must not become a pull_request_target workflow or inherit a publication token.
+if ! grep -qE '^  pull_request:[[:space:]]*$' "$validation_workflow" ||
+   ! grep -qE '^  contents:[[:space:]]+read[[:space:]]*$' "$validation_workflow" ||
+   ! grep -q 'persist-credentials: false' "$validation_workflow" ||
+   ! grep -q 'github.event.pull_request.number' "$validation_workflow" ||
+   ! grep -q 'runner-image-build-validation.sh' "$validation_workflow"; then
+  echo 'runner-image-static-check: PR build validation trust/concurrency contract missing' >&2
+  exit 1
+fi
+if grep -qE 'pull_request_target|secrets\.|docker push|containers push|wrangler deploy' "$validation_workflow"; then
+  echo 'runner-image-static-check: PR validation workflow contains trust or publication escape' >&2
+  exit 1
+fi
+
+# The validator may load a local image for the Docker build, but it may not log
+# in, push, deploy, or call the publication workflow. The manual workflow above
+# remains the only registry path.
+if ! grep -q 'docker build' "$validation_script" ||
+   ! grep -q 'image-build-impact.sh' "$validation_script" ||
+   ! grep -q 'env -u GITHUB_TOKEN' "$validation_script" ||
+   grep -qE 'docker (login|push)|containers push|wrangler|gh workflow run' "$validation_script"; then
+  echo 'runner-image-static-check: PR validator is not a secretless build-only path' >&2
   exit 1
 fi
 
