@@ -78,7 +78,7 @@
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
         "T2-W2b": "local fail-closed preflight approved; O-FLEETBUSY is now bound and proven; external/live remains blocked by O1, O-DEVENV-PIN and deploy evidence",
-        "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Final image remains pending a new digest and attestation, then T2-W2b, push/pin/deploy and ship/live evidence",
+        "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
     }
@@ -1669,8 +1669,8 @@
         "T8-W4b",
         "T7-W4b"
       ],
-      "next_action": "Source security is finally approved after scanning real PEM blocks only. The prior local image remains REJECTED history; rebuild and record a new digest and attestation, then after T2-W2b push, pin and deploy the image and collect docs/plan/evidence/T2-W4-image-ship.json; do not claim ship or live completion.",
-      "blockers": ["T2-W2b", "new image digest and attestation pending", "image push/pin/deploy absent", "latest-image ship evidence absent"],
+      "next_action": "Source security is finally approved and the image ship plus immutable desired-config pin are recorded. After T2-W2b, deploy and roll out the Worker, then collect live qualification; do not claim deploy or live completion from the ship/pin evidence.",
+      "blockers": ["T2-W2b", "Worker deploy/rollout pending", "live qualification pending"],
       "commits": [
         "ccdf2967a5996c7dc33697b086f19ff03b283f47",
         "3d5c53caf1fa00ef454ec3b630a16eb65b035f67",
@@ -1679,7 +1679,8 @@
         "c30184c36d6c6e8c5323596bd0c0cbbbb40fa156",
         "4a426e283a1c1627304c13a560a52b690661bad1",
         "377dbb0e38f58be467964ecfdae6b224d0fdcd90",
-        "defff94e401bc7dca4b70eeb709de3b2a4e76627"
+        "defff94e401bc7dca4b70eeb709de3b2a4e76627",
+        "1f4aa0f567f5da3442a45581ddc2ab625e5f03f6"
       ],
       "review": {
         "status": "pending",
@@ -1690,7 +1691,8 @@
         "Local build PASS digest sha256:3c1da7...da507 is preparation only; it is not a pushed, pinned, deployed, shipped, or live artifact.",
         "Historical local-image verdict: REJECTED for the fixture-PEM finding; no ship/live credit was granted.",
         "Source security approved at 377dbb0 after removing the fixture and adding explicit private-key scanner error handling.",
-        "Source security final approval at defff94 after scanning real PEM blocks only. Final image remains pending a new digest and attestation."
+        "Source security final approval at defff94 after scanning real PEM blocks only.",
+        "T2-W4 image ship PASS: immutable remote digest sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c is recorded at docs/plan/evidence/T2-W4-image-ship.json. RunnerDevEnvDO desired configuration is pinned to that exact immutable ref; no deploy, rollout, or live qualification is claimed."
       ],
       "historical_sprint": 2
     },
@@ -3184,6 +3186,25 @@
       "conclusion": "T2-W4 source security final approved. Preserve the prior rejected image as history; final image remains pending a new digest and attestation, with no push, pin, deploy, ship, or live credit.",
       "evidence": [
         "Private-key scanner now targets real PEM blocks only."
+      ]
+    },
+    {
+      "at": "2026-09-08T00:25:00+00:00",
+      "task": "T2-W4 image ship evidence and immutable desired-config pin",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W4-image-ship.json",
+        "docs/plan/evidence/T2-W4-image-ship-transcript-20260908.md",
+        "deploy/cloudflare/wrangler.jsonc",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W4",
+      "role": "integrator",
+      "source_commit": "1f4aa0f567f5da3442a45581ddc2ab625e5f03f6",
+      "conclusion": "Registry ship evidence is PASS and RunnerDevEnvDO desired configuration is pinned to the immutable remote digest. No Worker deploy, container rollout, or live qualification occurred or is claimed.",
+      "evidence": [
+        "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
       ]
     }
   ],
