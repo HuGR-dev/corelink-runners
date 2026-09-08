@@ -100,7 +100,7 @@ jobs:
   # does not invoke the deploy job, which would roll the container fleet.
   rotate-metrics:
     if: inputs.rotate_metrics == 'true'
-    runs-on: ubuntu-latest
+    runs-on: corelink-builder
     timeout-minutes: 10
     defaults:
       run:
