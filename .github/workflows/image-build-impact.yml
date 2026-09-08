@@ -1,0 +1,55 @@
+# PR-only, detector-only guard for production image inputs.
+#
+# This workflow deliberately has no secrets, no publication command, and no
+# Docker/BuildKit invocation. A PR that changes an image context or Dockerfile
+# gets a precise manual-build reminder without turning an untrusted checkout
+# into an image publisher.
+name: image-build-impact
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/runner/**'
+      - 'deploy/check-host/**'
+      - 'deploy/cloudflare/Dockerfile.runner-devenv'
+      - 'deploy/cloudflare/entrypoint.sh'
+      - 'deploy/cloudflare/supervisord.conf'
+      - '.dockerignore'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - '.github/workflows/build-cf-container-images.yml'
+      - '.github/workflows/build-fabricd-image.yml'
+      - 'scripts/ci/image-build-impact.sh'
+      - 'scripts/ci/image-build-impact.selftest.sh'
+      - '.github/workflows/image-build-impact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect affected image inputs (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind checkout to PR base/head
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          bash scripts/ci/image-build-impact.sh --base "${BASE_SHA}" --head "${HEAD_SHA}"
+
+      - name: Run detector selftest
+        run: bash scripts/ci/image-build-impact.selftest.sh
+
+      - name: Verify image metadata and bounded publication path
+        run: bash scripts/ci/runner-image-static-check.selftest.sh

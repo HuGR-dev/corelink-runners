@@ -19,13 +19,15 @@
 # not support. Under the zero-hosted billing block that lane is DEAD (it fails at
 # "Set up job", so the runner image could never be rebuilt). It now runs on the
 # ephemeral `corelink` fleet, DAEMONLESS, using the proven chain:
-#   1. `docker build`  — the baked docker-shim runs nerdctl/buildkit (containerd
-#      image store). Plain `docker build` works here (proven F2 + reprobed).
-#   2. `wrangler containers push <tag>` — wrangler mints the short-lived CF
-#      registry credential and pushes via the `docker` binary (-> shim -> nerdctl
-#      push). No `docker buildx`, no Docker daemon, no hosted spend. Proven
-#      end-to-end on a live lease 2026-08-17 (a build+push of a probe image
-#      returned `Pushed image: registry.cloudflare.com/.../...`).
+#   1. `wrangler containers build --push` — Wrangler authenticates the managed
+#      registry and asks Docker BuildKit for registry output. The runner shim
+#      translates Docker's buildx call to nerdctl/buildkit, so image layers are
+#      streamed to the registry without first unpacking a complete image into
+#      the lease's containerd image store.
+#   2. The manifest digest is parsed from Wrangler's push output for an
+#      immutable X4 pin. No Docker daemon, no hosted spend. This is the same
+#      proven registry path as the former build+push chain, with bounded local
+#      disk use.
 # The manifest digest is parsed from wrangler's push output for an immutable X4
 # pin; resolution fails closed if the push transcript has no valid digest.
 #
@@ -142,11 +144,11 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-spawn-worker-runnercontainer"
           TAG="${GITHUB_SHA}"
-          # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
-          # deploy/runner (Dockerfile + action-archive-pins.txt live there).
-          docker build -t "${IMAGE}:${TAG}" deploy/runner
-          # Push via wrangler (mints the CF registry cred; uses the docker binary).
-          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
+          # Context = deploy/runner (Dockerfile + action-archive-pins.txt live
+          # there). `--push` selects BuildKit registry output; it does not leave
+          # a second, unpacked copy in containerd for a later `docker push`.
+          ( cd deploy/cloudflare && npx wrangler containers build ../runner \
+              --tag "${IMAGE}:${TAG}" --push 2>&1 | tee /tmp/runner-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
@@ -174,8 +176,8 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-spawn-worker-checkhostcontainer"
           TAG="${GITHUB_SHA}"
-          docker build -t "${IMAGE}:${TAG}" deploy/check-host
-          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
+          ( cd deploy/cloudflare && npx wrangler containers build ../check-host \
+              --tag "${IMAGE}:${TAG}" --push 2>&1 | tee /tmp/checkhost-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
@@ -206,6 +208,10 @@ jobs:
           cp Cargo.toml Cargo.lock "${CONTEXT}/"
           cp -R crates "${CONTEXT}/"
           cp deploy/cloudflare/entrypoint.sh deploy/cloudflare/supervisord.conf "${CONTEXT}/"
+          # Wrangler's build command deliberately accepts a context directory
+          # (and uses its Dockerfile by name), so stage the recipe under the
+          # canonical name instead of falling back to a local containerd build.
+          cp "${DOCKERFILE}" "${CONTEXT}/Dockerfile"
 
           # Static focal guard: every source of every non-stage COPY must be
           # present in the exact context that will be handed to Docker. This
@@ -238,11 +244,11 @@ jobs:
           print(f"RunnerDevEnv context guard: checked {len(checked)} COPY source(s)")
           PY
 
-          docker build \
-            --file "${DOCKERFILE}" \
-            --tag "${IMAGE}:${TAG}" \
-            "${CONTEXT}"
-          ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
+          # Registry output keeps the temporary context bounded: BuildKit sends
+          # layers directly to Cloudflare instead of unpacking them into the
+          # lease's containerd image store before a second push step.
+          ( cd deploy/cloudflare && npx wrangler containers build "${CONTEXT}" \
+              --tag "${IMAGE}:${TAG}" --push 2>&1 | tee /tmp/devenv-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "RunnerDevEnvDO image pushed: ${REF}"
