@@ -14,7 +14,7 @@ FLEET_KEY_FILE='' INTROSPECT_KEY_FILE='' PAT_FILE='' TENANT_ID='' EVIDENCE_FILE=
 STATUS_URL='https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status'
 FLEET_URL='https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy'
 INTROSPECT_URL='https://corelink-api.humangr.com/internal/v1/auth/introspect'
-STABILITY_SECS=5 MOCK_WRANGLER='' CURL_BIN=curl TMP_DIR='' LOCK_DIR=''
+STABILITY_SECS=120 MOCK_WRANGLER='' CURL_BIN=curl TMP_DIR='' LOCK_DIR=''
 MUTATION_STARTED=0 FINAL_FROZEN=0
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
@@ -41,6 +41,7 @@ esac
 [ "$MODE" != execute ] || [ "$ACK_ARG" = "$ACK" ] || die 'exact live acknowledgement required'
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock mode requires --mock-wrangler'
 [[ "$STABILITY_SECS" =~ ^[0-9]+$ ]] || die 'stability seconds must be a nonnegative integer'
+[ "$MODE" = mock ] || [ "$STABILITY_SECS" -gt 0 ] || die 'live stability window must be positive; zero is mock-only'
 [ -n "$ROOT" ] && [ -n "$COMMIT" ] && [ -n "$VERSION" ] && [ -n "$APP_ID" ] && [ -n "$DIGEST" ] || die 'missing repository/provider pins'
 [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || die 'expected commit must be a full SHA-1'
 [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'expected image digest must be sha256:<64 hex>'
@@ -120,7 +121,6 @@ printf 'X-Corelink-Internal-Auth: ' > "$introspect_header"; tr -d '\r\n' < "$INT
 
 baseline="$(snapshot baseline)" || die 'provider baseline capture failed'; baseline_version="${baseline%%$'\t'*}"; baseline_digest="${baseline#*$'\t'}"
 [ "$baseline_version" = "$VERSION" ] || die 'provider deployment version drift'; [ "$baseline_digest" = "$DIGEST" ] || die 'provider container image digest drift'
-stable="$(snapshot stability)" || die 'provider stability capture failed'; [ "$stable" = "$baseline" ] || die 'provider version or digest changed during stability gate'; log_event "provider_stable=GREEN version=$baseline_version digest=$baseline_digest seconds=$STABILITY_SECS"
 assert_frozen "$baseline_version" || die 'fabric admission is not frozen'
 
 fleet_json="$TMP_DIR/fleet.json"; : > "$fleet_json"; chmod 600 "$fleet_json"
@@ -129,6 +129,12 @@ jq -e '((.busy // 0) | tonumber) == 0 and ((.unverifiable // 0) | tonumber) == 0
 introspect_body="$TMP_DIR/introspect.json"; : > "$introspect_body"; chmod 600 "$introspect_body"
 jq -nc --rawfile token "$PAT_FILE" '{token:($token|sub("\\n$";""))}' | "$CURL_BIN" --fail --silent --show-error --connect-timeout 10 --max-time 30 --header "@$introspect_header" --header 'content-type: application/json' --data-binary @- "$INTROSPECT_URL" > "$introspect_body" 2>"$EVIDENCE_DIR/introspect.stderr" || die 'introspection quiescence request failed'
 scrub "$EVIDENCE_DIR/introspect.stderr"; jq -e --arg tenant "$TENANT_ID" '.valid == true and .tenant_id == $tenant' "$introspect_body" >/dev/null || die 'introspection proof failed'; log_event 'quiescence=GREEN fleet_busy=0 fleet_unverifiable=0 introspection=valid'
+
+stability_sample_1_at="$(date -u +%FT%H:%M:%SZ)"; stability_1="$(snapshot stability-sample-1)" || die 'provider stability sample 1 failed'; log_event "stability_sample_1_at=$stability_sample_1_at value=$stability_1"
+if [ "$STABILITY_SECS" -gt 0 ]; then sleep "$STABILITY_SECS"; fi
+stability_sample_2_at="$(date -u +%FT%H:%M:%SZ)"; stability_2="$(snapshot stability-sample-2)" || die 'provider stability sample 2 failed'; log_event "stability_sample_2_at=$stability_sample_2_at value=$stability_2"
+[ "$stability_1" = "$baseline" ] && [ "$stability_2" = "$baseline" ] && [ "$stability_1" = "$stability_2" ] || die 'provider version or digest changed during stability window'
+log_event "provider_stable=GREEN version=$baseline_version digest=$baseline_digest seconds=$STABILITY_SECS"
 
 if [ -n "$KEY_FILE" ]; then
   if [ -e "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then safe_file "$KEY_FILE" || die 'provided key must be owner-only regular 0600 single-line file'; else key_parent="$(dirname -- "$KEY_FILE")"; safe_dir "$key_parent" || die 'generated key parent must be owner-only 0700'; tmp_key="$(mktemp "$key_parent/.obs-key.XXXXXXXX")"; chmod 600 "$tmp_key"; openssl rand -base64 48 | tr -d '\n' > "$tmp_key"; chmod 600 "$tmp_key"; mv -f -- "$tmp_key" "$KEY_FILE"; fi
