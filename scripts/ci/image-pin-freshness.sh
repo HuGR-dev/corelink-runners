@@ -79,6 +79,16 @@ declare -a CHECKHOST_PATHS=(
   "crates/corelink-check-exec-server"
   "$CONTAINER_WORKFLOW"
 )
+declare -a DEVENVD_PATHS=(
+  "deploy/cloudflare/Dockerfile.runner-devenv"
+  "deploy/cloudflare/entrypoint.sh"
+  "deploy/cloudflare/supervisord.conf"
+  "Cargo.toml"
+  "Cargo.lock"
+  "rust-toolchain.toml"
+  "crates"
+  "$CONTAINER_WORKFLOW"
+)
 declare -a FABRICD_PATHS=(
   ".dockerignore"
   "Cargo.toml"
@@ -93,6 +103,7 @@ paths_for_image() {
   case "$1" in
     corelink-spawn-worker-runnercontainer) printf '%s\n' "${RUNNER_PATHS[@]}" ;;
     corelink-spawn-worker-checkhostcontainer) printf '%s\n' "${CHECKHOST_PATHS[@]}" ;;
+    corelink-runner-devenv) printf '%s\n' "${DEVENVD_PATHS[@]}" ;;
     corelink-fabricd-fabricdcontainer) printf '%s\n' "${FABRICD_PATHS[@]}" ;;
     *) return 1 ;;
   esac

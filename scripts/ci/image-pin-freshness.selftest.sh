@@ -45,6 +45,9 @@ make_fixture() {
   printf 'fabric server\n' > "$fixture/crates/corelink-fabric-server/Dockerfile"
   printf 'fabric\n' > "$fixture/crates/corelink-fabric/lib.rs"
   printf 'contracts\n' > "$fixture/crates/corelink-runners-contracts/lib.rs"
+  printf 'devenv Dockerfile\n' > "$fixture/deploy/cloudflare/Dockerfile.runner-devenv"
+  printf 'devenv entrypoint\n' > "$fixture/deploy/cloudflare/entrypoint.sh"
+  printf 'devenv supervisor\n' > "$fixture/deploy/cloudflare/supervisord.conf"
   printf 'workflow\n' > "$fixture/.github/workflows/build-cf-container-images.yml"
   printf 'fabricd workflow\n' > "$fixture/.github/workflows/build-fabricd-image.yml"
   git -C "$fixture" add .
@@ -54,11 +57,17 @@ make_fixture() {
   local runner_digest fabricd_digest
   runner_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   fabricd_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  local devenv_digest
+  devenv_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   cat > "$fixture/deploy/cloudflare/wrangler.jsonc" <<EOF
 { "containers": [{ "class_name": "RunnerContainer",
   // build-sha: $build_sha
   // image-provenance: digest=$runner_digest build-sha=$build_sha
-  "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@$runner_digest" }] }
+  "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@$runner_digest" },
+  { "class_name": "RunnerDevEnvDO",
+  // build-sha: $build_sha
+  // image-provenance: digest=$devenv_digest build-sha=$build_sha
+  "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@$devenv_digest" }] }
 EOF
   cat > "$fixture/deploy/cloudflare-fabricd/wrangler.jsonc" <<EOF
 { "containers": [{ "class_name": "FabricdContainer",
@@ -74,7 +83,7 @@ EOF
 valid="$tmp/valid"
 make_fixture "$valid"
 "$checker" --repo "$valid" --strict > "$tmp/valid.out" || { cat "$tmp/valid.out"; fail "valid fixture rejected"; }
-grep -q 'pins=2 red=0' "$tmp/valid.out" || { cat "$tmp/valid.out"; fail "valid fixture was vacuous"; }
+grep -q 'pins=3 red=0' "$tmp/valid.out" || { cat "$tmp/valid.out"; fail "valid fixture was vacuous"; }
 echo 'PASS valid digest pins with recorded build SHA and narrow source paths'
 
 closure="$tmp/closure"
@@ -83,6 +92,13 @@ printf 'transitive workspace mutation after image build\n' >> "$closure/crates/c
 git -C "$closure" add crates/corelink-fabric-api/src/lib.rs
 git -C "$closure" commit -qm newer-fabricd-transitive-source
 expect_red "$closure" 'transitive fabricd closure source'
+
+devenv_closure="$tmp/devenv-closure"
+cp -a "$valid" "$devenv_closure"
+printf 'devenv source mutation after image build\n' >> "$devenv_closure/deploy/cloudflare/Dockerfile.runner-devenv"
+git -C "$devenv_closure" add deploy/cloudflare/Dockerfile.runner-devenv
+git -C "$devenv_closure" commit -qm newer-devenv-source
+expect_red "$devenv_closure" 'devenv closure source'
 
 lock="$tmp/lock"
 cp -a "$valid" "$lock"
@@ -146,4 +162,4 @@ git -C "$empty" add .
 git -C "$empty" commit -qm empty-pins
 expect_red "$empty" 'vacuous empty pin inventory'
 
-echo 'PASS image-pin-freshness selftest: 10/10 cases'
+echo 'PASS image-pin-freshness selftest: 11/11 cases'
