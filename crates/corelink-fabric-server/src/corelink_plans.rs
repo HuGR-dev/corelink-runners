@@ -13,9 +13,9 @@
 //! `200 {"valid":true,"tenant_id":"<uuid>","max_concurrency":<int>,
 //! "max_vcpu_h":<number?>,"plan":"<str>?"}`. Field names match the SERVER's live
 //! response (Server TL reply 2026-06-22): the tenant key is `tenant_id` (NOT
-//! `tenant`) and the informational cache tier is `plan` (NOT `plan_tier`) —
-//! these names are authoritative and the conformance vector is frozen to match.
-//! A tenant signs up on the
+//! `tenant`) and the informational cache tier is `plan` (NOT `plan_tier`) — the
+//! external CoreLink consumers already consume these names, so they are
+//! authoritative and the conformance vector is frozen to match. A tenant signs up on the
 //! platform (corelink-server: Clerk + corelink-billing), which seeds
 //! `runners_entitlement`; this consumer resolves that entitlement off the
 //! introspect response. The base shape is pinned by

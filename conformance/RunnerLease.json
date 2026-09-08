@@ -5,11 +5,11 @@
     "user:gustavo"
   ],
   "path_set": [
-    "/tmp/hugit/run/abc123",
-    "/cache/hugit/toolchains"
+    "/tmp/corelink/run/abc123",
+    "/cache/corelink/toolchains"
   ],
   "expiry": 1717003600000,
   "net_policy": "egress-deny-all",
-  "tmp_root": "/tmp/hugit/run/abc123",
+  "tmp_root": "/tmp/corelink/run/abc123",
   "state": "held"
 }

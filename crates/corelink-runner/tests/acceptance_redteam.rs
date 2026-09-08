@@ -17,11 +17,11 @@
 //! ②③④⑥ stay hugit-side with the broker.
 //!
 //! **Box-dependent**: drives the live runner box pinned by
-//! `CORELINK_RUNNER_HOST` (the operator-provided runner endpoint).
+//! `CORELINK_RUNNER_HOST` (env name preserved exactly across the transfer).
 //! When the box is unreachable it **FAILS** (not skip) — per contract. It
 //! skips only when `CORELINK_RUNNER_HOST` is unset (the bare cargo gate lane).
 //!
-//! Box-sharing: everything here is namespaced with the prefix `hugit-c5b-`;
+//! Box-sharing: everything here is namespaced with the prefix `corelink-c5b-`;
 //! spawn/probe/teardown touch only that prefix.
 
 use corelink_runner::lease::{BoxExec, SshBox};
@@ -111,7 +111,7 @@ fn item_5_escape_redteam_all_attacks_contained() {
     result.expect("escape red-team: all vectors contained");
     assert!(
         residue.is_zero(),
-        "box must have ZERO hugit-c5b-* residue; remaining: {:?}",
+        "box must have ZERO corelink-c5b-* residue; remaining: {:?}",
         residue.remaining
     );
 }

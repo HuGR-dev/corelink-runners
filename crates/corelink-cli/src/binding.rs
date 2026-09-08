@@ -84,7 +84,7 @@ pub fn verify_result_binding_v2(
     // server/runner verifier (`corelink-runner::attest::verify_raw`): the two
     // trust-primitive verifiers MUST accept the exact same canonical-signature
     // set, else a non-canonical (malleated) sig the CLI accepts would be
-    // rejected by the fabric/hugit — a verifier-consistency defect.
+    // rejected by the fabric — a verifier-consistency defect.
     Ok(vk.verify_strict(&preimage, &sig).is_ok())
 }
 

@@ -5,7 +5,7 @@
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ③ `item_3_expiry_hard_kill` — an expired lease's container is hard-killed
 //!      (SIGKILL, not graceful) and torn down; the forensic re-scan is clean.
-//!   ④ `item_4_concurrent_ge8_per_box` — ≥8 `hugit-c2b-*` containers run
+//!   ④ `item_4_concurrent_ge8_per_box` — ≥8 `corelink-c2b-*` containers run
 //!      simultaneously on the one box, every job exits 0, and all tear down to
 //!      zero residue.
 //!   ⑤ `item_5_crash_recovery_lost_detected` (R2) — a box crash mid-job is
@@ -15,14 +15,14 @@
 //!      residue. This is the ⑤ kill-test.
 //!
 //! These are **box-dependent**: they drive the live runner box pinned by
-//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
 //! unreachable they **FAIL** (not skip) — box-dependent tests must fail, never
 //! silently pass. When `CORELINK_RUNNER_HOST` is **entirely unset** (the bare
 //! cargo gate lane) the box-dependent body short-circuits.
 //!
 //! # Box-sharing (CRITICAL)
 //! WP-C5a runs on the SAME box concurrently. Every container/label this oracle
-//! creates is under the `hugit-c2b-` prefix; the concurrency census and the
+//! creates is under the `corelink-c2b-` prefix; the concurrency census and the
 //! best-effort kill-sweep are scoped to that prefix only — never to containers
 //! owned by other WPs.
 
@@ -30,6 +30,7 @@ use corelink_runner::concurrency::{C2B_PREFIX, Scheduler, c2b_container_name, c2
 use corelink_runner::expiry::{enforce_expiry, is_expired};
 use corelink_runner::isolation::{DockerEngine, Engine, RunningContainer};
 use corelink_runner::lease::{BoxExec, SshBox};
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runner::recovery::{LostDisposition, detect_and_recover};
 use corelink_runner::teardown::teardown;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
@@ -86,7 +87,7 @@ fn fresh_lease(slug: &str, expiry: u64) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -117,7 +118,7 @@ fn live_box() -> SshBox {
     boxx
 }
 
-/// Best-effort sweep of **only** `hugit-c2b-*` containers, so a prior aborted
+/// Best-effort sweep of **only** `corelink-c2b-*` containers, so a prior aborted
 /// run never poisons a census. Never touches other WPs' containers.
 fn sweep_c2b(boxx: &SshBox) {
     let _ = boxx.run(&[
@@ -224,7 +225,7 @@ fn item_4_concurrent_ge8_per_box() {
 
     assert!(
         report.peak_concurrency >= N,
-        "must reach ≥{N} concurrent hugit-c2b-* containers; peak was {}",
+        "must reach ≥{N} concurrent corelink-c2b-* containers; peak was {}",
         report.peak_concurrency
     );
     assert_eq!(
@@ -243,7 +244,7 @@ fn item_4_concurrent_ge8_per_box() {
     let census = scheduler.running_census().expect("post-batch census");
     assert_eq!(
         census, 0,
-        "no hugit-c2b-* containers may remain after batch"
+        "no corelink-c2b-* containers may remain after batch"
     );
 }
 

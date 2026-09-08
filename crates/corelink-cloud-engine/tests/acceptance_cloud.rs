@@ -146,10 +146,10 @@ fn container(name: &str) -> RunningContainer {
 
 #[test]
 fn spawn_creates_job_with_pinned_image() {
-    let create_resp = resp(200, r#"{"data":{"id":"hugit-c2b-z1"}}"#);
+    let create_resp = resp(200, r#"{"data":{"id":"corelink-c2b-z1"}}"#);
     let (engine, fake) = engine_shared(vec![create_resp]);
 
-    let spec = pinned_spec("hugit-c2b-z1");
+    let spec = pinned_spec("corelink-c2b-z1");
     let result = engine.spawn(&spec).expect("spawn should succeed");
 
     assert_eq!(fake.request_count(), 1, "exactly 1 request");
@@ -898,7 +898,7 @@ fn spawn_transport_error_fails_closed() {
     // A transport-layer error (DNS/TLS/timeout) on the create-job POST must
     // propagate as Err — never fabricate an Ok RunningContainer.
     let engine = engine_failing();
-    let spec = pinned_spec("hugit-c2b-z1");
+    let spec = pinned_spec("corelink-c2b-z1");
     assert!(
         engine.spawn(&spec).is_err(),
         "spawn must return Err on transport-layer failure (fail-closed)"

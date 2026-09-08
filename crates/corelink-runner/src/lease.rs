@@ -13,6 +13,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use corelink_runners_contracts::RunnerLease;
 
+use crate::namespace::JOB_PREFIX;
+
 /// Network policy semantics understood by the v0 runner.
 ///
 /// C2a's isolation contract requires an **isolated network namespace**. The
@@ -274,7 +276,7 @@ fn validate_tmp_root(tmp_root: &str) -> Result<()> {
 /// match `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
 fn container_name(lease_id: &str) -> String {
     let mut s = String::with_capacity(lease_id.len() + 8);
-    s.push_str("hugit-job-");
+    s.push_str(JOB_PREFIX);
     for c in lease_id.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
             s.push(c);
@@ -334,8 +336,8 @@ impl CmdOutput {
 
 /// `BoxExec` backed by `ssh` to the live runner box.
 ///
-/// Host is taken from `CORELINK_RUNNER_HOST` (the operator-provided runner
-/// endpoint). Reads the identity file from `~/.ssh/corelink-runner-01` if
+/// Host is taken from `CORELINK_RUNNER_HOST` (the suite pins
+/// `91.99.11.196`). Reads the identity file from `~/.ssh/corelink-runner-01` if
 /// present; otherwise relies on the agent / default key. This driver **never**
 /// touches the box's ssh/firewall/fail2ban config.
 #[derive(Debug, Clone)]
@@ -347,8 +349,9 @@ pub struct SshBox {
 }
 
 impl SshBox {
-    /// Construct from `CORELINK_RUNNER_HOST`, defaulting the user to `root`
-    /// and the identity to `~/.ssh/corelink-runner-01` when that file exists.
+    /// Construct from `CORELINK_RUNNER_HOST` (the env the acceptance suite pins),
+    /// defaulting the user to `root` and the identity to
+    /// `~/.ssh/corelink-runner-01` when that file exists.
     ///
     /// # Errors
     /// Fails if `CORELINK_RUNNER_HOST` is unset/empty.
@@ -510,7 +513,7 @@ mod tests {
     #[test]
     fn spec_sanitizes_name_and_forces_no_network() {
         let spec = ContainerSpec::from_lease(&lease(), PIN).unwrap();
-        assert_eq!(spec.name, "hugit-job-lease_abc_123");
+        assert_eq!(spec.name, "corelink-job-lease_abc_123");
         assert!(spec.no_network);
         assert_eq!(spec.tmp_root, "/work/tmp");
         assert_eq!(spec.image, PIN);
@@ -711,7 +714,7 @@ mod tests {
         l.tmp_root = "/$(reboot)".to_string();
         assert!(ContainerSpec::from_lease(&l, PIN).is_err());
         // a clean absolute path is accepted
-        l.tmp_root = "/hugit/tmp".to_string();
+        l.tmp_root = "/corelink/tmp".to_string();
         assert!(ContainerSpec::from_lease(&l, PIN).is_ok());
     }
 

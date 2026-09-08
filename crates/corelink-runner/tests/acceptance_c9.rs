@@ -16,7 +16,7 @@
 //!      execution produce identical observable results (same exit code + stdout).
 //!
 //! These tests are **box-dependent**: they drive the live runner box pinned by
-//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
 //! unreachable they **FAIL** (not skip) — per contract, box-dependent tests must
 //! fail, never silently pass. When `CORELINK_RUNNER_HOST` is **entirely unset**
 //! (the bare cargo gate lane) the box-dependent body short-circuits.
@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use corelink_runner::isolation::DockerEngine;
 use corelink_runner::lease::{BoxExec, SshBox};
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runner::teardown::teardown;
 use corelink_runner::ws::{
     DedupSpawner, WS_PREFIX, WorkspaceOrigin, WorkspaceState, attach_workspace, resume_workspace,
@@ -57,7 +58,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -378,8 +379,8 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
             "sh",
             "-c",
             "START=$(date +%s%N); \
-             docker run --rm --network none --tmpfs /hugit/tmp:rw,size=64m \
-             --label hugit.job=c9-timing alpine:3.20 sh -c 'echo ok' >/dev/null 2>&1; \
+             docker run --rm --network none --tmpfs /corelink/tmp:rw,size=64m \
+             --label corelink.job=c9-timing alpine:3.20 sh -c 'echo ok' >/dev/null 2>&1; \
              END=$(date +%s%N); \
              echo $(( (END - START) / 1000000 ))",
         ])

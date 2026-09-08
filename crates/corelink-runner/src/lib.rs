@@ -58,6 +58,8 @@ pub mod expiry;
 pub mod isolation;
 pub mod lease;
 pub mod materialize;
+/// CoreLink-owned runtime names, labels, and workspace paths.
+pub mod namespace;
 pub mod pin;
 pub mod recovery;
 pub mod redteam;
