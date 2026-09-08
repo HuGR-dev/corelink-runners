@@ -5,11 +5,16 @@ set -euo pipefail
 repo="$(git rev-parse --show-toplevel)"
 dockerfile="$repo/deploy/runner/Dockerfile"
 build_workflow="$repo/.github/workflows/build-cf-container-images.yml"
+validation_workflow="$repo/.github/workflows/image-build-impact.yml"
 fabricd_workflow="$repo/.github/workflows/build-fabricd-image.yml"
 shim="$repo/deploy/runner/docker-shim.sh"
 disk_guard="$repo/scripts/ci/container-build-disk-guard.sh"
+validation_script="$repo/scripts/ci/runner-image-build-validation.sh"
+build_only_checker="$repo/scripts/ci/verify_build_only_workflow.py"
 
-[[ -f "$dockerfile" && -f "$build_workflow" && -f "$fabricd_workflow" && -f "$shim" && -f "$disk_guard" ]] || {
+[[ -f "$dockerfile" && -f "$build_workflow" && -f "$validation_workflow" &&
+   -f "$fabricd_workflow" && -f "$shim" && -f "$disk_guard" &&
+   -x "$validation_script" && -f "$build_only_checker" ]] || {
   echo 'runner-image-static-check: required image files are missing' >&2
   exit 1
 }
@@ -66,6 +71,14 @@ mutable_ref='REF="${IMG}:${GITHUB_SHA}"'
 if grep -qF "$mutable_ref" "$fabricd_workflow" ||
    grep -q 'imagetools) exit 0' "$shim"; then
   echo 'runner-image-static-check: mutable digest fallback or silent imagetools failure found' >&2
+  exit 1
+fi
+
+# The PR validation lane is intentionally a pull_request build-only path. Parse
+# its literal run blocks structurally so a denied publisher cannot hide in a
+# line continuation or pass because a loose grep matched a comment.
+if ! python3 "$build_only_checker" "$validation_workflow" "$validation_script"; then
+  echo 'runner-image-static-check: PR build-only workflow contract failed' >&2
   exit 1
 fi
 
