@@ -64,9 +64,25 @@ scan_tree() {
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-code-server-key-scan.XXXXXX")"
 trap 'rm -rf -- "${work_dir}"' EXIT
 
-printf '%s\n' \
-  'REDACTED_SYNTHETIC_FIXTURE' >"${work_dir}/fixture.pem"
-printf "const fixture = 'REDACTED_SYNTHETIC_FIXTURE';\n" >"${source_dir}/source.js"
+pem_begin='-----BEGIN'
+pem_end='-----END'
+pem_kind=' PRIVATE KEY-----'
+pem_payload='QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo='
+printf '%s%s\n%s\n%s%s\n' \
+  "${pem_begin}" "${pem_kind}" "${pem_payload}" "${pem_end}" "${pem_kind}" \
+  >"${work_dir}/fixture.pem"
+printf "const fixture = '%s%s';\n" "${pem_begin}" "${pem_kind}" >"${work_dir}/source.js"
+
+real_output="$(scan_tree "${work_dir}")" && {
+  printf 'expected real PEM fixture to fail\n' >&2
+  exit 1
+}
+[[ "${real_output}" == *"${work_dir}/fixture.pem"* ]]
+[[ "${real_output}" != *"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="* ]]
+
+source_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-code-server-source.XXXXXX")"
+trap 'rm -rf -- "${work_dir}" "${source_dir}"' EXIT
+printf "const fixture = '-----BEGIN PRIVATE KEY-----';\n" >"${source_dir}/source.js"
 source_output="$(scan_tree "${source_dir}")"
 [[ -z "${source_output}" ]]
 
