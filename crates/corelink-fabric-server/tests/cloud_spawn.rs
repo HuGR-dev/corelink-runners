@@ -145,7 +145,7 @@ fn registry_unbind_unbound_is_noop() {
 fn noboxprovisioner_is_noop() {
     let reg = BoxRegistry::new();
     let prov = NoBoxProvisioner::default();
-    let spec = pinned_spec("job-noop");
+    let spec = pinned_spec("corelink-job-noop");
 
     assert!(prov.provision("l", &spec).is_ok(), "provision must be Ok");
     assert!(prov.teardown("l").is_ok(), "teardown must be Ok");
@@ -166,7 +166,7 @@ fn provision_binds_container() {
     let (engine, _fake) = make_engine(vec![resp(200, r#"{"data":{"id":"box1"}}"#)]);
     let reg = BoxRegistry::new();
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
-    let spec = pinned_spec("box1");
+    let spec = pinned_spec("corelink-job-box1");
 
     prov.provision("lease-1", &spec)
         .expect("provision must succeed");
@@ -198,7 +198,7 @@ fn provision_runner_triggers_run_on_create() {
     ]);
     let reg = BoxRegistry::new();
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
-    let mut spec = pinned_spec("box-runner");
+    let mut spec = pinned_spec("corelink-job-box-runner");
     // Runner posture: egress, run-on-create (mirrors `from_runner_lease`).
     spec.no_network = false;
     spec.allow_egress = true;
@@ -229,7 +229,7 @@ fn provision_check_does_not_trigger_run_at_spawn() {
     let (engine, fake) = make_engine(vec![resp(200, r#"{"data":{"id":"box-check"}}"#)]);
     let reg = BoxRegistry::new();
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
-    let spec = pinned_spec("box-check"); // run_on_create=false by default
+    let spec = pinned_spec("corelink-job-box-check"); // run_on_create=false by default
 
     prov.provision("lease-check", &spec)
         .expect("check provision must succeed");
@@ -247,7 +247,7 @@ fn provision_fail_closed_leaves_registry_empty() {
     let (engine, _fake) = make_engine(vec![resp(500, r#"{"error":"internal"}"#)]);
     let reg = BoxRegistry::new();
     let prov = NorthflankBoxProvisioner::new(engine, reg.clone_handle());
-    let spec = pinned_spec("box-fail");
+    let spec = pinned_spec("corelink-job-box-fail");
 
     let result = prov.provision("lease-1", &spec);
     assert!(result.is_err(), "provision must Err on spawn failure");
@@ -340,7 +340,7 @@ fn provision_then_exec_resolves_over_shared_registry() {
     let exec = EngineLeasedExec::new(Arc::clone(&engine), reg.clone_handle());
     let prov = NorthflankBoxProvisioner::new(Arc::clone(&engine), reg.clone_handle());
 
-    let spec = pinned_spec("box-shared");
+    let spec = pinned_spec("corelink-job-box-shared");
     prov.provision("lease-l", &spec)
         .expect("provision must succeed");
 
@@ -372,7 +372,7 @@ fn default_off_keeps_noboxexec_and_noboxprovisioner() {
     // AppState::new defaults to NoBoxProvisioner: provision is a no-op Ok.
     let state = bare_state();
     let reg = BoxRegistry::new();
-    let spec = pinned_spec("noop");
+    let spec = pinned_spec("corelink-job-noop");
     assert!(
         state.provisioner.provision("l", &spec).is_ok(),
         "default provisioner must be NoBoxProvisioner (no-op Ok)"
@@ -619,7 +619,7 @@ fn split_registries_exec_fails_closed() {
     let exec = EngineLeasedExec::new(Arc::clone(&engine), reg_a.clone_handle());
     let prov = NorthflankBoxProvisioner::new(Arc::clone(&engine), reg_b.clone_handle());
 
-    let spec = pinned_spec("box-split");
+    let spec = pinned_spec("corelink-job-box-split");
     prov.provision("lease-x", &spec)
         .expect("provision must succeed (binds into B)");
 
