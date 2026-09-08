@@ -47,11 +47,11 @@ in-memory state above is.)
 ## The routing problem
 Affinity needs a stable `lease_id → instance` map that the thin proxy Worker can
 resolve on every `/v1/leases/{lease_id}/…` request. Three options; the frozen
-`lease-<uuid-v4>` mint shape (`leases.rs:is_lease_id`, and on hugit's wire) is the
-key constraint — it must NOT change.
+`lease-<uuid-v4>` mint shape (`leases.rs:is_lease_id`, and on CoreLink's wire) is
+the key constraint — it must NOT change.
 
 1. **Encode the shard in the lease-id** (`lease-s<N>-<uuid>`). Simplest routing
-   (parse the id), but **CHANGES THE FROZEN WIRE SHAPE** — hugit + every
+   (parse the id), but **CHANGES THE FROZEN WIRE SHAPE** — CoreLink and every
    `is_lease_id` check + conformance vectors would need coordinated updates.
    Rejected unless we decide to version the lease-id shape.
 2. **Durable `lease_id → shard` map** (pg column or a KV/DO written at acquire,
