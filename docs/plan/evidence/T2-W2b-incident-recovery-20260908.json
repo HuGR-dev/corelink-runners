@@ -16,6 +16,7 @@
     "fabricd.health.200",
     "fabricd.attestation.200",
     "spawn.rollback.cb704.100",
+    "spawn.restore.1418.100",
     "devenv.d105.ready",
     "fleet.idle.0.0.0",
     "autoscaler.paused.1.1",
@@ -40,7 +41,9 @@
     "spawn_worker": {
       "rollback_target": "cb704a9d-f6e0-45d7-9e68-89a263a77993",
       "rollback_deployment": "200ea7f0-cd1b-47b2-8986-66ad6344612e",
-      "active_percent": 100
+      "active_percent": 100,
+      "final_active_version": "1418af47-d71a-488f-89a6-cbb9173402bd",
+      "final_restore_deployment": "794345b4-3404-465a-a256-53a652a8f9dc"
     },
     "fleet_gate": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false},
     "autoscaler": {"intake_paused": 1, "redrive_paused": 1},
@@ -54,5 +57,5 @@
       "POLL_INTERVAL_SECS=5 DEADLINE_SECS=30 FLEET_BUSY_READ_KEY=<OOB_FILE> scripts/ci/wait-for-idle-fleet.sh"
     ]
   },
-  "notes": "The no-container rollout deployed the Worker but intentionally skipped container application creation, leaving fabricd absent. Immediate rollout recreated the named app with a new UUID and provider version 1; historical provider version 26 was not recoverable through normal deployment. Service is operational on the pinned digest, but the version-26 restoration criterion remains RED. Spawn Worker rollback to cb704 succeeded at 100%. No unpause, delete, secret disclosure, or test was performed."
+  "notes": "The no-container rollout deployed the Worker but intentionally skipped container application creation, leaving fabricd absent. Immediate rollout recreated the named app with a new UUID and provider version 1; historical provider version 26 was not recoverable through normal deployment. Service is operational on the pinned digest, but the version-26 restoration criterion remains RED. Spawn Worker was temporarily rolled back to cb704 during recovery, then final known version 1418 was restored at 100% after fabricd became running. No unpause, delete, secret disclosure, or test was performed."
 }
