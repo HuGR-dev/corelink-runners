@@ -5,7 +5,7 @@
   "status": "RED",
   "observed_at": "2026-09-08T02:45:15Z",
   "source": {
-    "repository": "HuGR-Labs/corelink-runners",
+    "repository": "corelink-runners",
     "commit_sha": "4e2aff7a30b100bb06d24a79609d4644db38023d",
     "path": "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json"
   },
