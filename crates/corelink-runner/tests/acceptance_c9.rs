@@ -16,9 +16,9 @@
 //!      execution produce identical observable results (same exit code + stdout).
 //!
 //! These tests are **box-dependent**: they drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports the operator-provided endpoint). When the box is
 //! unreachable they **FAIL** (not skip) — per contract, box-dependent tests must
-//! fail, never silently pass. When `HUGIT_RUNNER_HOST` is **entirely unset**
+//! fail, never silently pass. When `CORELINK_RUNNER_HOST` is **entirely unset**
 //! (the bare cargo gate lane) the box-dependent body short-circuits.
 //!
 //! # Box-sharing
@@ -73,17 +73,17 @@ fn src_fence() -> FenceManifest {
 
 /// Whether the box-dependent acceptance lane is active.
 ///
-/// Present & non-empty `HUGIT_RUNNER_HOST` ⇒ run + FAIL on unreachable.
+/// Present & non-empty `CORELINK_RUNNER_HOST` ⇒ run + FAIL on unreachable.
 /// Entirely unset ⇒ short-circuit (bare cargo gate lane, no box).
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set in the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set in the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -158,7 +158,7 @@ fn sweep_c9(boxx: &SshBox) {
 #[test]
 fn item_1_attach_joins_live_workspace_no_respawn() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -259,7 +259,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
 #[test]
 fn item_2_resume_restores_state_fence_path_set_ceiling() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -347,7 +347,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
 #[test]
 fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -494,7 +494,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
 #[test]
 fn item_4_local_remote_identical_observable_results() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();

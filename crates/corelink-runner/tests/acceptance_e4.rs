@@ -416,7 +416,7 @@ fn item_3_secrets_not_in_logs_env() {
 /// - Single-job, sequential steps (no_nondeterminism from concurrency).
 /// - Static env: values only.
 ///
-/// Live comparison: requires `HUGIT_GH_TEST_REPO` set and a GH_TOKEN via
+/// Live comparison: requires `CORELINK_GH_TEST_REPO` set and a GH_TOKEN via
 /// broker. If unavailable → PARTIAL (not fake GREEN). The shim lane ALWAYS
 /// runs; the live GH lane is attempted when the env is set.
 #[test]
@@ -452,9 +452,9 @@ fn item_4_equivalence_deterministic_fixture() {
     }
 
     // 4c. Equivalence harness: attempt live GH comparison.
-    //     HUGIT_GH_TEST_REPO is set by run.sh; if GH_TOKEN is not available
+    //     CORELINK_GH_TEST_REPO is set by run.sh; if GH_TOKEN is not available
     //     via broker, result is PARTIAL (correct behavior, not fake GREEN).
-    let gh_repo = std::env::var("HUGIT_GH_TEST_REPO").ok();
+    let gh_repo = std::env::var("CORELINK_GH_TEST_REPO").ok();
     let harness = EquivalenceHarness::new(
         ShimExecutor::new(Box::new(NullBroker), empty_manifest()),
         gh_repo.clone(),
@@ -505,7 +505,7 @@ fn item_4_equivalence_deterministic_fixture() {
     );
     let harness_nd = EquivalenceHarness::new(
         ShimExecutor::new(Box::new(NullBroker), empty_manifest()),
-        Some("HumanGuardrail/hugit-fleet-syn-1".to_string()),
+        Some("HuGR-Labs/corelink-runners".to_string()),
     );
     let outcome_nd = harness_nd.compare(&wf_nd);
     assert!(

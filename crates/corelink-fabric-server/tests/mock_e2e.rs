@@ -1,14 +1,12 @@
 //! WP-MOCK-E2E — the living regression for the `FABRIC_MOCK_EXEC` consumer
-//! contract (githugr handoff `docs/handoff/2026-06-13-githugr-fabric-
-//! integration-answers.md`).
+//! contract.
 //!
 //! The fabric ships a mock execution backend ([`MockLeasedExec`], env
 //! `FABRIC_MOCK_EXEC`) whose stdout is FROZEN ([`MOCK_STDOUT`], sha256
 //! `a30dd181a99e2acecd791e826347f30104e7e7db30fd14035d0287affb51d254`).
-//! githugr pre-builds their offline adapter against this frozen output and
-//! against the REAL signed attestation path. Drift in `MOCK_STDOUT` or in the
-//! mock exec / attestation path breaks githugr's pre-build — and it must
-//! surface HERE first, red in this repo, before it ever reaches them.
+//! CoreLink consumers may pre-build an offline adapter against this frozen
+//! output and the REAL signed attestation path. Drift in `MOCK_STDOUT` or in
+//! the mock exec / attestation path must surface HERE first.
 //!
 //! In-process only (`tower::ServiceExt::oneshot`, no sockets), driving the
 //! REAL HTTP surface with the REAL [`MockLeasedExec`] backend wired through
@@ -44,7 +42,7 @@ use corelink_runner::envelope::{CaptureHook, EnvelopeConfig, MetricsCollector};
 use corelink_runners_contracts::CheckDef;
 use tower::ServiceExt;
 
-/// The FROZEN sha256 of [`MOCK_STDOUT`], pinned by githugr's offline adapter
+/// The FROZEN sha256 of [`MOCK_STDOUT`], pinned by the offline adapter
 /// fixtures. This is the consumer-contract tripwire (handoff 2026-06-13).
 const FROZEN_STDOUT_SHA256: &str =
     "a30dd181a99e2acecd791e826347f30104e7e7db30fd14035d0287affb51d254";
@@ -229,7 +227,7 @@ fn lp_frames(fields: &[&str]) -> Vec<u8> {
 /// (constant AND its content-address hash) → close → verify the signed
 /// attestation from the wire key. This is the single regression that goes red
 /// if `MOCK_STDOUT`, its frozen sha256, or the mock exec/attestation path ever
-/// drifts — before it can break githugr's pre-build.
+/// drifts — before it can break a consumer pre-build.
 #[tokio::test]
 async fn mock_exec_e2e_pins_consumer_contract() {
     let h = harness();
@@ -246,7 +244,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
     // 3a. The FROZEN stdout constant pins the consumer contract directly.
     assert_eq!(
         MOCK_STDOUT, "corelink-fabricd mock-exec: deterministic stub output\n",
-        "MOCK_STDOUT drifted — githugr's pinned offline fixtures break"
+        "MOCK_STDOUT drifted — pinned offline fixtures break"
     );
 
     // 3b. The fabric's OWN content address of the captured stdout EQUALS the
@@ -259,7 +257,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
     assert_eq!(
         exec_body.result.stdout_ref, expected_ref,
         "the mock stdout content-ref must equal the FROZEN sha256 \
-         {FROZEN_STDOUT_SHA256} — this is the githugr consumer-contract pin"
+         {FROZEN_STDOUT_SHA256} — this is the CoreLink consumer-contract pin"
     );
 
     // The exec attestation (chain AND result-binding) verifies against the
@@ -344,7 +342,7 @@ async fn mock_exec_e2e_pins_consumer_contract() {
 /// The published key is THE verification key for the mock path: the mock-exec
 /// attestation verifies against the endpoint-published key and against nothing
 /// else (a different fabric's key — same wire shape — must fail). This guards
-/// the attestation HALF of the consumer contract: githugr verifies the mock's
+/// the attestation HALF of the consumer contract: a consumer verifies the mock's
 /// signed result against the key it fetches, and only that key may verify it.
 #[tokio::test]
 async fn mock_attestation_verifies_only_against_published_key() {

@@ -334,8 +334,8 @@ impl CmdOutput {
 
 /// `BoxExec` backed by `ssh` to the live runner box.
 ///
-/// Host is taken from `HUGIT_RUNNER_HOST` (the suite pins
-/// `91.99.11.196`). Reads the identity file from `~/.ssh/hugit-runner-01` if
+/// Host is taken from `CORELINK_RUNNER_HOST` (the operator-provided runner
+/// endpoint). Reads the identity file from `~/.ssh/corelink-runner-01` if
 /// present; otherwise relies on the agent / default key. This driver **never**
 /// touches the box's ssh/firewall/fail2ban config.
 #[derive(Debug, Clone)]
@@ -347,19 +347,18 @@ pub struct SshBox {
 }
 
 impl SshBox {
-    /// Construct from `HUGIT_RUNNER_HOST` (the env the acceptance suite pins),
-    /// defaulting the user to `root` and the identity to
-    /// `~/.ssh/hugit-runner-01` when that file exists.
+    /// Construct from `CORELINK_RUNNER_HOST`, defaulting the user to `root`
+    /// and the identity to `~/.ssh/corelink-runner-01` when that file exists.
     ///
     /// # Errors
-    /// Fails if `HUGIT_RUNNER_HOST` is unset/empty.
+    /// Fails if `CORELINK_RUNNER_HOST` is unset/empty.
     pub fn from_env() -> Result<Self> {
-        let host = std::env::var("HUGIT_RUNNER_HOST")
+        let host = std::env::var("CORELINK_RUNNER_HOST")
             .ok()
             .filter(|h| !h.trim().is_empty())
-            .context("HUGIT_RUNNER_HOST is unset; the runner box is required")?;
+            .context("CORELINK_RUNNER_HOST is unset; the runner box is required")?;
         let identity = std::env::var("HOME").ok().and_then(|home| {
-            let p = format!("{home}/.ssh/hugit-runner-01");
+            let p = format!("{home}/.ssh/corelink-runner-01");
             std::path::Path::new(&p).exists().then_some(p)
         });
         Ok(Self {
@@ -371,22 +370,22 @@ impl SshBox {
 
 /// Path of the pinned `known_hosts` file for runner-box SSH.
 ///
-/// Overridable via `HUGIT_RUNNER_KNOWN_HOSTS`; otherwise `$HOME/.hugit/known_hosts`
-/// (falling back to a bare `.hugit/known_hosts` if `HOME` is unset). Paired with
+/// Overridable via `CORELINK_RUNNER_KNOWN_HOSTS`; otherwise `$HOME/.corelink/known_hosts`
+/// (falling back to a bare `.corelink/known_hosts` if `HOME` is unset). Paired with
 /// `StrictHostKeyChecking=accept-new` this is **trust-on-first-use, pin
 /// thereafter**: the first connection records the box's host key, and every
 /// later connection is verified against that pin — so a MITM that swaps the host
 /// key after first use is refused (unlike `StrictHostKeyChecking=no`, which
 /// silently accepts ANY key on EVERY connection and thus pins nothing).
 fn known_hosts_path() -> String {
-    if let Ok(p) = std::env::var("HUGIT_RUNNER_KNOWN_HOSTS")
+    if let Ok(p) = std::env::var("CORELINK_RUNNER_KNOWN_HOSTS")
         && !p.trim().is_empty()
     {
         return p;
     }
     match std::env::var("HOME") {
-        Ok(home) if !home.trim().is_empty() => format!("{home}/.hugit/known_hosts"),
-        _ => ".hugit/known_hosts".to_string(),
+        Ok(home) if !home.trim().is_empty() => format!("{home}/.corelink/known_hosts"),
+        _ => ".corelink/known_hosts".to_string(),
     }
 }
 
