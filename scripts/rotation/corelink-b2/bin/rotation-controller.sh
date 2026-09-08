@@ -78,7 +78,7 @@ secure_script() {
   # group/other write bit is accepted.
   [[ "$mode" =~ ^0?[0-7]{3}$ ]] || return 1
   mode="${mode#0}"
-  [ $((8#$mode & 011)) -eq 0 ] && [ $((8#$mode & 0100)) -ne 0 ]
+  [ $((8#$mode & 022)) -eq 0 ] && [ $((8#$mode & 0100)) -ne 0 ]
 }
 
 secure_config() {
@@ -150,7 +150,10 @@ secure_manifest "$MANIFEST" || refuse
 : "${ROTATION_LOCAL_CONTROLLER_SHA256:?}"
 : "${ROTATION_LOCAL_MANIFEST_SHA256:?}"
 if ! (valid_sha256 "$ROTATION_LOCAL_CONTROLLER_SHA256" && valid_sha256 "$ROTATION_LOCAL_MANIFEST_SHA256"); then refuse; fi
-if ! (owned_regular "$SCRIPT_PATH" && is_exact_mode "$SCRIPT_PATH" 700); then refuse; fi
+# Git preserves executable scripts as 0755 in the repository. Accept that
+# owner-executable, non-writable-by-group/other mode while retaining the same
+# owner, regular-file, symlink, and hash checks used for every operation script.
+secure_script "$SCRIPT_PATH" || refuse
 [ "$(hash_file "$SCRIPT_PATH")" = "$ROTATION_LOCAL_CONTROLLER_SHA256" ] || refuse
 [ "$(hash_file "$MANIFEST")" = "$ROTATION_LOCAL_MANIFEST_SHA256" ] || refuse
 
