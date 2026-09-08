@@ -68,6 +68,24 @@ of these was a silent no-op):
 Set secrets via `wrangler secret put <NAME>`; set vars in `wrangler.jsonc`'s `vars`
 block.
 
+## Emergency admission freeze
+
+Set the non-secret Worker var `FABRIC_ADMISSION_PAUSED=1` to pause new work at
+the proxy edge. The Worker returns `503` with `Retry-After: 60` before looking
+up or waking a container for these routes:
+
+- `POST /v1/leases` (new lease acquire)
+- `POST /webhooks/github` (autoscaler-driven new lease acquire)
+- `POST /v1/test/mint-cred-ticket` (dev/test ticket mint)
+
+The default is fail-open only when the binding is absent or exactly `0`. Any
+other value, including a malformed or whitespace-padded value, is treated as
+paused. Health, attestation, lease reads, existing lease execution and
+credential redemption, cancel/teardown, and close continue through the normal
+proxy path so already-issued leases can drain. Set the var back to exactly
+`0` to resume admissions; applying the change still requires the normal owner
+approved Worker rollout.
+
 ## Smoke (checkpoint A/B/C)
 ```sh
 HOST="https://corelink-fabricd.<account-subdomain>.workers.dev"   # printed by deploy
