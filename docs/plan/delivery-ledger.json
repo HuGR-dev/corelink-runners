@@ -77,7 +77,7 @@
         "T3-W9": "source_done; spawn durability source acceptance is complete. O-APP and live qualification remain external blockers; no live PASS is claimed",
         "T8-W5": "source_done (18/18); predecessor T3-W9 is source-composed; F006/F008 and live qualification remain",
         "T8-W2": "source_done (31/31); blocked by T8-W5 and the T8-W6 live refusal proof",
-        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. Canonical provider-lifecycle evidence proves A2.5; A2.7 remains RED after 5 failing test files / 10 failing tests, so the WP remains partial",
+        "T2-W2b": "retry rollout succeeded: immutable DevEnv pin deployed and application ready; failed attempt/rollback remains history. Canonical provider-lifecycle evidence proves A2.5; A2.7 local test/typecheck gate recovered at 9273080 (90 files / 1119 tests), but the documented CI deploy and current Worker /health proof remain pending, so the WP remains partial",
         "T2-W4": "source security is finally approved; the prior fixture-PEM image rejection is retained. Image ship and immutable desired-config pin are recorded; T2-W2b, Worker deploy/rollout and live qualification remain",
         "T2-W6": "local secret-rotation runbook approved; external/live blocked by O1/T2-W2b and AU1.8 execution evidence"
       }
@@ -1643,13 +1643,17 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Resolve the documented CI test gate for A2.7, then rerun the documented control-plane CI deploy and record the new version health proof. The canonical provider-lifecycle artifact proves A2.5; the successful retry deployment does not override the A2.7 RED result.",
-      "blockers": ["A2.7 documented CI test gate RED: 5 failing test files / 10 failing tests", "A2.7 documented CI control-plane /health proof remains uncredited while its required test gate is RED"],
+      "next_action": "Run the documented CI deploy path from 9273080e0485a202bdca5f1c2899e5169fb48e45 after its local test/typecheck gate passed, then record the deployed Worker version and its /health response. The canonical provider-lifecycle artifact proves A2.5; the historical retry deployment predates the current G1-G5 source tip.",
+      "blockers": ["A2.7 documented CI deploy has not run for 9273080e0485a202bdca5f1c2899e5169fb48e45", "A2.7 current deployed Worker /health proof absent"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
         "b610a924edaa224db46320d3993bea797bbe2504",
         "ac34eace117c61b1cf9c5b1ce7e85f2ee2946ef6",
-        "f8489a045caf2735333b3b973b7646017576e3ed"
+        "f8489a045caf2735333b3b973b7646017576e3ed",
+        "98dc349174812408432ba4c5897f65d5ee58df00",
+        "0b7633f8b875c79b452a54b9f896fbc39cf8413b",
+        "9463dc87620424142bfb62ed9a72cfbbbba40d0b",
+        "9273080e0485a202bdca5f1c2899e5169fb48e45"
       ],
       "review": {
         "status": "pending",
@@ -1661,7 +1665,7 @@
         "O-FLEETBUSY proven at o-fleetbusy-fleet-idle-20260907: Cloudflare and GitHub secret names converge; endpoint HTTP 200/schema PASS; busy=0, checked=0, unverifiable=0; wait-for-idle-fleet exit 0 with force=false.",
         "docs/plan/evidence/T2-W2b-rollout-20260908.json: deploy attempt created Worker version 9a456fa5-e30b-44cc-a638-f78da8fc02cc but failed because the container Durable Object binding was absent. Rollback recovered active version 43df9d2b-7a83-437b-ba11-aa40ddef1b42 at 100%; pre/post fleet gates were busy=0, checked=0, unverifiable=0 with force=false. RunnerContainer, CheckHostContainer and fabricd were unchanged.",
         "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only.",
-        "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence proves A2.5 with the running fabricd instance reporting the configured immutable digest and both fabricd health routes HTTP 200. A2.7 is RED: npm ci and typecheck passed, but npm run test failed in 5 files / 10 tests out of 1119. The artifact preserves the local deploy success (Worker cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%, ready RunnerDevEnvDO, fleet gates 0/0/0 without FORCE) without granting CI or completion credit."
+        "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence proves A2.5 with the running fabricd instance reporting the configured immutable digest and both fabricd health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history. The current tip still lacks the documented CI deploy and new Worker /health proof, so A2.7 and WP completion remain uncredited."
       ],
       "historical_sprint": 2
     },
@@ -3270,6 +3274,37 @@
       "evidence": [
         "Worker cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; ready RunnerDevEnvDO a037c709-9f21-493c-8dcb-2414a588a1cd on the immutable d105e11f... image; pre/post fleet gates 0/0/0 without FORCE.",
         "A2.7 local CI substitution: npm ci PASS, typecheck PASS, npm run test RED with 85 passing test files, 5 failing files, 1109 passing tests and 10 failing tests of 1119."
+      ]
+    },
+    {
+      "at": "2026-09-08T01:31:15+00:00",
+      "task": "T2-W2b A2.7 local test-gate recovery preparation",
+      "owner": "root",
+      "state": "prepared",
+      "scope": [
+        "deploy/cloudflare/src/index.ts",
+        "deploy/cloudflare/test/journey-sj2-warm-env0.test.ts",
+        "deploy/cloudflare/test/reconciler-wave-acceptance.test.ts",
+        "deploy/cloudflare/test/retry-epoch-integration.test.ts",
+        "deploy/cloudflare/test/journey-sj5-concurrency-slot.test.ts",
+        "deploy/cloudflare/test/teardown-permutation.test.ts",
+        "docs/plan/evidence/T2-W2b-deploy.json",
+        "docs/plan/evidence/T2-W2b-deploy-20260908.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "integrator",
+      "source_commits": [
+        "98dc349174812408432ba4c5897f65d5ee58df00",
+        "0b7633f8b875c79b452a54b9f896fbc39cf8413b",
+        "9463dc87620424142bfb62ed9a72cfbbbba40d0b",
+        "9273080e0485a202bdca5f1c2899e5169fb48e45"
+      ],
+      "conclusion": "The A2.7 local test/typecheck gate recovered at the integrated tip, but the documented CI deploy and current Worker /health proof have not run. Preserve the historical failed/rollback and successful retry deployment; do not grant A2.7 or WP-completion credit.",
+      "evidence": [
+        "npm run test: 90 files / 1119 tests PASS in 26.67 seconds at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
+        "npm run typecheck: PASS at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
+        "Focused recovery evidence: SJ2 25/25, reconciler+retry 6/6, admission/SJ5 adjacencies 79/79, teardown 7/7."
       ]
     }
   ],
