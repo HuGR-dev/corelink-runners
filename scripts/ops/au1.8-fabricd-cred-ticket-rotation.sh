@@ -41,7 +41,7 @@ fi
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }; }
 for cmd in curl git jq node npx openssl rg sed stat tr mktemp; do require_cmd "$cmd"; done
 
-REPO_ROOT="$(cd -- "$(dirname -- "$0")/../.." && pwd)"
+REPO_ROOT="${AU18_REPO_ROOT:-$(cd -- "$(dirname -- "$0")/../.." && pwd)}"
 CONFIG="$REPO_ROOT/deploy/cloudflare-fabricd/wrangler.jsonc"
 WORKER_NAME="corelink-fabricd"
 CONTAINER_APP_NAME="corelink-fabricd-fabricdcontainer"
@@ -55,8 +55,6 @@ NEW_SECRET_FILE="${AU18_NEW_SECRET_FILE:-$HOME/.corelink/secrets/corelink/fabric
 INTROSPECT_KEY_FILE="${AU18_INTROSPECT_KEY_FILE:-}"
 FLEET_BUSY_KEY_FILE="${AU18_FLEET_BUSY_KEY_FILE:-}"
 OBSERVABILITY_KEY_FILE="${AU18_OBSERVABILITY_KEY_FILE:-}"
-CONFIG_INTROSPECT_URL="$(sed -n 's/^[[:space:]]*"CORELINK_INTROSPECT_URL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1)"
-INTROSPECT_URL="${AU18_INTROSPECT_URL:-$CONFIG_INTROSPECT_URL}"
 FLEET_BUSY_URL="${AU18_FLEET_BUSY_URL:-https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy}"
 OBSERVABILITY_URL="${AU18_OBSERVABILITY_URL:-$BASE_URL/internal/v1/occupancy}"
 STATUS_URL="${AU18_STATUS_URL:-$BASE_URL/internal/v1/status}"
@@ -65,14 +63,40 @@ EVIDENCE_PATH="$REPO_ROOT/docs/plan/evidence/au1.8-fabricd-secret-rotation.json"
 TENANT="ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"
 REPO_FULL_NAME="HuGR-Labs/corelink-runners"
 INSTALLATION_ID="150584374"
-SOURCE_COMMIT="${AU18_SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})}"
-HEAD="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})"
-EXPECTED_IMAGE_DIGEST="$(sed -n 's/^[[:space:]]*"image":[[:space:]]*"[^@]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$CONFIG" | head -n 1)"
+SOURCE_COMMIT="${AU18_SOURCE_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')}"
+HEAD="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')"
 
-[[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$SOURCE_COMMIT" == "$HEAD" ]] || {
-  echo "wrong repository source commit; AU18_SOURCE_COMMIT must match the checked-out HEAD" >&2
-  exit 1
+source_tree_gate() {
+  local dirty
+  dirty="$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all)" || {
+    echo "refusing: unable to inspect repository status" >&2
+    return 1
+  }
+  if [[ -n "$dirty" ]]; then
+    echo "refusing: repository worktree/index is not clean (including untracked files)" >&2
+    return 1
+  fi
+  [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$SOURCE_COMMIT" == "$HEAD" ]] || {
+    echo "wrong repository source commit; AU18_SOURCE_COMMIT must match the checked-out HEAD" >&2
+    return 1
+  }
 }
+
+validate_status_report() {
+  jq -e '(.num_shards | tonumber) == 1 and .ledger_cross_instance_safe == true' <<<"$1" >/dev/null
+}
+
+source_tree_gate || exit 1
+if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
+  if [[ -n "${AU18_STATUS_REPORT_JSON:-}" ]]; then
+    validate_status_report "$AU18_STATUS_REPORT_JSON" || exit 1
+  fi
+  exit 0
+fi
+
+EXPECTED_IMAGE_DIGEST="$(sed -n 's/^[[:space:]]*"image":[[:space:]]*"[^@]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$CONFIG" | head -n 1)"
+CONFIG_INTROSPECT_URL="$(sed -n 's/^[[:space:]]*"CORELINK_INTROSPECT_URL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1)"
+INTROSPECT_URL="${AU18_INTROSPECT_URL:-$CONFIG_INTROSPECT_URL}"
 [[ -n "$EXPECTED_IMAGE_DIGEST" ]] || { echo "could not resolve pinned fabricd image digest" >&2; exit 1; }
 [[ "$INTROSPECT_URL" == https://corelink-api.humangr.com/internal/v1/auth/introspect ]] || {
   echo "refusing: introspect URL must be the configured corelink-api.humangr.com endpoint" >&2; exit 1;
@@ -109,6 +133,7 @@ REMOTE_BASELINE_SHA256=""
 REMOTE_BASELINE_FILE=""
 REMOTE_TEMP_VAR_STATE="unknown"
 QUIESCENCE_STATE="not-checked"
+LEDGER_CROSS_INSTANCE_SAFE="not-checked"
 CAS_PAT_PROOF="not-checked"
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
@@ -412,7 +437,8 @@ quiescence_gate() {
   jq -e '(.per_tenant | type) == "array" and all(.[]; ((.occupied // 0) | tonumber) == 0)' <<<"$response" >/dev/null || return 1
   status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || return 1
   scrub_file "$TMP_DIR/status.err"
-  jq -e '(.num_shards | tonumber) == 1 and (.ledger_cross_instance_safe == true or .ledger_cross_instance_safe == false)' <<<"$status_report" >/dev/null || return 1
+  validate_status_report "$status_report" || return 1
+  LEDGER_CROSS_INSTANCE_SAFE="true"
 
   fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || return 1
   scrub_file "$TMP_DIR/fleet-busy.err"
@@ -425,7 +451,7 @@ quiescence_gate() {
   spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || return 1
   jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || return 1
   QUIESCENCE_STATE="green"
-  log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 intake_paused=1 redrive_paused=1"
+  log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 ledger_cross_instance_safe=true intake_paused=1 redrive_paused=1"
 }
 
 mint_fixture() {
@@ -550,14 +576,14 @@ write_evidence() {
     --arg container_before "${BEFORE_CONTAINER_VERSION:-}" --arg container_rotated "${ROTATED_CONTAINER_VERSION:-}" --arg container_final "${FINAL_CONTAINER_VERSION:-}" \
     --arg digest_before "${BEFORE_DIGEST:-}" --arg digest_rotated "${ROTATED_DIGEST:-}" --arg digest_final "${FINAL_DIGEST:-}" \
     --arg baseline_sha256 "$REMOTE_BASELINE_SHA256" --arg log_path "$EVENT_LOG" \
-    --arg quiescence "$QUIESCENCE_STATE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
+    --arg quiescence "$QUIESCENCE_STATE" --arg ledger_safe "$LEDGER_CROSS_INSTANCE_SAFE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
     --argjson elapsed "$elapsed" \
     '{schema_version:"evidence/v1", artifact_id:"au1.8-fabricd-secret-rotation", kind:"probe", status:$status, observed_at:$observed,
       source:{repository:"corelink-runners", commit_sha:$commit, path:"docs/plan/evidence/au1.8-fabricd-secret-rotation.json"},
       claims:["AU1.8","AU1.8:secret-rotation"], version:{id:$commit},
       evidence:{operation:{app_name:$app_name, app_id_before:$app_id_before, worker_versions:{before:$worker_before, rotated:$worker_rotated, final:$worker_final}, container_versions:{before:$container_before, rotated:$container_rotated, final:$container_final}, image_digests:{before:$digest_before, rotated:$digest_rotated, final:$digest_final}},
       proofs:{old_hmac_prevalidated:true, old_hmac_redeem_status:401, new_hmac_redeem_status:200, replay_status:410, redeemed_cas_pat_clw:$cas_probe},
-      quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, intake_paused:true, redrive_paused:true},
+      quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, ledger_cross_instance_safe:($ledger_safe == "true"), intake_paused:true, redrive_paused:true},
       remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict"]},
       secret_handling:{old_rollback_path:$ENV_OLD_SECRET_FILE, new_operational_path:$ENV_NEW_SECRET_FILE, values:"excluded", oob_mode:"0600"},
       timing:{maximum_seconds:600, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
