@@ -192,7 +192,8 @@ scrub_file() {
 
 run_quiet() {
   local label="$1"; shift
-  local err="$LOG_DIR/$(date -u +%s%N)-${label}.stderr"
+  local err
+  err="$LOG_DIR/$(date -u +%s%N)-${label}.stderr"
   : > "$err"; chmod 600 "$err"
   set +e
   "$@" >/dev/null 2>"$err"
@@ -205,7 +206,8 @@ run_quiet() {
 
 capture_json() {
   local label="$1" output="$2"; shift 2
-  local err="$LOG_DIR/$(date -u +%s%N)-${label}.stderr"
+  local err
+  err="$LOG_DIR/$(date -u +%s%N)-${label}.stderr"
   : > "$output"; chmod 600 "$output"
   : > "$err"; chmod 600 "$err"
   set +e
@@ -243,10 +245,10 @@ done
 oob_file_gate FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE" || exit 1
 oob_file_gate FABRIC_OBSERVABILITY_KEY "$OBSERVABILITY_KEY_FILE" || exit 1
 for gate_key in "$INTROSPECT_KEY_FILE" "$FLEET_BUSY_KEY_FILE" "$OBSERVABILITY_KEY_FILE"; do
-  [[ -n "$gate_key" ]] && oob_file_gate internal-auth "$gate_key" || {
+  if [[ -z "$gate_key" ]] || ! oob_file_gate internal-auth "$gate_key"; then
     echo "introspection, fleet-busy, and observability OOB key paths must be supplied and 0600" >&2
     exit 1
-  }
+  fi
 done
 if [[ -e "$NEW_SECRET_FILE" || -L "$NEW_SECRET_FILE" ]]; then
   echo "refusing to overwrite existing NEW_SECRET_FILE" >&2
@@ -432,7 +434,8 @@ recreate() {
 
 put_secret() {
   local name="$1" file="$2"
-  local err="$LOG_DIR/$(date -u +%s%N)-secret-put.stderr"
+  local err
+  err="$LOG_DIR/$(date -u +%s%N)-secret-put.stderr"
   : > "$err"; chmod 600 "$err"
   set +e
   "${WRANGLER[@]}" secret put "$name" --name "$WORKER_NAME" < "$file" >/dev/null 2>"$err"
@@ -493,7 +496,7 @@ quiescence_gate() {
   # or unverifiable fleet item while intake/redispatch are paused remotely.
   OBSERVABILITY_HEADER_FILE="$(make_oob_header_file observability "$OBSERVABILITY_KEY_FILE")"
   FLEET_BUSY_HEADER_FILE="$(make_oob_header_file fleet-busy "$FLEET_BUSY_KEY_FILE")"
-  local usage fleet occupancy response status_report rc
+  local usage fleet response status_report rc
   local pat_header_fd
   pat_header_fd=<(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$PAT_FILE")")
   usage="$(curl -fsS --connect-timeout 10 --max-time 30 \
