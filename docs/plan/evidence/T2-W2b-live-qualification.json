@@ -1,0 +1,47 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w2b-live-qualification-20260908",
+  "kind": "test+probe",
+  "status": "RED",
+  "observed_at": "2026-09-08T01:02:23Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "9fb7cc4890ee83248caf2694bfb5d39f4e45c7d8",
+    "path": "docs/plan/evidence/T2-W2b-live-qualification.json"
+  },
+  "claims": ["T2-W2b"],
+  "version": {
+    "id": "cb704a9d",
+    "digest": "sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029"
+  },
+  "evidence": {
+    "scope": "unauthenticated safety gate and live lifecycle qualification attempt",
+    "worker_source_tip": "9fb7cc4890ee83248caf2694bfb5d39f4e45c7d8",
+    "worker_version": "cb704a9d",
+    "endpoint": "https://corelink-spawn-worker.gmhelmold.workers.dev",
+    "configured_images": {
+      "runner": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      "checkhost": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      "devenv": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c"
+    },
+    "unauthenticated_matrix": [
+      {"method": "GET", "path": "/v1/customer/devenv/status", "status": 401, "body": "{\"error\":\"unauthorized\"}"},
+      {"method": "POST", "path": "/v1/customer/devenv/stop", "status": 401, "body": "{\"error\":\"unauthorized\"}"},
+      {"method": "DELETE", "path": "/v1/customer/devenv", "status": 401, "body": "{\"error\":\"unauthorized\"}"},
+      {"method": "POST", "path": "/v1/spawn", "status": 401, "body": "{\"error\":\"unauthorized\"}"}
+    ],
+    "auth_fail_closed": true,
+    "synthetic_lifecycle": "NOT_ATTEMPTED_EXTERNAL_AUTH_REQUIRED",
+    "cleanup": "NOT_ATTEMPTED_NO_RESOURCE_CREATED",
+    "running_instances": "UNVERIFIED_PROVIDER_AUTH_REQUIRED",
+    "provider_binding": "MISSING_CLOUDFLARE_READ_ONLY_AUTHORITY",
+    "intake_or_redrive_changed": false,
+    "secrets_logged": false,
+    "blockers": [
+      "no authorized CoreLink tenant/workspace credential was available",
+      "no Cloudflare read-only provider credential was available for instance/version/status verification",
+      "authenticated create/status/stop/delete lifecycle cannot be claimed from 401 controls"
+    ]
+  },
+  "notes": "All requests used synthetic identifiers and no authorization header. Every mutating-shaped route failed before admission with 401. This proves the auth boundary only; it does not prove lifecycle cleanup or zero provider orphans."
+}
