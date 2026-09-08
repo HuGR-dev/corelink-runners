@@ -138,11 +138,12 @@ mod golden_tests {
     /// by the §13.4 drift tripwire on OUR side. This is our-side coverage.
     ///
     /// NOTE (cross-repo gap): this does NOT add a shared cross-repo vector for
-    /// the terminal states — that is hugit-gated (a shared terminal-state
-    /// `RunnerLease` vector must land in hugit-contracts first, then be
-    /// committed byte-identical here). Fully closing the cross-repo tripwire
-    /// for the terminal variants requires that coordination; this test closes
-    /// only the local serialization-rename hole.
+    /// the terminal states — that is contract-owner-gated (a shared
+    /// terminal-state `RunnerLease` vector must land in the CoreLink contract
+    /// vectors first, then be committed byte-identical here). Fully closing
+    /// the cross-repo tripwire for the terminal variants requires that
+    /// coordination; this test closes only the local serialization-rename
+    /// hole.
     #[test]
     fn runner_state_all_variants_wire_string_pinned() {
         // (variant, exact snake_case wire string)
@@ -238,7 +239,7 @@ mod golden_tests {
         // that hole: the manifest must list EXACTLY the vectors that exist.
         //
         // (`corelink-introspect.json` mirrors corelink-server's
-        // `/internal/v1/auth/introspect` response; the three hugit-side vectors
+        // `/internal/v1/auth/introspect` response; the three cross-repo vectors
         // ride the same SHA-256 tripwire. Membership is now asserted against the
         // filesystem so any new cross-repo vector is forced into the manifest.)
         let listed: std::collections::BTreeSet<String> =

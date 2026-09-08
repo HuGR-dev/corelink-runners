@@ -108,8 +108,8 @@
     "FABRIC_PUBLIC_BASE_URL": "https://corelink-fabricd.gmhelmold.workers.dev",
     // ── ATTESTED COST — ON (FLIP-B) ───────────────────────────────────────────
     // Emit the signed intent_metrics_sig on CloseResponse (#320). Additive +
-    // wire-invisible when off; ON now so hugit's ✓cas: can render ATTESTED cost
-    // once they pin the conformance vector + consume the field. Signs honest-zero
+    // wire-invisible when off; ON now so the external cost consumer can render
+    // ATTESTED cost once it pins the conformance vector + consumes the field. Signs honest-zero
     // cost until a provider /usage source (never a derived COGS). Prod key faa5b7726.
     "FABRIC_EMIT_INTENT_METRICS_SIG": "true",
     // ── RESILIENCE KNOBS (W1b) — the Rust binary already READS these; they were

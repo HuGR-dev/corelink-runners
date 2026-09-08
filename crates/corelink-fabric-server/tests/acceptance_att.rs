@@ -1,6 +1,6 @@
 //! WP-ATT1+ATT2 acceptance — signed execution attestation, at the API
 //! surface (contract §7: the runner must attest what it ran, signed; a
-//! result without a valid attestation is rejected by hugit, so emission is
+//! result without a valid attestation is rejected by the external verifier, so emission is
 //! mandatory).
 //!
 //! In-process only (`tower::ServiceExt::oneshot`, no sockets). The fabric
@@ -209,7 +209,7 @@ fn lp_frames(fields: &[&str]) -> Vec<u8> {
     out
 }
 
-/// `GET /v1/attestation/key` is UNAUTHENTICATED — hugit needs to bootstrap
+/// `GET /v1/attestation/key` is UNAUTHENTICATED — external verifiers need to bootstrap
 /// key verification without a tenant PAT. Confirm it returns 200 WITHOUT
 /// a Bearer token.
 #[tokio::test]

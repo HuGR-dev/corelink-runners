@@ -1,6 +1,6 @@
 //! WP-ATT1+ATT2 — signed execution attestation at the API surface
 //! (contract §7: the runner must attest what it ran, signed; a result
-//! without a valid attestation is rejected by hugit, so emission is
+//! without a valid attestation is rejected by the external verifier, so emission is
 //! mandatory).
 //!
 //! ## The honest composition (frozen chain untouched, result bound)
@@ -20,7 +20,7 @@
 //! - **executor** — `runner` covers the executor identity
 //!   (`CheckResult.runner_ref`).
 //! - **image digest** — pinned at acquire (`ContainerSpec::from_lease`
-//!   refuses unpinned images, hugit X4) and recorded in the fabric's
+//!   refuses unpinned images, per the X4 supply-chain pin) and recorded in the fabric's
 //!   acquire-time registry; threaded through [`build_attestation`] so the
 //!   FC3-era enrichment can fold it into a content-addressed runner link.
 //!   At M1 it is NOT a cryptographically covered chain field — the frozen
@@ -44,8 +44,9 @@
 //! fabric key ([`FabricSigner::sign_raw`]) and published on the SAME
 //! response as the chain. This is the fabric's result-binding extension —
 //! it never touches the frozen `AttestationChain` shape, and it is flagged
-//! for §12 amendment-log discussion with hugit (the chain stays verifiable
-//! by hugit's X8 verifier unchanged; the binding is additional evidence).
+//! for §12 amendment-log discussion with external consumers (the chain stays
+//! verifiable by the existing X8 verifier unchanged; the binding is additional
+//! evidence).
 //!
 //! **v1 does NOT cover the verdict.** `CheckResult.exit` (the pass/fail
 //! verdict) and `CheckResult.artifacts` (the output digests) are signed by
@@ -73,8 +74,9 @@
 //! `result_binding_sig`. v2 is a DISTINCT pre-image from v1 (it appends the
 //! exit + artifact frames), so a v1 signature never validates as v2 and vice
 //! versa — there is no cross-version confusion. This is a wire/seam formula:
-//! **hugit must mirror it byte-exactly to add a v2 verifier** (§12 amendment;
-//! v1 stays emitted until hugit confirms v2 adoption — no flag-day).
+//! **External verifiers must mirror it byte-exactly to add a v2 verifier** (§12
+//! amendment; v1 stays emitted until consumers confirm v2 adoption — no
+//! flag-day).
 //!
 //! Key custody per ratified decision #2: ed25519, one fabric signing key
 //! per region (M1: single region); the public key is published at
@@ -127,7 +129,7 @@ pub fn result_binding_preimage(memo_key: &str, stdout_ref: &str, stderr_ref: &st
 /// order (the order is part of the binding — reordering changes the
 /// pre-image). The first three frames are identical to v1, but v2 is a
 /// strictly longer, DISTINCT message — a v1 signature never validates as v2.
-/// This is a wire/seam formula hugit must mirror byte-exactly.
+/// This is a wire/seam formula external verifiers must mirror byte-exactly.
 pub fn result_binding_preimage_v2(result: &CheckResult) -> Vec<u8> {
     let mut out = Vec::new();
     lp(&mut out, &result.memo_key);
@@ -149,7 +151,7 @@ pub fn result_binding_preimage_v2(result: &CheckResult) -> Vec<u8> {
 /// Sign the v1 result-binding pre-image over `result`'s content identity
 /// (`memo_key`, `stdout_ref`, `stderr_ref`) with the fabric key; returns
 /// the detached standard-base64 signature — the `result_binding_sig` (v1)
-/// wire field. UNCHANGED for back-compat (hugit's current verifier mirrors
+/// wire field. UNCHANGED for back-compat (the current external verifier mirrors
 /// this exact formula; v2 is emitted alongside, never instead).
 pub fn sign_result_binding(signer: &FabricSigner, result: &CheckResult) -> String {
     signer.sign_raw(&result_binding_preimage(
@@ -179,7 +181,7 @@ pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> St
 /// metrics for exactly this lease.
 ///
 /// Byte formula (same LP framing + big-endian integers as the chain/result
-/// pre-images, so hugit mirrors it with the identical primitives):
+/// pre-images, so external verifiers mirror it with the identical primitives):
 ///
 /// ```text
 /// LP(lease_id) ‖ LP(tenant)
@@ -192,7 +194,7 @@ pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> St
 /// ```
 ///
 /// `tool_breakdown` is appended in `Vec` order — the order is part of the
-/// binding. This is a wire/seam formula hugit must mirror byte-exactly to
+/// binding. This is a wire/seam formula external verifiers must mirror byte-exactly to
 /// verify. ADDITIVE + independent of the v1/v2 result bindings (a distinct
 /// message; never validates as either).
 pub fn intent_metrics_preimage(lease_id: &str, tenant: &str, m: &IntentMetrics) -> Vec<u8> {
@@ -225,7 +227,7 @@ pub fn intent_metrics_preimage(lease_id: &str, tenant: &str, m: &IntentMetrics) 
 /// Sign the intent-metrics pre-image (the attested cost, bound to lease +
 /// tenant) with the fabric key; returns the detached standard-base64 signature
 /// — the `intent_metrics_sig` wire field (emitted only when
-/// `FABRIC_EMIT_INTENT_METRICS_SIG` is on, pending hugit's verifier adopting
+/// `FABRIC_EMIT_INTENT_METRICS_SIG` is on, pending external verifier adoption of
 /// the field — additive, so default-off is wire-invisible).
 pub fn sign_intent_metrics(
     signer: &FabricSigner,
@@ -378,8 +380,8 @@ pub fn verify_execution(
 /// Verify the frozen chain AND the **v2** full-outcome result-binding
 /// signature: like [`verify_execution`] but the binding recomputes the v2
 /// pre-image, so it covers `exit` + ordered `artifacts` in addition to the
-/// three v1 fields. This is the binding a verdict-trusting consumer (hugit,
-/// once it adopts v2) must check — a flipped `exit` or a rewritten artifact
+/// three v1 fields. This is the binding a verdict-trusting external consumer
+/// (once it adopts v2) must check — a flipped `exit` or a rewritten artifact
 /// digest breaks it, where v1 would still accept the forgery.
 ///
 /// Returns `Ok(true)` iff both the chain and the v2 binding verify;
@@ -405,8 +407,8 @@ pub fn verify_execution_v2(
 
 /// `GET /v1/attestation/key` — the published well-known fabric attestation
 /// key set (ATT2 amendment, reshaped to a key-set for rotation
-/// forward-compatibility, lead-ratified). UNAUTHENTICATED: hugit needs to
-/// fetch the public key without a tenant PAT (key rotation bootstrap).
+/// forward-compatibility, lead-ratified). UNAUTHENTICATED: external consumers
+/// need to fetch the public key without a tenant PAT (key rotation bootstrap).
 /// The body is the region's public key(s), nothing tenant-scoped. At M1
 /// the set is always exactly 1 entry (no rotation machinery built).
 pub(crate) async fn key(State(state): State<AppState>) -> Response {
