@@ -3,9 +3,9 @@
 > **Status:** Historical v1 · 2026-06-09 · **superseded; not canonical.**
 > This preserved vision record creates no current gate, dependency, consumer, owner,
 > or go-live claim. ADR-0014 defines the current standalone CoreLink boundary.
-> Operational detail (pricing tables, the integration contract, the fabric stub) lives in
-> `docs/product/product.md` and `docs/spec/`; where any of them disagree with this document
-> on **vision or principle**, this document wins and they get corrected.
+> Operational detail (pricing tables, the integration contract, the fabric stub) lived in
+> `docs/product/product.md` and `docs/spec/` at the time. Any disagreement is resolved by
+> the current repository documents and ADR-0014; this historical record has no precedence.
 > Author: HuGR techlead. Historical family framing: **HuGR → CoreLink → { Cache · Runners · Workspaces }**.
 > Hugit and githugr were separate discontinued projects; references below are provenance only.
 
