@@ -220,7 +220,7 @@ Both `attestation` and `result_binding_sig` are **required** fields (contract §
 
 ### `POST /v1/queue/trigger`
 
-hugit's landing queue triggers execution of an uncached check on demand (contract §9, `QueueApi` seam). Uses the same execution engine as the exec path with the same gate order and attestation obligations.
+CoreLink queue and CLI/SDK clients trigger execution of an uncached check on demand (contract §9, `QueueApi` seam). Uses the same execution engine as the exec path with the same gate order and attestation obligations.
 
 The concurrency cap was enforced at acquire. The trigger is lease-scoped — no cap re-check here.
 
@@ -265,7 +265,7 @@ The concurrency cap was enforced at acquire. The trigger is lease-scoped — no 
 The §13 envelope surfaces expose the in-box agent loop's raw transcript. All surfaces are **bounded in-flight only** — nothing is persisted (§13.3). Overflow is honest: the mechanism sets an overflow flag rather than silently dropping.
 
 There are two trust boundaries with two distinct credentials:
-- **Poll (GET events/meta):** hugit's trusted subscriber authenticates with the same Bearer PAT that acquired the lease.
+- **Poll (GET events/meta):** the trusted CoreLink CLI/SDK subscriber authenticates with the same Bearer PAT that acquired the lease.
 - **Ingest (POST ingest):** the untrusted in-box agent loop authenticates with a per-lease, write-only, ingest-scoped capability token (never the tenant PAT).
 
 ### `GET /v1/leases/{lease_id}/envelope/events`
@@ -608,7 +608,7 @@ Serialized as a snake_case string. One of: `"held"`, `"expired"`, `"crashed"`, `
 
 ### `IntentMetrics`
 
-Schema 1.2.0 (transcribed from hugit-contracts @ 443ff1b).
+Schema 1.2.0 (transcribed from the historical external contract snapshot @ 443ff1b).
 
 | Field | Type | Description |
 |-------|------|-------------|

@@ -476,7 +476,7 @@ The remaining **25 NEW (MEDIUM/LOW) and 5 PARTIAL** are triaged in
 `docs/plan/union-triage-remaining.md` as `AU1.x`–`AU7.x`: **30 source findings represented by 33
 proposed AU acceptance ids** after the round-5 splits. They remain a separate intake: **AU is not
 integrated into this acceptance suite**, and no AU item is promoted to an `A` row here. The current
-blockers are recorded in §11.1; the principal suite stays at 94 rows / 92 live rows.
+blockers are recorded in §11.1; the principal suite stays at 94 rows / 91 live rows.
 
 ---
 
@@ -486,8 +486,8 @@ Kinds: `test:` (repo runner, red now → green after) · `probe:` (live, recorde
 `docs/plan/evidence/`) · `judged:` (owner decision, never auto-greened).
 
 rev-2 had 48 items. The cold suite-critic refuted its completeness with 26 gaps and 9 unfalsifiable
-items; round 2 completed that review and added the rev-5 rows below. **The suite has 94 rows, 92 live
-(89 `test`/`probe` assignments and 3 `judged`; A2.2 and A5.7 are withdrawn), 48 WPs, and 89 owned
+items; round 2 completed that review and added the rev-5 rows below. **The suite has 94 rows, 91 live
+(89 `test`/`probe` assignments and 2 `judged`; A2.2, A5.7 and A7.3 are withdrawn), 48 WPs, and 89 owned
 items.** These counts are mechanical, not a claim that any item is green. The rev-2 → rev-3 delta is
 where the real go-live risk was hiding, so it is marked ★.
 
@@ -537,7 +537,7 @@ A2.4 A2.5 A2.7 A2.8 A2.10 A3.9 A3.10 A4.7 A4.10 A5.6 A5.8 A5.9 A6.6 A6.7 A6.11 A
 **Falsifiability repair status.** The former N/K/stated-bound placeholders now have exact numbers.
 A6.3 remains capability-broken-while-green until owner decision **D11**, reserved in the
 [round-3 delta](2026-09-01-round3-remediation-delta.md), fixes the required-miss contract. The three
-`judged:` items (A4.9 A5.1 A7.3) still require a named decider and dated artifact.
+`judged:` items (A4.9 A5.1) still require a named decider and dated artifact.
 
 ### C1 — control plane
 
@@ -646,13 +646,13 @@ A6.3 remains capability-broken-while-green until owner decision **D11**, reserve
 |---|---|---|
 | A7.1 | test | doc-truth linter enumerates every tracked Markdown, workflow, Wrangler config and package manifest; only generated/vendor paths and dated `docs/handoff|review|audits` are excluded, and one planted claim in each source class fails |
 | A7.2 | test | the ROADMAP is the open-item ledger over the **union** catalog, and ids are immutable (it cannot be greened by renaming or closing findings) |
-| A7.3 | judged | discontinued-campaign live wire surfaces removed, or retained by a written decision |
+| A7.3 | withdrawn | discontinued Hugit/githugr live-wire cleanup is outside the standalone CoreLink product boundary; historical surfaces remain provenance only |
 | ★A7.4 | test | every present-tense capability claim cites a dated artifact id — rev-2's linter only caught claims naming a config key, which is a **minority** of the overclaim class ("the moat is live", "cache-warm boot", benchmark numbers) |
 | ★A7.5 | test | each recorded probe artifact carries the version id/digest it was taken against, and that value matches what is deployed |
 
-**94 rows — 52 `test`, 34 `probe`, 3 `test+probe`, 3 `judged` (A4.9, A5.1, A7.3), plus 2
-withdrawn rows (A2.2, A5.7); 92 rows are live.** `wp-check.py` reports 89 non-judged items owned
-exactly once and routes the three judged rows to their owners. The separate `AU` intake is not part
+**94 rows — 52 `test`, 34 `probe`, 3 `test+probe`, 2 `judged` (A4.9, A5.1), plus 3
+withdrawn rows (A2.2, A5.7, A7.3); 91 rows are live.** `wp-check.py` reports 89 non-judged items owned
+exactly once and routes the two remaining judged rows to their owners. The separate `AU` intake is not part
 of these rows.
 
 ### Items added at rev-4 (WPs that had none)
@@ -689,7 +689,7 @@ state remains NOT FROZEN / NO DISPATCH.
 | **D3** | repo public + LICENSE. **Hard predecessor: D7** | all of C5 |
 | **D4** | ratify ADR-0005 admission mode (queue vs reject) | T3-W5 |
 | **D5** | provision the instance-delete-scoped CF token (ADR-0010) | orphan teardown, RC2 |
-| **D6** | purge hugit-era live wire surfaces now or after GA | A7.3 |
+| **D6** | **WITHDRAWN/CLOSED 2026-09-08:** Hugit/githugr is outside the standalone CoreLink boundary; preserve its records as historical provenance and impose no cleanup gate | none |
 | **D7** | rotate the leaked OpenRouter key (**required**); restate or withdraw the App-key waiver | D3 |
 | **D8** | "no free tier" vs the live free-tier seed | A5.6 A5.8 · R4 |
 | **D9** | N>1 fabricd flip: before or after GA | — |
@@ -880,7 +880,7 @@ edges.
 
 ### Wave 4 — post-decision (43 findings)
 
-Gated on D4/D5/D6/D9/D10 or on GA. **Obligation:** items are authored and re-critiqued when each
+Gated on D4/D5/D9/D10 or on GA. **Obligation:** items are authored and re-critiqued when each
 decision lands. Findings in this bucket with **no** gating decision (`gap-16` egress CIDR, `sec-06`
 sudo/rootful, `fabric-core-09` unbounded lease rows, `billing-money-path-13` no ledger reader,
 `gap-15` NoOp AC hook, `runner-core-02` no CAS transport, `fabric-core-05` N>1 ping) must be given a
@@ -1106,7 +1106,7 @@ python3 docs/plan/gates-selftest.py
 ```
 
 The first gate is bounded to **247 findings**, total and disjoint. The second is bounded to the
-frozen **94 rows / 92 live rows**, with each live item owned once, judged rows routed to an owner,
+frozen **94 rows / 91 live rows**, with each live item owned once, judged rows routed to an owner,
 no zero-item or over-four-item WP, and no parallel-scope collision. After the round-5 triage split,
 the third is bounded to **30 source findings / 33 proposed AU acceptance ids**, each structurally
 owned once; it surfaces any
@@ -1773,7 +1773,7 @@ changing the principal suite's 94-row / 92-live scope:
 
 1. The live picture now names the contained, intentionally degraded state: `FABRIC_PG_DISABLED=1`,
    in-memory ledger, and suspended durable vCPU/billing paths, with the evidence artifact cited.
-2. The plan-check totals remain W2 = 21 and DEFER = 5. The suite is exactly 94 rows / 92 live:
+2. The plan-check totals remain W2 = 21 and DEFER = 5. The suite is exactly 94 rows / 91 live:
    53 test, 34 probe, 2 test+probe, 3 judged and 2 withdrawn; 47 WPs own 89 non-judged items.
 3. Wave tables now include every WP known to `wp-check.py`; active `T4-W3` references were corrected
    to `T4-W4`. The deleted T4-W3 remains only where the rev-4 history describes that deletion.
@@ -1814,8 +1814,8 @@ ASSIGNMENT SHAPE ERROR: 0
 UNKNOWN id (typo / not a finding): 0
 ORPHAN (no bucket): 0
 plan-check: PASS — total and disjoint
-suite rows 94 physical / 94 unique · live 92 · withdrawn ['A2.2', 'A5.7']
-WPs 47 · items owned 89 · judged->owner ['A4.9', 'A5.1', 'A7.3']
+suite rows 94 physical / 94 unique · live 91 · withdrawn ['A2.2', 'A5.7', 'A7.3']
+WPs 47 · items owned 89 · judged->owner ['A4.9', 'A5.1']
 items per WP: min 1 max 4
 wp-check: PASS — structural ownership tables are internally consistent
 au-check: AU STAGING PASS — 30 source findings / 33 proposed AU acceptance ids structurally owned

@@ -29,12 +29,12 @@ npm install
 
 # 1. Secrets (NEVER in wrangler.jsonc). Values come from the OOB secrets dir;
 #    piped from file so the value is never echoed.
-npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.hugit/secrets/corelink/fabric-signing-key-prod
-npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.hugit/secrets/corelink/fabric-introspect-key
-npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.hugit/secrets/corelink/billing-ingest-key
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-spawn-token
-npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-exec-token
-npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-lifecycle-token
+npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.corelink/secrets/fabric-signing-key-prod
+npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.corelink/secrets/fabric-introspect-key
+npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.corelink/secrets/billing-ingest-key
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.corelink/secrets/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.corelink/secrets/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.corelink/secrets/cf-lifecycle-token
 
 # 2. Deploy (builds + pushes the image, creates the Worker + container + DO + cron).
 npm run deploy
@@ -43,7 +43,7 @@ npm run deploy
 The prod signing key was generated 2026-06-25 (32-byte ed25519, fingerprint
 `9f54d5ee`); its PUBLIC half — `key_id faa5b7726ccd2c52`,
 `pubkey_b64 Mo4wTL2QDnjL0inY7vasKHt1Jw7YIbAX3w2trY8824o=` — is what
-`GET /v1/attestation/key` will serve and what hugit's v2 verifier pins. Setting a
+`GET /v1/attestation/key` will serve and what the CoreLink CLI/SDK verifier pins. Setting a
 DIFFERENT key changes that pubkey, so use that exact file.
 
 ## Optional arming vars (default-off; now forwarded into the container)
@@ -102,8 +102,9 @@ an approved rollout or an already-active service. During containment or an idle
 scale-to-zero check, use provider control-plane reads and do not call `/`,
 `/health`, `/v1/health`, `/v1/usage`, or internal status routes.
 
-Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
-(`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
+Use `$HOST` as the CoreLink fabric URL for the direct CLI/SDK smoke. Set
+`CORELINK_URL=$HOST` and provide the tenant credential through `CORELINK_PAT`;
+there is no external-project handoff.
 
 ## Container health probe (historical behavior; not current-state evidence)
 
@@ -139,7 +140,7 @@ takes ~32s, but that is the **§13.2 JobClose ack window** (`ack_timeout`, hardc
 `Duration::from_secs(30)` at `leases.rs:964`): every off-box/agent lease registers
 a §13 CaptureHook at acquire, and the close blocks up to 30s (fail-closed) waiting
 for the client's **JobClose ack**. A non-acking test client waits the full 30s; a
-REAL acking client (hugit's A-path — proven metrics round-trip) collapses the
+REAL acking client (the direct CoreLink CLI/SDK path — proven metrics round-trip) collapses the
 window to ~0 and the close returns in **~2.7s** (teardown + attestation + 3 pg
 writes). So the close is fast for real traffic — the "slow close" was a
 non-acking-test artifact, not pg latency. The pg work itself is ~2.7s; no offload
@@ -190,9 +191,9 @@ the spawn-Worker's only container is the GitHub-Actions runner image). So:
 ```bash
 # wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
 # (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.hugit/secrets/corelink/cf-spawn-token
-npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.hugit/secrets/corelink/cf-exec-token
-npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-lifecycle-token
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.corelink/secrets/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.corelink/secrets/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.corelink/secrets/cf-lifecycle-token
 npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
 # envVars are read at container start. Applying them requires an owner-approved
 # rollout with preflight, monitoring, and rollback; never delete/restart/deploy
@@ -231,9 +232,10 @@ forward the mint/cred/emit vars into the CONTAINER (only the Worker saw them) �
 fail-closed on every real mint. Lesson: a 200 on a hydrating acquire does NOT prove a mint — only a
 mint-armed 503→200 transition (or a server-side mint-request log) does.
 
-**Not yet cut over:** hugit still points at the Northflank fabricd. Cutover = repoint
-`HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).
-See `docs/handoff/2026-07-07-CUTOVER-READY-to-hugit-TL-…`. Trigger is the owner's.
+The historical Northflank cutover record is retained in dated handoffs. Current
+operation is the Cloudflare fabric directly; validate it with the CoreLink CLI/SDK
+and the public API, then re-pin the returned attestation key if the approved
+CoreLink deployment changes it.
 
 **Controlled-change note:** to rebuild the binary — temp-copy `crates/corelink-fabric-server/Dockerfile` to the repo
 root, `npx wrangler containers build <repo-root> -t corelink-fabricd-fabricdcontainer:<tag> --push`
