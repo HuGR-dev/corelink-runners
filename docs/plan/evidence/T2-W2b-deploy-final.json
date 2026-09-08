@@ -2,14 +2,14 @@
   "schema_version": "evidence/v1",
   "artifact_id": "t2-w2b-deploy-final-20260908",
   "kind": "probe",
-  "status": "PASS",
+  "status": "UNKNOWN",
   "observed_at": "2026-09-08T01:51:18Z",
   "source": {
     "repository": "corelink-runners",
     "commit_sha": "fa13e8a305b13f1dcbfa4cf0ebd15f83f1f1da52",
     "path": "docs/plan/evidence/T2-W2b-deploy-final.json"
   },
-  "claims": ["A2.4", "A2.5", "A2.7"],
+  "claims": [],
   "version": {"id": "fa13e8a305b13f1dcbfa4cf0ebd15f83f1f1da52"},
   "evidence": {
     "source_and_local_ci": {
@@ -75,6 +75,11 @@
       "unverifiable": 0
     },
     "post_gate": {"busy": 0, "checked": 0, "unverifiable": 0, "force": false, "status": "PASS"},
-    "scope_note": "Final promotion remains active; no rollback was required. Intake and redrive stayed paused throughout."
+    "scope_note": "Final promotion remains active; no rollback was required. Intake and redrive stayed paused throughout.",
+    "record_classification": "historical/superseded/one-shot",
+    "original_status": "PASS",
+    "credit": "none",
+    "superseded_by": "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json",
+    "non_credit_reason": "This one-shot observation cannot establish the current Worker or Fabricd app/version after subsequent recovery changed the provider app lineage. It is retained for incident history only; it does not satisfy A2.4, A2.5, A2.7, A2.10, or T2-W2b completion."
   }
 }
