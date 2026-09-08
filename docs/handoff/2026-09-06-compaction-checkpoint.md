@@ -2,6 +2,16 @@
 
 Data: 2026-09-06. Este arquivo é ESTADO DE RETOMADA, não um novo plano. Pedido atual do usuário: "Ok salva o estado pra compact".
 
+## Atualização de checkpoint — 2026-09-08 (prevalece)
+
+- B2 está em `/private/tmp/corelink-b2-integration-20260907`, branch `bundle/b2-sprint2-closeout-20260906`, tip `27c08dd76650bc3385c69ce60f7fea5726d05a82`. O ledger mantém 11/14 implementações formais da Sprint 2; não há novo merge, PR ou crédito de aceite.
+- A cadeia de freeze de admissão foi integrada (`b8c0aa1 → 5f6de0a → da28f49`, destinos B2 `8571f3c → 99d5e39 → 27c08dd`). Ela protege somente novas admissões e preserva `workflow_job.completed` autenticado para cleanup; não houve freeze live.
+- Último estado operacional verificado: Worker `1418af47...` a 100%, Fabricd no digest `2e7b...`, DevEnv `d105...`, fleet `0/0/0`, intake/redrive pausados `1/1`. Isso é estado factual, não promoção: T2-W2b continua parcial e o critério histórico Fabricd provider-v26 permanece RED.
+- Matriz de falhas/evidências: `docs/plan/evidence/T2-W2b-A2.7-final-20260908.json` registra o candidato revertido por provider stopped; `docs/plan/evidence/T2-W2b-incident-recovery-20260908.json` registra a causa harness `0/10` (`--containers-rollout=none` pulou a criação do app Fabricd), a recuperação como novo provider v1 e a restauração do Worker; `docs/plan/evidence/T2-W2b-deploy.json` preserva a falha anterior de 5 arquivos/10 testes antes da recuperação local 1119/1119. O requisito version-bound 10/10 cold starts continua aberto.
+- Harness seguro integrado, sem ativação: `deploy/cloudflare-fabricd/{src/index.ts,test/admission-freeze.test.ts,wrangler.jsonc}` e `deploy/cloudflare/{src/index.ts,test/containment-redrive-reservation.test.ts,test/spawn-conformance.test.ts,test/webhook-route.test.ts,wrangler.jsonc}`. `FABRIC_ADMISSION_PAUSED` só abre ausente/exato `0`; configuração inválida pausa novas admissões. A correção mantém o webhook de conclusão autenticado no caminho de revoke/teardown.
+- Incidente interno de exposição de secret: rotação v2 e controller estão preparados, mas bloqueados pela ausência do manifesto de deployment de produção Hugit e do inventário de réplicas. Não registrar valores de segredo. Não executar freeze ou rotação live até esses dois insumos e a autorização operacional correspondente.
+- Preservar exatamente o arquivo não rastreado AU1.8 `scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh`; ele não pertence a commits B2 até revisão/integração própria.
+
 ## Primeira ação após compactação
 
 1. Ler o plano único completo: `/Users/gustavoschneiter/.codex/plans/corelink-wp-closeout-20260906.md`.
