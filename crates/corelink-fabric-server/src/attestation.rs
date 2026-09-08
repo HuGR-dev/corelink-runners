@@ -824,12 +824,14 @@ mod tests {
         exit_or_artifacts: bool, // exit / artifacts (v2-only coverage)
     }
 
-    /// Apply one random mutation to `r`, returning what it touched and whether
-    /// it actually changed the relevant bytes (a mutation can be a no-op,
-    /// e.g. re-rolling a token to the same value or reordering a 1-elem vec).
-    fn mutate(rng: &mut Rng, r: &mut CheckResult) -> Touched {
+    /// Apply one explicit mutation class to `r`, returning what it touched.
+    ///
+    /// The property test runs every class for every generated result. Keeping
+    /// the mutation selector explicit avoids silently losing coverage to a
+    /// random no-op (for example, trying to reorder an empty artifact list).
+    fn mutate(rng: &mut Rng, r: &mut CheckResult, kind: u32) -> Touched {
         let mut t = Touched::default();
-        match rng.below(8) {
+        match kind {
             0 => {
                 // Flip exit to a DIFFERENT value (the classic verdict forgery).
                 let old = r.exit;
@@ -838,17 +840,21 @@ mod tests {
             }
             1 => {
                 // Edit an existing artifact's digest (rewrite an output hash).
-                if let Some(a) = r.artifacts.first_mut() {
-                    a.digest.push('!'); // guaranteed-different (alphabet excludes '!')
-                    t.exit_or_artifacts = true;
-                }
+                let a = r
+                    .artifacts
+                    .first_mut()
+                    .expect("property fixtures contain an artifact");
+                a.digest.push('!'); // guaranteed-different (alphabet excludes '!')
+                t.exit_or_artifacts = true;
             }
             2 => {
                 // Edit an existing artifact's path.
-                if let Some(a) = r.artifacts.first_mut() {
-                    a.path.push('!');
-                    t.exit_or_artifacts = true;
-                }
+                let a = r
+                    .artifacts
+                    .first_mut()
+                    .expect("property fixtures contain an artifact");
+                a.path.push('!');
+                t.exit_or_artifacts = true;
             }
             3 => {
                 // Add an artifact.
@@ -860,18 +866,14 @@ mod tests {
             }
             4 => {
                 // Remove an artifact.
-                if !r.artifacts.is_empty() {
-                    r.artifacts.remove(0);
-                    t.exit_or_artifacts = true;
-                }
+                r.artifacts.remove(0);
+                t.exit_or_artifacts = true;
             }
             5 => {
-                // Reorder artifacts (only a real change with >= 2 distinct).
-                if r.artifacts.len() >= 2 {
-                    r.artifacts.swap(0, 1);
-                    // Distinctness check: a swap of equal elements is a no-op.
-                    t.exit_or_artifacts = r.artifacts[0] != r.artifacts[1];
-                }
+                // Reorder two distinct artifacts. The fixture normalization
+                // below guarantees this is a real change.
+                r.artifacts.swap(0, 1);
+                t.exit_or_artifacts = true;
             }
             6 => {
                 // Mutate a v1-covered field (stdout/stderr/memo) — guaranteed-
@@ -911,19 +913,34 @@ mod tests {
     /// The headline assertion: NO exit/artifact mutation EVER survives v2.
     #[test]
     fn prop_v2_unforgeable_v1_blind() {
-        // 1024 deterministic cases: a forgery/framing bug fails on its first
-        // adversarial input, so this is ample coverage while keeping debug-mode
-        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
-        const ITERS: u32 = 1_024;
+        // 64 deterministic results × 8 explicit mutation classes = 512
+        // adversarial cases. Every result exercises each v2-covered axis and
+        // the documented v1 gap, while each expensive signature is generated
+        // only once per base result.
+        const CASES: u32 = 64;
         let signer = FabricSigner::new_from_bytes(&SEED);
         let pk = signer.public_key_b64();
         let mut rng = Rng::new(0xC0DE_F00D_1234_5678);
 
         let mut survived_v2 = 0u32; // must remain 0 — the security invariant
         let mut exit_artifact_cases = 0u32;
+        let mut v1_cases = 0u32;
+        let mut unbound_cases = 0u32;
 
-        for _ in 0..ITERS {
-            let result = rng.check_result();
+        for _ in 0..CASES {
+            let mut result = rng.check_result();
+            // The artifact mutation classes must always be real changes. Keep
+            // the result generation random, but normalize this fixture's
+            // minimum shape and distinctness once before signing it.
+            while result.artifacts.len() < 2 {
+                result.artifacts.push(Artifact {
+                    path: format!("fixture-path-{}", result.artifacts.len()),
+                    digest: format!("fixture-digest-{}", result.artifacts.len()),
+                });
+            }
+            if result.artifacts[0] == result.artifacts[1] {
+                result.artifacts[1].path.push('!');
+            }
             let att = build_attestation(
                 &signer,
                 "alpine@sha256:d9e8",
@@ -941,42 +958,54 @@ mod tests {
                 "honest result must pass v1"
             );
             assert!(
-                verify_execution_v2(&att, &sig_v2, &result, &pk).unwrap(),
+                verify_raw(&result_binding_preimage_v2(&result), &sig_v2, &pk).unwrap(),
                 "honest result must pass v2"
             );
 
-            let mut forged = result.clone();
-            let touched = mutate(&mut rng, &mut forged);
+            for kind in 0..8 {
+                let mut forged = result.clone();
+                let touched = mutate(&mut rng, &mut forged, kind);
+                let v1_ok = verify_raw(
+                    &result_binding_preimage(
+                        &forged.memo_key,
+                        &forged.stdout_ref,
+                        &forged.stderr_ref,
+                    ),
+                    &sig_v1,
+                    &pk,
+                )
+                .unwrap();
+                let v2_ok = verify_raw(&result_binding_preimage_v2(&forged), &sig_v2, &pk).unwrap();
 
-            let v1_ok = verify_execution(&att, &sig_v1, &forged, &pk).unwrap();
-            let v2_ok = verify_execution_v2(&att, &sig_v2, &forged, &pk).unwrap();
-
-            if touched.exit_or_artifacts {
-                exit_artifact_cases += 1;
-                // THE P0 INVARIANT: every exit/artifact change breaks v2.
-                if v2_ok {
-                    survived_v2 += 1;
+                if touched.exit_or_artifacts {
+                    exit_artifact_cases += 1;
+                    // THE P0 INVARIANT: every exit/artifact change breaks v2.
+                    if v2_ok {
+                        survived_v2 += 1;
+                    }
+                    assert!(
+                        !v2_ok,
+                        "FORGERY SURVIVED v2: an exit/artifact mutation passed the \
+                         full-outcome binding — forged={forged:?}"
+                    );
+                    // And v1 is documented-blind to exactly these — it still accepts.
+                    assert!(
+                        v1_ok,
+                        "v1 must be blind to exit/artifacts (the documented gap v2 \
+                         closes) — forged={forged:?}"
+                    );
+                } else if touched.v1_field {
+                    v1_cases += 1;
+                    // memo/stdout/stderr are covered by BOTH versions.
+                    assert!(!v1_ok, "v1 must reject a v1-field mutation");
+                    assert!(!v2_ok, "v2 must reject a v1-field mutation");
+                } else {
+                    unbound_cases += 1;
+                    // A non-bound field both bindings intentionally leave
+                    // unchanged in their verification result.
+                    assert!(v1_ok, "v1 must accept a non-bound-field change");
+                    assert!(v2_ok, "v2 must accept a non-bound-field change");
                 }
-                assert!(
-                    !v2_ok,
-                    "FORGERY SURVIVED v2: an exit/artifact mutation passed the \
-                     full-outcome binding — forged={forged:?}"
-                );
-                // And v1 is documented-blind to exactly these — it still accepts.
-                assert!(
-                    v1_ok,
-                    "v1 must be blind to exit/artifacts (the documented gap v2 \
-                     closes) — forged={forged:?}"
-                );
-            } else if touched.v1_field {
-                // memo/stdout/stderr are covered by BOTH versions.
-                assert!(!v1_ok, "v1 must reject a v1-field mutation");
-                assert!(!v2_ok, "v2 must reject a v1-field mutation");
-            } else {
-                // A non-bound field (or a no-op mutation): both still accept —
-                // the bindings cover only the documented frames.
-                assert!(v1_ok, "v1 must accept a non-bound-field change");
-                assert!(v2_ok, "v2 must accept a non-bound-field change");
             }
         }
 
@@ -985,11 +1014,15 @@ mod tests {
             "{survived_v2} forgeries survived v2 — the P0 unforgeability \
              guarantee is BROKEN"
         );
-        // Sanity: the fuzz actually exercised the verdict-forgery path.
+        // Sanity: every bounded mutation class ran for every generated result.
         assert!(
-            exit_artifact_cases > 500,
-            "too few exit/artifact mutations sampled ({exit_artifact_cases}) — \
-             the fuzz did not meaningfully exercise the P0 path"
+            exit_artifact_cases == CASES * 6,
+            "unexpected exit/artifact mutation count ({exit_artifact_cases})"
+        );
+        assert_eq!(v1_cases, CASES, "every result must exercise a v1 mutation");
+        assert_eq!(
+            unbound_cases, CASES,
+            "every result must exercise an unbound mutation"
         );
     }
 
