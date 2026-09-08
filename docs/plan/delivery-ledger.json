@@ -1643,7 +1643,7 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Resolve or explicitly adjudicate the unrecoverable historical Fabricd provider-v26 criterion, then capture one version-bound 10/10 independent cold-start artifact for the valid acceptance contract. The recovered Fabricd app is a new provider v1 app on digest 2e7b; service recovery does not restore the historical v26 criterion or satisfy the one-shot/10-start gap.",
+      "next_action": "Resolve or explicitly adjudicate the unrecoverable historical Fabricd provider-v26 criterion, then capture one version-bound 10/10 independent cold-start artifact for the valid acceptance contract. Treat T2-W2b-deploy-final.json as historical/superseded/one-shot with zero current credit; the recovered Fabricd app is a new provider v1 app on digest 2e7b, and service recovery does not restore the historical v26 criterion or satisfy the one-shot/10-start gap.",
       "blockers": ["T2-W2b harness 0/10 root cause: --containers-rollout=none skipped Fabricd container application creation", "Historical Fabricd provider-v26 criterion RED: recovery recreated the app as provider v1 on digest 2e7b", "A2.4/A2.5/A2.7/A2.10 version-bound 10/10 independent cold-start artifact absent"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
@@ -1670,7 +1670,7 @@
         "docs/plan/evidence/T2-W2b-rollout-20260908-success.json: retry deployment succeeded at 100% on Worker version cb704a9d-f6e0-45d7-9e68-89a263a77993 and created ready RunnerDevEnvDO application a037c709-9f21-493c-8dcb-2414a588a1cd4 on the exact immutable DevEnv digest. This preserves the prior failed/rollback history and grants partial progress only.",
         "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence previously proved A2.5 with a running fabricd instance reporting the configured immutable digest and both health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history.",
         "docs/plan/evidence/T2-W2b-A2.7-final-20260908.json: a prior candidate Worker 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977 deployed at 100% while provider fabricd state was stopped (active=0, healthy=0, assigned=1), so rollback recovered cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; fleet returned 0/0/0 without FORCE and references remained unchanged. This retained rollback recovery supplies A2.10 history.",
-        "docs/plan/evidence/T2-W2b-deploy-final.json: final production one-shot PASS recorded Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%, ready DevEnv d105e11f..., Fabricd v26/digest 2e7b and gates 0/0/0. Version-bound local CI is 90 files / 1119 tests plus typecheck PASS at product-equivalent 9273080 source.",
+        "docs/plan/evidence/T2-W2b-deploy-final.json: historical/superseded/one-shot record (originally PASS, now UNKNOWN with claims=[] and zero credit) observed Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%, ready DevEnv d105e11f..., Fabricd v26/digest 2e7b and gates 0/0/0. It cannot establish the current app/version after recovery and does not satisfy A2.4/A2.5/A2.7/A2.10; version-bound local CI remains 90 files / 1119 tests plus typecheck PASS at product-equivalent 9273080 source.",
         "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json: after the harness 0/10 root cause (--containers-rollout=none skipped container application creation), recovery restored Worker 1418af47 at 100%, new Fabricd app a03e645c... running at provider v1 on immutable digest 2e7b, HTTP health/attestation 200, ready DevEnv d105, fleet 0/0/0 and pauses 1/1. The historical provider-v26 criterion remains RED and no completion credit is granted."
       ],
       "historical_sprint": 2
@@ -1687,7 +1687,7 @@
         "T8-W4b",
         "T7-W4b"
       ],
-      "next_action": "Source security is finally approved and the image ship plus immutable desired-config pin are recorded. After T2-W2b, deploy and roll out the Worker, then collect live qualification; do not claim deploy or live completion from the ship/pin evidence.",
+      "next_action": "Source security is finally approved and the image ship plus immutable desired-config pin are recorded. The narrow hosted-execution mechanism waiver is recorded at docs/plan/WAIVERS.md; use local Docker-equivalent CI while billing is unavailable, but preserve A2.8 (new digest boots a job) and A2.9 (3/3 real fixes within 15 minutes) in full. After T2-W2b, deploy and roll out the Worker, then collect live qualification; do not claim deploy or live completion from the ship/pin evidence.",
       "blockers": ["T2-W2b", "Worker deploy/rollout pending", "live qualification pending"],
       "commits": [
         "ccdf2967a5996c7dc33697b086f19ff03b283f47",
@@ -1710,7 +1710,7 @@
         "Historical local-image verdict: REJECTED for the fixture-PEM finding; no ship/live credit was granted.",
         "Source security approved at 377dbb0 after removing the fixture and adding explicit private-key scanner error handling.",
         "Source security final approval at defff94 after scanning real PEM blocks only.",
-        "T2-W4 image ship PASS: immutable remote digest sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c is recorded at docs/plan/evidence/T2-W4-image-ship.json. RunnerDevEnvDO desired configuration is pinned to that exact immutable ref; no deploy, rollout, or live qualification is claimed."
+        "T2-W4 image ship PASS: immutable remote digest sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c is recorded at docs/plan/evidence/T2-W4-image-ship.json. RunnerDevEnvDO desired configuration is pinned to that exact immutable ref; no deploy, rollout, or live qualification is claimed. The hosted-execution mechanism waiver at docs/plan/WAIVERS.md changes only how local CI is run and does not waive A2.8 or A2.9."
       ],
       "historical_sprint": 2
     },
@@ -3347,7 +3347,7 @@
       "role": "integrator",
       "source_commit": "7eb3822b3f7d22196a25d99f25b6c21008b1834f",
       "integrated_commit": "c15e1231fbe6950773b2611bc45fa9eafbdcf82e",
-      "conclusion": "The final one-shot production evidence is PASS for Worker 1418af47, ready DevEnv d105, fabricd v26/digest 2e7b and 0/0/0 gates. It does not promote T2-W2b: boot-sensitive A2.4/A2.5/A2.7/A2.10 require a 10/10 independent cold-start artifact.",
+      "conclusion": "The final one-shot production record is historical/superseded and has zero current credit: it was originally PASS for Worker 1418af47, ready DevEnv d105, fabricd v26/digest 2e7b and 0/0/0 gates, but recovery changed the provider app lineage. It does not promote T2-W2b; boot-sensitive A2.4/A2.5/A2.7/A2.10 require fresh evidence, including a 10/10 independent cold-start artifact.",
       "evidence": [
         "Product-equivalent local gate remains typecheck PASS and Vitest 90 files / 1119 tests PASS at 9273080e0485a202bdca5f1c2899e5169fb48e45.",
         "Earlier failed/rollback and recovered states remain retained as historical evidence."
