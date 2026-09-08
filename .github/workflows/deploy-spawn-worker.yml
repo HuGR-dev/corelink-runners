@@ -86,11 +86,6 @@ on:
         required: false
         type: boolean
         default: false
-      rotate_metrics:
-        description: "Rotate only METRICS_OBSERVABILITY_KEY and query the aggregate; skip tests and deploy."
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -99,7 +94,7 @@ jobs:
   # Narrow operator path for the write-only metrics key. This intentionally
   # does not invoke the deploy job, which would roll the container fleet.
   rotate-metrics:
-    if: inputs.rotate_metrics == 'true'
+    if: inputs.force == true
     runs-on: corelink-builder
     timeout-minutes: 10
     defaults:
@@ -182,7 +177,7 @@ jobs:
   # so no actions/setup-node is needed; checkout resolves from the baked
   # action-archive cache (0 codeload).
   test:
-    if: inputs.rotate_metrics != 'true'
+    if: inputs.force != true
     runs-on: corelink
     timeout-minutes: 15
     defaults:
@@ -201,7 +196,7 @@ jobs:
         run: npm run test
 
   deploy:
-    if: inputs.rotate_metrics != 'true'
+    if: inputs.force != true
     needs: test
     runs-on: corelink
     permissions:
