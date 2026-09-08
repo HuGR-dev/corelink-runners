@@ -21,6 +21,7 @@ NONCE='rotation-v2-test-nonce-123456'
 ok() { PASS=$((PASS + 1)); printf 'ok - %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'not ok - %s\n' "$1" >&2; }
 sha() { /usr/bin/openssl dgst -sha256 -r "$1" | /usr/bin/awk '{print $1}'; }
+trap 'chmod 755 "$CONTROLLER" 2>/dev/null || true' EXIT
 
 new_case() {
   CASE="$(mktemp -d /private/tmp/corelink-b2-local-controller.XXXXXX)"
@@ -75,6 +76,15 @@ run_mock() {
 }
 
 if PATH=/definitely-not-a-bin /bin/bash "$CONTROLLER" preflight "$NONCE" | grep -q '"mode":"plan-only"'; then ok 'plan-only is inert'; else bad 'plan-only is inert'; fi
+
+new_case
+chmod 755 "$CONTROLLER"
+if run_mock success preflight "$NONCE" >/dev/null; then ok 'owner-executable 0755 controller is accepted'; else bad 'owner-executable 0755 controller is accepted'; fi
+for mode in 775 777; do
+  chmod "$mode" "$CONTROLLER"
+  if run_mock success preflight "$NONCE" >/dev/null 2>&1; then bad "controller mode $mode is refused"; else ok "controller mode $mode is refused"; fi
+done
+chmod 755 "$CONTROLLER"
 
 new_case
 if run_mock success preflight "$NONCE" >/dev/null && run_mock success corelink-stage "$NONCE" "$KEY_ID" "$PUBKEY" >/dev/null && run_mock success postflight primary "$NONCE" "$KEY_ID" "$PUBKEY" >/dev/null && run_mock success release-freeze "$NONCE" primary >/dev/null && run_mock success lifecycle "$NONCE" "$KEY_ID" | grep -q '"operation":"lifecycle"' && [ "$(tr '\n' ' ' < "$MOCK/log")" = 'preflight release_freeze lifecycle refreeze ' ] && ! rg -q 'TEST_TOKEN_' "$MOCK/log" "$MOCK/state"; then ok 'serialized canary auto-refreezes without token output'; else bad 'serialized canary auto-refreezes without token output'; fi
