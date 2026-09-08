@@ -182,9 +182,11 @@ export class FabricdContainer extends Container<Env> {
   // longer probes an idle container — it reads a container-free activity marker first
   // (see fetch() override + the idle gate in scheduled()) and skips the health
   // probe once a shard is idle, so an idle fabricd actually sleeps and stops
-  // billing memory. Lease state is pg-durable (DATABASE_URL), so sleeping loses
-  // nothing; a new acquire wakes the container (~2-3s, hidden behind a minutes-long
-  // CI job). While leases are active the box keeps calling in, so it stays warm.
+  // billing memory. Under the current containment (`FABRIC_PG_DISABLED="1"`),
+  // the ledger is in-memory, so a sleep/restart can lose lease state. Durable
+  // persistence applies only when DATABASE_URL is bound AND that flag is the
+  // exact string "0"; a new acquire wakes the container (~2-3s, hidden behind a
+  // minutes-long CI job). While leases are active the box keeps calling in, so it stays warm.
   sleepAfter = "5m";
   // fabricd dials OUT to CoreLink introspect + billing ingest (+ the spawn-Worker
   // once boxes are wired); it needs egress.
