@@ -1,0 +1,70 @@
+---
+# PR-only, secretless build validation for the production runner image.
+#
+# This workflow deliberately has no secrets, publication command, or deploy
+# command. A pull_request checkout is untrusted; it gets a real local Docker
+# build, while the manual publication workflow remains the only registry path.
+name: image-build-impact
+
+"on":
+  pull_request:
+    paths:
+      - 'deploy/runner/**'
+      - '.github/workflows/build-cf-container-images.yml'
+      - '.github/workflows/image-build-impact.yml'
+      - 'scripts/ci/image-build-impact.sh'
+      - 'scripts/ci/image-build-impact.selftest.sh'
+      - 'scripts/ci/runner-image-build-validation.sh'
+      - 'scripts/ci/runner-image-build-validation.selftest.sh'
+      - 'scripts/ci/runner-image-static-check.sh'
+      - 'scripts/ci/runner-image-static-check.selftest.sh'
+      - 'scripts/ci/verify_build_only_workflow.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-image-build-validation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: Build changed runner image (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # v6.0.3
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind checkout to PR base/head
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          bash scripts/ci/image-build-impact.sh \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}"
+
+      - name: Build changed runner image locally
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/runner-image-build-validation.sh \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}"
+
+      - name: Run detector selftest
+        run: bash scripts/ci/image-build-impact.selftest.sh
+
+      - name: Run build-validation selftest
+        run: bash scripts/ci/runner-image-build-validation.selftest.sh
+
+      - name: Verify image metadata and bounded publication path
+        run: bash scripts/ci/runner-image-static-check.selftest.sh

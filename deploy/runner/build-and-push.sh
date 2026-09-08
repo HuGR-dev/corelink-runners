@@ -2,8 +2,9 @@
 # build-and-push.sh — build and push the CoreLink ephemeral runner image (ADR-0007)
 #
 # ⚠️ LEGACY MANUAL PATH — NOT the live build. Cloudflare-first (ADR-0008): the
-# LIVE runner image is built by `wrangler containers build` (from
-# deploy/runner/Dockerfile) and pushed to the CF managed registry — the runtime
+# LIVE runner image is built with local `docker build` (from
+# deploy/runner/Dockerfile), then pushed with `wrangler containers push` to the
+# CF managed registry — the runtime
 # image is
 # `registry.cloudflare.com/<account>/corelink-spawn-worker-runnercontainer@sha256:…`
 # (see deploy/cloudflare/wrangler.jsonc; CI: build-cf-container-images.yml). The

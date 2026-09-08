@@ -19,13 +19,13 @@
 # not support. Under the zero-hosted billing block that lane is DEAD (it fails at
 # "Set up job", so the runner image could never be rebuilt). It now runs on the
 # ephemeral `corelink` fleet, DAEMONLESS, using the proven chain:
-#   1. `docker build`  — the baked docker-shim runs nerdctl/buildkit (containerd
-#      image store). Plain `docker build` works here (proven F2 + reprobed).
-#   2. `wrangler containers push <tag>` — wrangler mints the short-lived CF
-#      registry credential and pushes via the `docker` binary (-> shim -> nerdctl
-#      push). No `docker buildx`, no Docker daemon, no hosted spend. Proven
-#      end-to-end on a live lease 2026-08-17 (a build+push of a probe image
-#      returned `Pushed image: registry.cloudflare.com/.../...`).
+#   1. `docker build` — the baked docker-shim runs nerdctl/buildkit into the
+#      containerd image store. Wrangler's locked build command uses this local
+#      image path, so the workflow deliberately builds then pushes it.
+#   2. `wrangler containers push <tag>` — Wrangler mints the short-lived CF
+#      registry credential and pushes via the docker binary. Each image is
+#      removed and the unreferenced store is pruned immediately after its push,
+#      keeping the 20 GB lease disk bounded.
 # The manifest digest is parsed from wrangler's push output for an immutable X4
 # pin; resolution fails closed if the push transcript has no valid digest.
 #
@@ -129,6 +129,9 @@ jobs:
       - name: Sanity — the docker shim (nerdctl/buildkit) answers
         run: docker version
 
+      - name: Guard — reclaim local containerd space before building
+        run: bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192
+
       - name: Install deps (wrangler)
         working-directory: deploy/cloudflare
         run: npm ci
@@ -142,14 +145,19 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-spawn-worker-runnercontainer"
           TAG="${GITHUB_SHA}"
-          # Build with plain `docker build` (shim -> nerdctl/buildkit); context =
-          # deploy/runner (Dockerfile + action-archive-pins.txt live there).
+          # shellcheck disable=SC2329
+          cleanup() { bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 --image "${IMAGE}:${TAG}" --prune-only || true; }
+          trap cleanup EXIT
+          # Context = deploy/runner (Dockerfile + action-archive-pins.txt live
+          # there). The locked Wrangler build path is local-image based, so
+          # publish it with Wrangler then reclaim all unreferenced layers.
           docker build -t "${IMAGE}:${TAG}" deploy/runner
-          # Push via wrangler (mints the CF registry cred; uses the docker binary).
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Runner image pushed: ${REF}"
+          bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+            --image "${IMAGE}:${TAG}" --prune-only
 
       # CheckHostContainer — COPYs a prebuilt static musl exec-server from its
       # context. Build it with the image's baked toolchain (musl target baked on
@@ -174,11 +182,16 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-spawn-worker-checkhostcontainer"
           TAG="${GITHUB_SHA}"
+          # shellcheck disable=SC2329
+          cleanup() { bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 --image "${IMAGE}:${TAG}" --prune-only || true; }
+          trap cleanup EXIT
           docker build -t "${IMAGE}:${TAG}" deploy/check-host
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/checkhost-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/checkhost-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "Check-host image pushed: ${REF}"
+          bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+            --image "${IMAGE}:${TAG}" --prune-only
 
       # RunnerDevEnvDO — the persistent customer development environment.
       # Its Dockerfile copies the Rust workspace plus two runtime files. The
@@ -192,13 +205,15 @@ jobs:
           set -euo pipefail
           IMAGE="corelink-runner-devenv"
           TAG="${GITHUB_SHA}"
-          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           DOCKERFILE="${GITHUB_WORKSPACE}/deploy/cloudflare/Dockerfile.runner-devenv"
           CONTEXT="$(mktemp -d)"
-          cleanup() {
+          # shellcheck disable=SC2329
+          cleanup_context() {
             rm -rf -- "${CONTEXT}"
+            bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+              --image "${IMAGE}:${TAG}" --prune-only || true
           }
-          trap cleanup EXIT
+          trap cleanup_context EXIT
 
           # Keep this context to the files named by the Dockerfile. In
           # particular, deploy/ is intentionally ignored by the root
@@ -239,22 +254,19 @@ jobs:
           print(f"RunnerDevEnv context guard: checked {len(checked)} COPY source(s)")
           PY
 
-          docker build \
-            --file "${DOCKERFILE}" \
-            --build-arg "VCS_REF=${GITHUB_SHA}" \
-            --build-arg "BUILD_DATE=${BUILD_DATE}" \
-            --build-arg "OCI_SOURCE=https://github.com/${GITHUB_REPOSITORY}" \
-            --tag "${IMAGE}:${TAG}" \
-            "${CONTEXT}"
+          cp "${DOCKERFILE}" "${CONTEXT}/Dockerfile"
+          docker build -t "${IMAGE}:${TAG}" "${CONTEXT}"
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/devenv-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/devenv-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
           echo "RunnerDevEnvDO image pushed: ${REF}"
+          bash scripts/ci/container-build-disk-guard.sh --minimum-free-mb 8192 \
+            --image "${IMAGE}:${TAG}" --prune-only
 
       - name: Summary — pushed image refs to pin in wrangler.jsonc
         run: |
           {
-            echo "### CoreLink CF Container images pushed (self-hosted, daemonless)"
+            echo "### CoreLink CF Container images pushed (self-hosted, bounded local store)"
             echo ""
             echo "Pin these in \`deploy/cloudflare/wrangler.jsonc\` (containers[].image):"
             echo ""

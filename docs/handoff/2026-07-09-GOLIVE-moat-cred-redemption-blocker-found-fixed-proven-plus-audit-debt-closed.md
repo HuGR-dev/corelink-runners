@@ -41,8 +41,9 @@ armed does not prove the box can use the cred.**
 
 ## Deployed + PROVEN LIVE
 
-- Built the boot-guarded binary (`wrangler containers build`, tag
-  `golive-20260709-credredemption`) → digest `sha256:91f4b7ea…`.
+- Built the boot-guarded binary with local Docker, then published the tag
+  `golive-20260709-credredemption` via `wrangler containers push` → digest
+  `sha256:91f4b7ea…`.
 - **Rolling rollout** `bce176bd → 91f4b7ea` (instance version 3 → 4), **health 200
   throughout the rollout — no downtime**.
 - **Boot-guard proof:** prod attestation key `faa5b7726ccd2c52` present ⇒ the prod
