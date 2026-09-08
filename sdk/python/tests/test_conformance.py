@@ -5,7 +5,7 @@ directories above this file) and asserts that the Python implementation
 produces byte-identical results to the Rust reference implementation in
 ``crates/corelink-cli/src/binding.rs``.
 
-This is the same shared vector hugit mirrors.  Any change to the v2 formula
+This is the same shared vector external clients mirror.  Any change to the v2 formula
 on the fabric side changes the vector — and this test breaks — making
 drift impossible to miss.
 """

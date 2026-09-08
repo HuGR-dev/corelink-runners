@@ -1,9 +1,9 @@
-//! Wire-contract types for the hugit ⇄ CoreLink Runners seam.
+//! Wire-contract types for the external consumer ⇄ CoreLink Runners seam.
 //!
 //! # Wire-contract rule
 //!
-//! Types in this crate are **transcriptions** of the frozen hugit-contracts
-//! types, NOT dependencies on that crate. The seam between hugit and
+//! Types in this crate are **transcriptions** of the frozen contract snapshot
+//! types, NOT dependencies on that crate. The seam between the external consumer and
 //! corelink-runners is the **wire contract**: types declared independently on
 //! each side and proven equivalent by **shared JSON conformance vectors
 //! committed byte-identical in both repos**.
@@ -11,14 +11,14 @@
 //! - No `git` dependencies in either direction (both `deny.toml`: crates.io
 //!   only).
 //! - The frozen list (R0, 2026-06-10): `RunnerLease`, `RunnerState`,
-//!   `FenceManifest` — the runner's whole hugit-contracts surface. Plus the
+//!   `FenceManifest` — the runner's whole frozen contract surface. Plus the
 //!   closure type `MaterializedEntry` referenced by `FenceManifest`.
 //! - Conformance vectors live in `conformance/` at the workspace root;
 //!   `conformance/manifest.sha256` ties both repos to the same byte-exact
 //!   digests. Drift on either side breaks golden tests immediately.
 //!
-//! Source repo for the originals:
-//! hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+//! Frozen contract snapshot:
+//! contract snapshot @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 //! (RunnerLease/RunnerState/FenceManifest/MaterializedEntry);
 //! IntentMetrics/TokenCounts/ToolCount @ 443ff1b (context_envelope,
 //! schema 1.2.0 — see `intent_metrics`);

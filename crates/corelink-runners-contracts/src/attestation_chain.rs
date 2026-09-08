@@ -1,9 +1,9 @@
-// Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
+// Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
 
 //! AttestationChain — full provenance attestation chain (decomposition §1,
 //! item 14 (+); whitepaper §9).
 //!
-//! Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) per the
+//! Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) per the
 //! wire-contract rule — no git dep.
 
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,8 @@ pub struct AttestationChain {
     ///
     /// # FROZEN signature pre-image (BYTE-EXACT, single-sourced)
     ///
-    /// On the hugit side built only by
-    /// `hugit_refstore::attestation_sig_preimage`; transcribed here for the
+    /// The external refstore builds this only with
+    /// the external refstore attestation_sig_preimage implementation; transcribed here for the
     /// fabric side.
     ///
     /// ```text

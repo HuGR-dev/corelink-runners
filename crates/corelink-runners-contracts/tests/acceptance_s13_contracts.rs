@@ -170,7 +170,7 @@ fn schema_version_pinned_1_2_0() {
 fn intent_metrics_conformance_vector_round_trips_byte_exact() {
     // The cross-repo §13.4 vector (conformance/IntentMetrics.json) must
     // round-trip through the transcribed type byte-exactly, mirroring
-    // hugit's item-② oracle: to_string_pretty + the committed trailing
+    // the external consumer's item-② oracle: to_string_pretty + the committed trailing
     // newline, compared without trim so any whitespace drift breaks here.
     let raw = include_str!("../../../conformance/IntentMetrics.json");
     let parsed: IntentMetrics =

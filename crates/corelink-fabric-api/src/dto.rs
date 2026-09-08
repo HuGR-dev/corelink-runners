@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct AcquireRequest {
     /// Pinned image reference (`sha256:` digest). Unpinned images are
-    /// rejected `Invalid` (400) before any box/VM contact (hugit X4
+    /// rejected `Invalid` (400) before any box/VM contact (X4
     /// verify-before-spawn; API2 acceptance).
     pub image_digest: String,
 
@@ -44,7 +44,7 @@ pub struct AcquireRequest {
     /// Direct-CI runner mode (ADR-0007). `Some` → provision an ephemeral
     /// GitHub Actions runner for this lease (net_policy is forced to
     /// `"egress-runner"` server-side, ignoring `net_policy` above). `None`
-    /// (the default) → the classic hugit check-exec lease. Additive +
+    /// (the default) → the classic check-exec lease. Additive +
     /// default-off: omitting it is byte-identical to the prior request.
     #[serde(default)]
     pub runner: Option<RunnerSpec>,
@@ -55,8 +55,8 @@ pub struct AcquireRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolchain_digest: Option<String>,
 
-    /// Agent-exec mode (ratified (B) with hugit 2026-07-05). `Some` → provision
-    /// an EGRESS-enabled, NON-memoized box for hugit's off-box §13 agent loop to
+    /// Agent-exec mode (ratified (B) with the contract owner 2026-07-05). `Some` → provision
+    /// an EGRESS-enabled, NON-memoized box for an external off-box §13 agent loop to
     /// drive via `POST /v1/leases/{id}/agent-exec` (peer to `runner` /
     /// check-host). Additive + default-off: omitting it is byte-identical to the
     /// prior request. Mutually exclusive with `runner` (both `Some` → 400).
@@ -83,9 +83,9 @@ pub struct AcquireRequest {
     pub installation_id: Option<String>,
 }
 
-/// Agent-mode acquire spec (ratified (B) exec-server-drive with hugit,
+/// Agent-mode acquire spec (ratified (B) exec-server-drive with the contract owner,
 /// 2026-07-05). When `AcquireRequest.agent` is `Some`, the fabric provisions an
-/// EGRESS-enabled, NON-memoized box that hugit's off-box §13 agent loop drives
+/// EGRESS-enabled, NON-memoized box that the external off-box §13 agent loop drives
 /// via `POST /v1/leases/{id}/agent-exec` — the agent's build/test/edit tool-call
 /// sandbox. Currently a marker: egress + no-memoization are the mode's semantics
 /// (no per-acquire params yet), so it serializes to `{}`. Extensible additively.
@@ -98,7 +98,7 @@ pub struct AgentSpec {}
 /// provisions an EPHEMERAL GitHub Actions runner for this lease (the lease's
 /// `net_policy` is forced to `"egress-runner"` server-side and a JIT
 /// registration config is injected into the box) instead of a hermetic
-/// check-exec box. `None` (the default) is the classic hugit check-exec path.
+/// check-exec box. `None` (the default) is the classic check-exec path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSpec {
@@ -130,10 +130,10 @@ pub enum RunnerTargetDto {
 }
 
 /// §13.2 ingest credential surfaced to an **off-box** submitter — the cost-killer
-/// path "A". hugit's dispatch client submits its agent loop's §13.1 IntentMetrics
+/// path "A". An external dispatch client submits its agent loop's §13.1 IntentMetrics
 /// (tokens/model/`cost_usd_micros`) directly, because the metrics originate in
-/// hugit's agent loop, NOT a fabric box. The fabric hosts the lease + signs the
-/// attestation over what hugit submits. This carries the SAME scoped, write-only,
+/// an external agent loop, NOT a fabric box. The fabric hosts the lease + signs the
+/// attestation over what the external client submits. This carries the SAME scoped, write-only,
 /// lease-folded token the box receives — returned to the **trusted lease owner**
 /// (authenticated on acquire by the tenant PAT) so an off-box agent can `POST`
 /// trajectory events without a box. NOT a tenant PAT: an exfiltrated token can
@@ -187,7 +187,7 @@ pub struct AcquireResponse {
 /// `GET /v1/leases/{lease_id}` response body — lease status.
 ///
 /// Mirrors the CP1 ledger exactly; the fabric must not invent intermediate
-/// authoritative states hugit can't observe (contract §1).
+/// authoritative states an external client can't observe (contract §1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusResponse {
@@ -256,7 +256,7 @@ pub struct ExecResponse {
     /// pre-image). Binds the RESULT CONTENT to the attestation without
     /// touching the frozen `AttestationChain` shape — the fabric's
     /// result-binding extension, flagged for §12 amendment-log discussion
-    /// with hugit. Verified by
+    /// with the external verifier. Verified by
     /// `corelink-fabric-server::attestation::verify_execution`. v1 does NOT
     /// cover `exit` or `artifacts` — see [`Self::result_binding_sig_v2`].
     pub result_binding_sig: String,
@@ -264,7 +264,7 @@ pub struct ExecResponse {
     /// The fabric's **v2** result-binding signature — the FULL-outcome
     /// binding over `LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref) ‖
     /// i32_be(exit) ‖ u32_be(artifacts.len) ‖ ∀ artifact: LP(path) ‖
-    /// LP(digest)` (the exact byte formula hugit must mirror). Unlike v1, v2
+    /// LP(digest)` (the exact byte formula external verifiers mirror). Unlike v1, v2
     /// covers the pass/fail VERDICT (`exit`) and the output digests
     /// (`artifacts`), closing the forgeable-verdict gap. ADDITIVE alongside
     /// v1 (no flag-day); verified by
@@ -279,7 +279,7 @@ pub struct ExecResponse {
     /// deterministically from the public key bytes as
     /// `lower_hex(SHA-256(pubkey_bytes))[..16]` (the first 8 bytes of the
     /// SHA-256 digest, hex-encoded — 16 hex characters). OUTSIDE the v2
-    /// signed pre-image — never enters `result_binding_preimage_v2`. hugit
+    /// signed pre-image — never enters `result_binding_preimage_v2`. An external verifier
     /// can recompute it from `GET /v1/attestation/key`. ADDITIVE;
     /// `#[serde(default)]` so an older payload without it deserializes to
     /// the empty string.
@@ -288,10 +288,10 @@ pub struct ExecResponse {
 }
 
 /// `POST /v1/leases/{lease_id}/agent-exec` request body — drive an ARBITRARY
-/// command in an `agent`-mode lease (ratified (B) exec-server-drive with hugit,
+/// command in an `agent`-mode lease (ratified (B) exec-server-drive with the contract owner,
 /// 2026-07-05). UNLIKE the check exec (`ExecRequest`/`CheckDef`): egress-enabled
 /// and **NEVER memoized** — no `toolchain_ref`, no memo key, no attestation of a
-/// memo axis. It is the agent's tool-call sandbox; hugit's off-box §13 loop
+/// memo axis. It is the agent's tool-call sandbox; the external off-box §13 loop
 /// drives build/test/edit here and reads the captured stdio back via the poll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -359,9 +359,9 @@ pub struct AgentExecResult {
     pub truncated: bool,
 }
 
-/// `POST /v1/queue/trigger` request body — hugit's landing queue triggers
+/// `POST /v1/queue/trigger` request body — the external landing queue triggers
 /// execution of an uncached check on demand (contract §9, the `QueueApi`
-/// seam; hugit B5). (API4 amendment to the CF0 freeze, lead-ratified.)
+/// seam; B5). (API4 amendment to the CF0 freeze, lead-ratified.)
 ///
 /// The queue delivers at-least-once: the fabric dedups on
 /// `(tenant, entry.item_id, tree_hash)` and answers a duplicate delivery
@@ -536,7 +536,7 @@ pub struct CloseResponse {
     /// the JSON (not `null`), so a peer under `deny_unknown_fields` that has
     /// not yet transcribed this field is unaffected. The fabric emits `Some`
     /// only when `FABRIC_EMIT_INTENT_METRICS_SIG` is on — flip it on only AFTER
-    /// the verifier (hugit) adopts the field. Until then the wire is byte-
+    /// the external verifier adopts the field. Until then the wire is byte-
     /// identical to today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_metrics_sig: Option<String>,
@@ -545,7 +545,7 @@ pub struct CloseResponse {
 /// One entry in the `GET /v1/attestation/key` key-set response. Forward-
 /// compatible: the set is currently a 1-element slice (M1: single key, no
 /// rotation machinery), but the shape accommodates future rotation without
-/// a flag-day on hugit's verifier.
+/// a flag-day on the external verifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyEntry {
@@ -572,7 +572,7 @@ pub struct KeyEntry {
 ///
 /// At M1 the set is always a 1-element slice (one fabric signing key per
 /// region, no rotation machinery). The set shape is forward-compatible: a
-/// future rotation wave adds entries without a flag-day on hugit's verifier.
+/// future rotation wave adds entries without a flag-day on the external verifier.
 /// Key custody per ratified decision #2: ed25519, one fabric signing key per
 /// region. Every `AttestationChain.sig` and `result_binding_sig*` this fabric
 /// emits verifies against the active key.
@@ -586,7 +586,7 @@ pub struct AttestationKeySetResponse {
 /// Why a key-set selection rejected (the fail-closed reasons a consumer must
 /// honour). The verdict vocabulary is frozen by
 /// `conformance/attestation_keyset_selection.json` so the runner (producer of
-/// the key set) and hugit's verifier (consumer) agree byte-for-byte on which
+/// the key set) and the external verifier (consumer) agree byte-for-byte on which
 /// `(key_id, now_ms)` inputs accept vs reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySelectError {

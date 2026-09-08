@@ -22,7 +22,7 @@
 //!   NOT the tenant PAT, and that the raw PAT appears nowhere in the box env.
 //! - INGEST authenticates with that scoped token (a wrong/absent token, and the
 //!   tenant PAT itself, are 401 fail-closed). POLL keeps the tenant-PAT gate
-//!   (hugit's trusted subscriber, Option A; a wrong credential fails closed).
+//!   (the trusted subscriber, Option A; a wrong credential fails closed).
 //!
 //! ## Why the hook is re-registered with a short ack window
 //!

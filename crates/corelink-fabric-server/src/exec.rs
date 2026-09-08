@@ -145,7 +145,7 @@ fn content_ref(bytes: &[u8]) -> String {
 
 /// The FROZEN memo-key formula, transcribed byte-exactly from
 /// `corelink-runners-contracts/src/check_result.rs` (single-sourced on the
-/// hugit side as `hugit_refstore::compute_memo_key`):
+/// the external consumer side as the external refstore's compute_memo_key implementation):
 ///
 /// ```text
 /// memo_key = lower_hex( SHA-256( LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest) ) )

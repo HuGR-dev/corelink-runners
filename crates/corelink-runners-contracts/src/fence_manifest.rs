@@ -3,7 +3,7 @@
 //! Claim-filtered sparse materialization manifest (whitepaper §9.1).
 //! Sparse materialization IS the fence.
 //!
-//! Transcribed from hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+//! Transcribed from frozen wire-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 //! per the wire-contract rule — no git dep; conformance via shared vectors
 //! (see `conformance/` at the workspace root).
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// A (path, digest) pair for a materialised file entry.
 ///
-/// Transcribed from hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+/// Transcribed from frozen wire-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 /// per the wire-contract rule — no git dep; conformance via shared vectors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

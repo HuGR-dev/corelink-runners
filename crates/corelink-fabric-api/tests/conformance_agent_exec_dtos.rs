@@ -1,7 +1,7 @@
 //! Byte-exact conformance vectors for the agent-exec seam DTOs (ratified (B)
-//! exec-server-drive with hugit, 2026-07-05). The committed
+//! exec-server-drive with the contract owner, 2026-07-05). The committed
 //! `conformance/{AgentExecRequest,AgentExecAck,AgentExecResult}.json` files are
-//! **byte-identical in both repos** (the hugit transport transcribes them
+//! **byte-identical in both repos** (the external transport transcribes them
 //! verbatim) and are the drift tripwire — the SAME discipline as the 4 lease
 //! DTOs (`conformance_lease_dtos.rs`).
 //!

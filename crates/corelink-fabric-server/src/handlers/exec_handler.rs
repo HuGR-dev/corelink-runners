@@ -185,7 +185,7 @@ pub(crate) async fn exec(
     // is fail-closed — no result is ever fabricated.
     //
     // `tree_hash` (first memo axis) comes from the request — the wave-4
-    // CF0 amendment: the caller (hugit's forge) owns the workspace snapshot
+    // CF0 amendment: the caller (the external consumer's forge) owns the workspace snapshot
     // identity, and the memo key must never collapse across trees.
     // `runner_ref` is the ledger's own box_ref — the opaque reference to
     // the box/VM serving this lease.

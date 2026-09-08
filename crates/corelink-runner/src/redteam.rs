@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/src/broker/redteam.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence `src/broker/redteam.rs` module @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! Active escape red-team harness (WP-C5b item **⑤**).
 //!
 //! This is not a passive assertion that the fence *should* hold — it

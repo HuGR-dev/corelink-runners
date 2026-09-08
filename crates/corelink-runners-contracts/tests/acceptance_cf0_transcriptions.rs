@@ -1,7 +1,7 @@
-//! Acceptance suite CF0 — frozen hugit-contracts transcriptions
+//! Acceptance suite CF0 — frozen contract transcriptions
 //! (CheckDef, Artifact + CheckResult, AttestationChain, landing-queue types).
 //!
-//! Source anchor: hugit-contracts @ 7736d02 (frozen WP-00).
+//! Source anchor: frozen wire-contracts @ 7736d02 (frozen WP-00).
 
 use corelink_runners_contracts::{
     Artifact, AttestationChain, BatchSeal, CheckDef, CheckResult, LandableEntry,
@@ -274,7 +274,7 @@ fn queue_api_roundtrip_and_strictness() {
     // implicitly optional even without #[serde(default)] (missing field
     // deserializes via `missing_field` → `deserialize_option` → None), so
     // the absent field also yields None — same wire behaviour as the frozen
-    // hugit anchor, which carries no #[serde(default)] either.
+    // the external consumer anchor, which carries no #[serde(default)] either.
     let mut absent_pair = base.clone();
     absent_pair
         .pointer_mut("/seal")

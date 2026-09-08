@@ -4,7 +4,7 @@
 //! The committed `conformance/cloudflare-spawn.json` is the **drift tripwire**:
 //! it pins the canonical `POST /v1/spawn` request body shape and the success
 //! response (`{"handle":...}`), byte-identical to what the Cloudflare Worker on
-//! the other side must accept/emit (mirrors the hugit/clw conformance
+//! the other side must accept/emit (mirrors the frozen legacy CLW conformance
 //! discipline). These golden tests drive the real [`CloudflareEngine`] over a
 //! fake [`HttpTransport`] — no account, no network — capture the request the
 //! engine actually emits, and assert its structural fields match the vector.

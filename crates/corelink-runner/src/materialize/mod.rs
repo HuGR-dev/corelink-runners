@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/src/materialize/mod.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence `src/materialize/mod.rs` module @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! Sparse fence materialization: hydrate a workspace by path-set.
 //!
 //! Materialization is the fence. Given a frozen [`FenceManifest`] and a set of

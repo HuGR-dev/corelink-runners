@@ -1,6 +1,6 @@
 //! Acceptance — agent-exec (slices 2..N): the egress-enabled, NON-memoized
 //! command driver for `agent`-mode leases (ratified (B) exec-server-drive with
-//! hugit, 2026-07-05).
+//! the external consumer, 2026-07-05).
 //!
 //! In-process only (`tower::ServiceExt::oneshot`, no sockets, no box): a
 //! `CapturingProvisioner` records the exact `ContainerSpec` the fabric derives
