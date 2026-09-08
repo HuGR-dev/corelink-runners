@@ -1,8 +1,8 @@
 {
   "schema_version": "evidence/v1",
   "artifact_id": "t2-w2b-rollout-20260908",
-  "kind": "deploy+rollback+probe",
-  "status": "ROLLBACK",
+  "kind": "probe",
+  "status": "FAILED",
   "observed_at": "2026-09-08T00:38:10Z",
   "source": {
     "repository": "corelink-runners",
