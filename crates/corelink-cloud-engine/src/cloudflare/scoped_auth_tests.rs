@@ -37,7 +37,7 @@ fn config(spawn: &str, exec: &str, lifecycle: &str) -> CloudflareConfig {
 
 fn runner_spec() -> ContainerSpec {
     ContainerSpec {
-        name: "auth-test".to_string(),
+        name: "corelink-job-auth-test".to_string(),
         image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
             .to_string(),
         tmp_root: "/tmp/job".to_string(),
