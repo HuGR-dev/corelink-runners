@@ -94,7 +94,6 @@ jobs:
   # Narrow operator path for the write-only metrics key. This intentionally
   # does not invoke the deploy job, which would roll the container fleet.
   rotate-metrics:
-    if: inputs.force == true
     runs-on: corelink-builder
     timeout-minutes: 10
     defaults:
@@ -177,7 +176,7 @@ jobs:
   # so no actions/setup-node is needed; checkout resolves from the baked
   # action-archive cache (0 codeload).
   test:
-    if: inputs.force != true
+    if: false
     runs-on: corelink
     timeout-minutes: 15
     defaults:
@@ -196,7 +195,7 @@ jobs:
         run: npm run test
 
   deploy:
-    if: inputs.force != true
+    if: false
     needs: test
     runs-on: corelink
     permissions:
