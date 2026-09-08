@@ -21,6 +21,17 @@ CONTROLLER_BIN="$CONTROLLER_DIR/rotation-controller.sh"
 
 refuse() { exit 2; }
 valid_sha256() { [[ "$1" =~ ^[a-f0-9]{64}$ ]]; }
+file_mode() { stat -f '%Lp' -- "$1" 2>/dev/null || stat -c '%a' -- "$1"; }
+file_uid() { stat -f '%u' -- "$1" 2>/dev/null || stat -c '%u' -- "$1"; }
+secure_script() {
+  local path="$1" mode
+  [ -f "$path" ] && [ ! -L "$path" ] && [ "$(file_uid "$path")" = "$(id -u)" ] || return 1
+  [ -x "$path" ] || return 1
+  mode="$(file_mode "$path")" || return 1
+  [[ "$mode" =~ ^0?[0-7]{3}$ ]] || return 1
+  mode="${mode#0}"
+  [ $((8#$mode & 022)) -eq 0 ] && [ $((8#$mode & 0100)) -ne 0 ]
+}
 
 [ "$#" -ge 1 ] || refuse
 action="$1"
@@ -42,11 +53,10 @@ manifest="$ROTATION_CONTROL_MANIFEST"
 valid_sha256 "$ROTATION_LOCAL_CONTROLLER_SHA256" || refuse
 valid_sha256 "$ROTATION_LOCAL_MANIFEST_SHA256" || refuse
 
-# The package-owned controller path is fixed by this package layout. The controller
-# independently checks its exact mode, owner, and pinned content hash.
-[ -x "$CONTROLLER_BIN" ] && [ ! -L "$CONTROLLER_BIN" ] || refuse
-controller_mode="$(stat -f '%Lp' "$CONTROLLER_BIN" 2>/dev/null || stat -c '%a' "$CONTROLLER_BIN")" || refuse
-[[ "$controller_mode" =~ ^0?700$ ]] || refuse
+# The package-owned controller path is fixed by this package layout. The
+# controller independently checks the same owner, mode, and pinned-content
+# invariants before executing any operation.
+secure_script "$CONTROLLER_BIN" || refuse
 
 declare -a fields=()
 case "$action" in
@@ -108,6 +118,7 @@ for ((index=0; index<${#fields[@]}; index++)); do
     [[ "$rest" = *"$delimiter"* ]] || refuse
     value="${rest%%"$delimiter"*}"
     rest="${rest#*"$delimiter"}"
+    rest="\"$next\":\"$rest"
   else
     [[ "$rest" = *'"' ]] || refuse
     value="${rest%\"}"
