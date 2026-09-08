@@ -1,0 +1,58 @@
+{
+  "artifact_id": "b2-worker-matrix-1b39ee5265fb490290970f6ffa6d8dbd",
+  "candidate_attempts": [],
+  "candidate_cold_witnesses_recorded": 0,
+  "candidate_cold_witnesses_required": 10,
+  "candidate_deployment_id_cardinality": 1,
+  "candidate_deployment_ids": ["3ee47414-cc95-418e-8833-aa7dc51e51e8"],
+  "candidate_version_id_cardinality": 1,
+  "candidate_version_ids": ["d697d9b8-2138-4b08-a665-2999d3d29400"],
+  "cold_witness_failures": [],
+  "companion": {
+    "argv": ["python3", "scripts/ops/t2-w2b-cold-matrix/harness.py"],
+    "argv_sha256": "0427d1cdae8a23cd4bb9ebaf103d2d435ed221a6f19f78d367900a8867967932",
+    "attempts_per_phase": 10,
+    "protocol": "sleepwake-evidence/v1",
+    "timeout_seconds": 6600
+  },
+  "contract": {
+    "cycles_required": 10,
+    "fabric_origin": "https://corelink-fabricd.gmhelmold.workers.dev",
+    "health_method": "GET",
+    "health_path": "/health",
+    "mutating_operations": ["spawn_worker_deploy", "spawn_worker_rollback"],
+    "rollback_target_version_id": "1418af47-d71a-488f-89a6-cbb9173402bd",
+    "wake_route": "/health"
+  },
+  "cycles_completed": 0,
+  "cycles_required": 10,
+  "failure": "cold witness failure artifact invalid: cold witness failure artifact has no structured failure",
+  "final_worker_restore": {
+    "status": "PASS",
+    "witness": {
+      "deployment_created_on": "2026-09-08T04:44:24.110982Z",
+      "deployment_id": "c17c10b5-e473-4202-a796-5c363ea9cb1d",
+      "paused": {
+        "AUTOSCALER_INTAKE_PAUSED": "1",
+        "AUTOSCALER_REDRIVE_PAUSED": "1"
+      },
+      "traffic_percent": 100,
+      "version_id": "1418af47-d71a-488f-89a6-cbb9173402bd"
+    }
+  },
+  "kind": "probe",
+  "matrix_run_id": "b2-worker-live-20260908-preflightfix",
+  "mutated": true,
+  "mutation_started": true,
+  "observed_at": "2026-09-08T04:44:29.998126Z",
+  "preflight": {"npm_ci": 0, "test": 0, "typecheck": 0},
+  "raw_logs_retained": false,
+  "records": [],
+  "rollback_attempts": [],
+  "rollback_cold_witnesses_recorded": 0,
+  "rollback_cold_witnesses_required": 10,
+  "schema": "corelink/b2-worker-matrix/v1",
+  "schema_version": "evidence/v1",
+  "stable_version": "1418af47-d71a-488f-89a6-cbb9173402bd",
+  "status": "RED"
+}
