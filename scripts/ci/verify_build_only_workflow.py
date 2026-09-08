@@ -38,6 +38,67 @@ DENIED_COMMANDS = (
     ("workflow dispatch", re.compile(r"\bgh\s+workflow\s+run\b", re.I)),
 )
 
+TOKEN_REFERENCES = (
+    ("github.token interpolation", re.compile(r"\bgithub\.token\b", re.I)),
+    (
+        "token interpolation",
+        re.compile(
+            r"\$\{\{[^}\n]*(?:GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|GH_TOKEN|[A-Z_]*TOKEN)[^}\n]*\}\}",
+            re.I,
+        ),
+    ),
+    (
+        "runtime token variable",
+        re.compile(r"\$\{?(?:ACTIONS_RUNTIME_TOKEN|GITHUB_TOKEN|GH_TOKEN)\}?\b", re.I),
+    ),
+)
+
+
+def action_blocks(text: str) -> list[tuple[str, str]]:
+    """Return (uses reference, complete step text) for every action step.
+
+    The repository intentionally avoids a third-party YAML dependency in these
+    offline guards. GitHub action steps have a stable two-space nesting shape;
+    this parser finds both ``- uses:`` and ``- name: ...`` followed by
+    ``uses:`` and retains the step's ``with:`` body for policy checks.
+    """
+
+    lines = text.splitlines()
+    result: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        direct = re.match(r"^(?P<indent>\s*)-\s+uses:\s*(?P<ref>[^\s#]+)", line)
+        nested = re.match(r"^(?P<indent>\s*)uses:\s*(?P<ref>[^\s#]+)", line)
+        if direct:
+            step_indent = len(direct.group("indent"))
+            reference = direct.group("ref")
+            start = index
+        elif nested:
+            key_indent = len(nested.group("indent"))
+            step_indent = key_indent - 2
+            reference = nested.group("ref")
+            start = index
+            while start > 0:
+                candidate = lines[start - 1]
+                if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= step_indent:
+                    break
+                start -= 1
+        else:
+            continue
+
+        end = index + 1
+        while end < len(lines):
+            candidate = lines[end]
+            if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= step_indent:
+                break
+            end += 1
+        result.append((reference, "\n".join(lines[start:end])))
+    return result
+
+
+def action_push_value(block: str) -> str | None:
+    match = re.search(r"(?m)^\s+push\s*:\s*(.*?)\s*(?:#.*)?$", block)
+    return match.group(1).strip().strip("'\"").lower() if match else None
+
 
 def run_blocks(text: str) -> list[str]:
     """Extract YAML literal ``run`` blocks without needing PyYAML."""
@@ -88,11 +149,30 @@ def verify(workflow_path: Path, validator_path: Path) -> int:
         (r"github\.event\.pull_request\.number", "PR-scoped concurrency"),
         (r"^  cancel-in-progress:\s+true\s*$", "bounded concurrency cancellation"),
         (r"^      - 'deploy/runner/\*\*'\s*$", "runner context path trigger"),
+        (
+            r"^      - '\.github/workflows/build-cf-container-images\.yml'\s*$",
+            "production image workflow trigger",
+        ),
+        (r"^      - '\.github/workflows/image-build-impact\.yml'\s*$", "workflow trigger"),
+        (r"^      - 'scripts/ci/image-build-impact\.sh'\s*$", "impact detector trigger"),
+        (
+            r"^      - 'scripts/ci/image-build-impact\.selftest\.sh'\s*$",
+            "impact detector selftest trigger",
+        ),
+        (
+            r"^      - 'scripts/ci/runner-image-build-validation\.sh'\s*$",
+            "build validator trigger",
+        ),
+        (
+            r"^      - 'scripts/ci/runner-image-build-validation\.selftest\.sh'\s*$",
+            "build validator selftest trigger",
+        ),
         (r"^      - 'scripts/ci/runner-image-static-check\.sh'\s*$", "static-check path trigger"),
         (
             r"^      - 'scripts/ci/runner-image-static-check\.selftest\.sh'\s*$",
             "static selftest path trigger",
         ),
+        (r"^      - 'scripts/ci/verify_build_only_workflow\.py'\s*$", "build-only checker trigger"),
         (r"runner-image-build-validation\.sh", "build validator invocation"),
     )
     for pattern, description in required:
@@ -100,6 +180,11 @@ def verify(workflow_path: Path, validator_path: Path) -> int:
             return fail(f"missing {description}")
     if re.search(r"pull_request_target|secrets\.", workflow):
         return fail("trusted trigger or secret reference found")
+
+    for description, pattern in TOKEN_REFERENCES:
+        match = pattern.search(workflow)
+        if match:
+            return fail(f"{description} found: {match.group(0)}")
 
     blocks = run_blocks(workflow)
     if not blocks:
@@ -110,11 +195,23 @@ def verify(workflow_path: Path, validator_path: Path) -> int:
         if match:
             return fail(f"{description} found in workflow command: {match.group(0)}")
 
+    for reference, block in action_blocks(workflow):
+        reference_lower = reference.lower()
+        if re.search(r"(?:^|/)(?:docker|azure|redhat-actions)/.*(?:build-push|login)", reference_lower):
+            return fail(f"publication-capable action found: {reference}")
+        push_value = action_push_value(block)
+        if push_value is not None and push_value not in {"false", "0", "no", "off"}:
+            return fail(f"action publication input found in {reference}: push: {push_value}")
+
     # The validator itself is shell, not YAML. Keep the same denylist over its
     # executable source as a second fence against a future publication escape.
     validator_lines = [line for line in validator.splitlines() if not line.lstrip().startswith("#")]
     validator_text = "\n".join(validator_lines)
     for description, pattern in DENIED_COMMANDS:
+        match = pattern.search(validator_text)
+        if match:
+            return fail(f"{description} found in validator: {match.group(0)}")
+    for description, pattern in TOKEN_REFERENCES:
         match = pattern.search(validator_text)
         if match:
             return fail(f"{description} found in validator: {match.group(0)}")

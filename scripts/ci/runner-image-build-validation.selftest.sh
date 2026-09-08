@@ -83,6 +83,33 @@ if python3 "$checker" "$mutated" "$validator"; then
   exit 1
 fi
 
+for trigger in \
+  '.github/workflows/build-cf-container-images.yml' \
+  '.github/workflows/image-build-impact.yml' \
+  'scripts/ci/image-build-impact.sh' \
+  'scripts/ci/image-build-impact.selftest.sh' \
+  'scripts/ci/runner-image-build-validation.sh' \
+  'scripts/ci/runner-image-build-validation.selftest.sh' \
+  'scripts/ci/runner-image-static-check.sh' \
+  'scripts/ci/runner-image-static-check.selftest.sh' \
+  'scripts/ci/verify_build_only_workflow.py'; do
+  python3 - "$workflow" "$mutated" "$trigger" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, trigger = sys.argv[1:]
+needle = f"      - '{trigger}'"
+text = Path(source).read_text(encoding='utf-8')
+if needle not in text:
+    raise SystemExit(f'trigger mutation anchor disappeared: {trigger}')
+Path(destination).write_text(text.replace(needle + "\n", '', 1), encoding='utf-8')
+PY
+  if python3 "$checker" "$mutated" "$validator"; then
+    echo "workflow mutation (missing trigger: $trigger) was not detected" >&2
+    exit 1
+  fi
+done
+
 mutate_command() {
   local replacement=$1
   python3 - "$workflow" "$mutated" "$replacement" <<'PY'
@@ -125,4 +152,53 @@ expect_rejected 'wrangler publisher' 'wrangler containers push image:tag'
 expect_rejected 'package publisher' 'npm publish image.tgz'
 expect_rejected 'HTTP registry publisher' 'curl -X PUT registry.example/v2/image'
 expect_rejected 'workflow dispatch' 'gh workflow run build-cf-container-images.yml'
+
+mutate_step() {
+  local replacement=$1
+  python3 - "$workflow" "$mutated" "$replacement" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination, replacement = sys.argv[1:]
+text = Path(source).read_text(encoding='utf-8')
+needle = '      - name: Verify image metadata and bounded publication path\n'
+if needle not in text:
+    raise SystemExit('step mutation anchor disappeared')
+Path(destination).write_text(text.replace(needle, replacement + '\n' + needle, 1), encoding='utf-8')
+PY
+}
+
+expect_step_rejected() {
+  local label=$1
+  shift
+  mutate_step "$1"
+  if python3 "$checker" "$mutated" "$validator"; then
+    echo "workflow mutation (${label}) was not detected" >&2
+    exit 1
+  fi
+}
+
+expect_step_rejected 'build-push action publication' '      - name: Forbidden publisher
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true'
+expect_step_rejected 'docker login action' '      - name: Forbidden login
+        uses: docker/login-action@v3
+        with:
+          registry: registry.example
+          username: attacker
+          password: ignored'
+expect_step_rejected 'github token interpolation' '      - name: Forbidden token
+        uses: actions/checkout@v6
+        with:
+          token: ${{ github.token }}'
+expect_step_rejected 'runtime token interpolation' '      - name: Forbidden runtime token
+        uses: actions/checkout@v6
+        with:
+          token: ${{ env.ACTIONS_RUNTIME_TOKEN }}'
+expect_step_rejected 'shell token interpolation' '      - name: Forbidden shell token
+        uses: actions/checkout@v6
+        with:
+          token: $GITHUB_TOKEN'
 echo 'PASS workflow trust and publisher mutations are rejected'
