@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MOCK_LOG:?}"
+: "${ROTATION_OPERATION:?}"
+[ "$#" -eq 0 ] || exit 97
+[[ "${ROTATION_CONTROL_TOKEN:?}" =~ ^TEST_TOKEN_[A-Z_]{16,}$ ]] || exit 98
+printf '%s\n' "$ROTATION_OPERATION" >> "$MOCK_LOG"
+
+scenario="${MOCK_SCENARIO:-success}"
+case "$ROTATION_OPERATION" in
+  preflight)
+    [ "$scenario" != preflight_fail ] || exit 17
+    fleet=0
+    [ "$scenario" != fleet_busy ] || fleet=1
+    cfg="${MOCK_SPAWN_HASH:?}"
+    [ "$scenario" != bad_pin ] || cfg=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    printf '%s\n' \
+      'admission_freeze_deployed=1' 'admission_paused=1' 'fleet_endpoint=/internal/v1/fleet/busy' "fleet_busy=$fleet" 'fleet_unverifiable=0' \
+      'ledger_backend=in_memory' 'pending_terminalized=1' 'held_terminalized=1' 'maintenance_impact_recorded=1' 'durable_pending=0' 'durable_held=0' 'active_boxes=0' 'dynamic_current=1' \
+      'spawn_worker=corelink-spawn-worker' 'fabricd_worker=corelink-fabricd' "spawn_runner_image=$MOCK_RUNNER_IMAGE" "spawn_check_image=$MOCK_CHECK_IMAGE" "fabricd_image=$MOCK_FABRIC_IMAGE" "spawn_config_sha256=$cfg" "fabricd_config_sha256=$MOCK_FABRIC_HASH"
+    ;;
+  corelink_stage)
+    derived=1
+    contract=corelink-keys-v1-v2
+    attestations=recorded
+    [ "$scenario" != corelink_derivation ] || derived=0
+    [ "$scenario" != corelink_contract ] || contract=wrong-contract
+    [ "$scenario" != corelink_attestations ] || attestations=missing
+    printf '%s\n' "corelink_expected_key_id=$ROTATION_KEY_ID" "corelink_expected_pubkey_b64=$ROTATION_PUBKEY_B64" "corelink_material_derived=$derived" "corelink_contract_version=$contract" "corelink_prior_attestations=$attestations"
+    ;;
+  postflight)
+    health=200
+    [ "$scenario" != health_fail ] || health=500
+    old_key=rejected
+    [ "$scenario" != corelink_old_key ] || old_key=accepted
+    printf '%s\n' "health_status=$health" 'fabricd_ready_status=200' 'spawn_health_status=200' 'attestation_body_shape=keys:[{key_id,pubkey_b64,expires_ms:null}]' 'attestation_keys_count=1' "attestation_key_id=$ROTATION_KEY_ID" "attestation_pubkey_b64=$ROTATION_PUBKEY_B64" 'fabricd_provider_version_changed=1' "fabricd_provider_image=$MOCK_FABRIC_IMAGE" "fabricd_deployed_config_sha256=$MOCK_FABRIC_HASH" 'fabricd_container_boot_after_rollout=1' "fabricd_container_key_id=$ROTATION_KEY_ID" "corelink_config_key_id=$ROTATION_KEY_ID" "corelink_config_pubkey_b64=$ROTATION_PUBKEY_B64" 'corelink_binding_v1=accepted' 'corelink_binding_v2=accepted' "corelink_old_key_rejected=$old_key" 'prior_attestations=recorded'
+    ;;
+  release_freeze)
+    [ "$scenario" != release_fail ] || exit 18
+    printf '%s\n' 'admission_paused=0'
+    ;;
+  lifecycle)
+    close=200
+    [ "$scenario" != lifecycle_fail ] || close=500
+    printf '%s\n' 'lifecycle_safe=1' 'acquire_status=200' 'acquire_created=1' "close_status=$close" 'teardown_complete=1' 'fleet_busy=0' 'fleet_unverifiable=0' 'attestation_v1=accepted' 'attestation_v2=accepted' "attestation_key_id=$ROTATION_KEY_ID"
+    ;;
+  refreeze)
+    printf '%s\n' 'admission_paused=1' 'fleet_busy=0' 'fleet_unverifiable=0'
+    ;;
+  *) exit 99 ;;
+esac

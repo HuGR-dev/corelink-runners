@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = --seed-file ] && [ "$#" -eq 2 ] || exit 2
+case "${2##*/}" in
+  primary.fabric-signing-seed.b64)
+    printf '%s\n' 'key_id=1111111111111111' 'pubkey_b64=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE='
+    ;;
+  recovery.fabric-signing-seed.b64)
+    printf '%s\n' 'key_id=2222222222222222' 'pubkey_b64=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF='
+    ;;
+  *) exit 3 ;;
+esac
