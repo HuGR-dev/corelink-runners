@@ -28,6 +28,14 @@ if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no comman
 OWNER_UID="$(id -u)"; readonly OWNER_UID
 safe_file(){ [ -f "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 600 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };safe_dir(){ [ -d "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 700 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };sha(){ openssl dgst -sha256 -r "$1"|awk '{print $1}';};record(){ printf '%s\n' "$*">>"$EVIDENCE_DIR/events.log";}
 secret_file_valid(){ local f="$1";safe_file "$f"||return 1;[ -s "$f" ]||return 1;[ "$(tr -cd '\r' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1;[ "$(tr -cd '\n' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1;LC_ALL=C grep -Eq '^[A-Za-z0-9+/=]+$' "$f"; }
+canary_pat_file_valid(){
+  local f="$1"
+  safe_file "$f"||return 1
+  [ -s "$f" ]||return 1
+  [ "$(tr -cd '\r' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1
+  [ "$(tr -cd '\n' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1
+  LC_ALL=C grep -Eq '^corelink_pat_[0-9A-HJKMNP-TV-Z]{16}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{22}$' "$f"
+}
 resolve_wrangler(){ local config="$1" config_dir expected version;case "$config" in
   "$SPAWN_CONFIG") config_dir="${config%/*}";expected="$SPAWN_WRANGLER_VERSION";;
   "$FABRICD_CONFIG") config_dir="${config%/*}";expected="$FABRICD_WRANGLER_VERSION";;
@@ -46,8 +54,31 @@ curl_secret(){ local f="$1";shift;safe_file "$f"||die 'secret must be nofollow o
 # protocol outcomes. curl still returns nonzero for DNS, TCP, TLS, and I/O
 # failures, while --write-out captures the HTTP status without retaining a body.
 curl_secret_status(){ local f="$1";shift;safe_file "$f"||die 'secret must be nofollow owner-owned 0600';local s;s="$(<"$f")";[ -n "$s" ]||die 'empty secret';"$CURL_BIN" --silent --show-error --output /dev/null --write-out '%{http_code}' --config <(printf '%s\n' "header = \"authorization: Bearer $s\"") "$@";}
+curl_secret_response(){ local f="$1";shift;safe_file "$f"||die 'secret must be nofollow owner-owned 0600';local s;s="$(<"$f")";[ -n "$s" ]||die 'empty secret';"$CURL_BIN" --silent --show-error --connect-timeout 10 --max-time 30 --write-out $'\n%{http_code}' --config <(printf '%s\n' "header = \"authorization: Bearer $s\"") "$@";}
 curl_fleet(){ safe_file "$FLEET_KEY_FILE"||die 'fleet key must be nofollow owner-owned 0600';local s;s="$(<"$FLEET_KEY_FILE")";[ -n "$s" ]||die 'empty fleet key';"$CURL_BIN" --fail --silent --show-error --config <(printf '%s\n' "header = \"x-corelink-internal-auth: $s\"") "$SPAWN_URL/internal/v1/fleet/busy";}
 assert_empty_fleet(){ local stage="$1" fleet;fleet="$(curl_fleet)"||die "fleet $stage read failed";printf '%s' "$fleet"|jq -e '(.busy|tonumber)==0 and (.unverifiable|tonumber)==0' >/dev/null||die "fleet $stage busy/unverifiable nonzero";record "fleet_${stage}=busy:0 unverifiable:0";}
+canary_pat_preflight(){
+  local response status body rc
+  canary_pat_file_valid "$CANARY_PAT_FILE"||die 'canary PAT must be owner-owned 0600, single-line, trim-normalized, and in the canonical PAT format'
+  set +e
+  response="$(curl_secret_response "$CANARY_PAT_FILE" "$FABRICD_URL/v1/usage")"
+  rc=$?
+  set -e
+  [ "$rc" = 0 ]||die 'canary PAT preflight transport failure'
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  [ "$status" = 200 ]||die "canary PAT preflight status $status (expected 200)"
+  printf '%s' "$body"|jq -e '
+    type == "object" and
+    (keys | sort) == ["active_now", "peak_this_instance", "plan_cap", "plan_ceiling_vcpu_h", "tenant"] and
+    (.tenant | type == "string" and length > 0) and
+    ((.plan_cap == null) or (.plan_cap | type == "number" and floor == . and . >= 0)) and
+    ((.plan_ceiling_vcpu_h == null) or (.plan_ceiling_vcpu_h | type == "number" and . >= 0)) and
+    (.active_now | type == "number" and floor == . and . >= 0) and
+    (.peak_this_instance | type == "number" and floor == . and . >= 0)
+  ' >/dev/null||die 'canary PAT preflight usage response shape invalid'
+  record 'canary_pat_preflight=200_usage_shape'
+}
 secret_list(){ local config="$1" name out err rc;case "$config" in
   "$SPAWN_CONFIG") name=corelink-spawn-worker;;
   "$FABRICD_CONFIG") name=corelink-fabricd;;
@@ -78,12 +109,13 @@ refreeze(){
   run_wrangle_with_timeout "$SPAWN_CONFIG" "$remaining" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 >/dev/null||return
   record 'freeze=fabricd_then_spawn'
 }
-cleanup(){ local rc=$?;if [ "$LOCKED" = 1 ]&&[ "$REFREEZE_REQUIRED" = 1 ]&&[ "$FINAL_FROZEN" != 1 ];then refreeze >/dev/null 2>&1||true;record 'exit_refreeze=attempted';fi;[ -z "$LOCK" ]||rmdir "$LOCK" 2>/dev/null||true;exit "$rc";};trap cleanup EXIT
+cleanup(){ local rc=$?;if [ "$LOCKED" = 1 ]&&[ "$REFREEZE_REQUIRED" = 1 ]&&[ "$FINAL_FROZEN" != 1 ];then if refreeze >/dev/null 2>&1;then record 'exit_refreeze=attempted result:success';else record 'exit_refreeze=attempted result:failure';fi;fi;[ -z "$LOCK" ]||rmdir "$LOCK" 2>/dev/null||true;exit "$rc";};trap cleanup EXIT
 [ -n "$ROOT" ]&&[ -n "$COMMIT" ]&&[ -n "$SPAWN_VERSION" ]&&[ -n "$FABRICD_VERSION" ]&&[ -n "$SPAWN_APP" ]&&[ -n "$FABRICD_APP" ]&&[ -n "$CANARY_IMAGE" ]&&[ -n "$OLD_TOKEN_FILE" ]||die 'missing pins';[[ "$COMMIT" =~ ^[a-f0-9]{40}$ && "$CANARY_IMAGE" =~ @sha256:[a-f0-9]{64}$ && "$SPAWN_APP" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ && "$FABRICD_APP" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]||die 'malformed pin';safe_dir "$OOB_DIR";safe_file "$FLEET_KEY_FILE";safe_file "$CANARY_PAT_FILE";safe_file "$OLD_TOKEN_FILE"
 SPAWN_CONFIG="$ROOT/deploy/cloudflare/wrangler.jsonc";FABRICD_CONFIG="$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc"
 if [ "$(git -C "$ROOT" rev-parse HEAD)" != "$COMMIT" ] || ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet;then die 'source is not clean exact commit';fi;for p in deploy/cloudflare/wrangler.jsonc deploy/cloudflare-fabricd/wrangler.jsonc;do if ! git -C "$ROOT" ls-files --error-unmatch "$p">/dev/null || ! git -C "$ROOT" cat-file -e "$COMMIT:$p";then die 'canonical config untracked';fi;done
 if [ -e "$EVIDENCE_DIR" ] || [ -L "$EVIDENCE_DIR" ];then safe_dir "$EVIDENCE_DIR"||die 'evidence directory must be nofollow owner-owned 0700';else mkdir "$EVIDENCE_DIR"||die 'cannot create evidence directory';chmod 700 "$EVIDENCE_DIR";safe_dir "$EVIDENCE_DIR"||die 'evidence directory must be nofollow owner-owned 0700';fi
 :>"$EVIDENCE_DIR/events.log";chmod 600 "$EVIDENCE_DIR/events.log";safe_file "$EVIDENCE_DIR/events.log"||die 'evidence log must be owner-owned 0600';grep -Fq "$CANARY_IMAGE" "$SPAWN_CONFIG"||die 'canary image absent from canonical config'
+canary_pat_preflight
 LOCK="$OOB_DIR/.direct-rotation.lock";mkdir "$LOCK" 2>/dev/null||die 'exclusive rotation lock held';chmod 700 "$LOCK";LOCKED=1
 assert_empty_fleet preflight
 preflight_control_bindings "$SPAWN_CONFIG";preflight_control_bindings "$FABRICD_CONFIG"
