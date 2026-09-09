@@ -25,6 +25,9 @@ sleepwake = importlib.util.module_from_spec(SLEEP_SPEC)
 sys.modules[SLEEP_SPEC.name] = sleepwake
 SLEEP_SPEC.loader.exec_module(sleepwake)
 
+TEST_FABRIC_APP_ID = "recaptured-fabricd-app-20260908"
+TEST_FABRICD_DIGEST = matrix.CURRENT_FABRICD_DIGEST
+
 
 class WorkerMatrixTests(unittest.TestCase):
     def setUp(self):
@@ -111,6 +114,7 @@ class WorkerMatrixTests(unittest.TestCase):
             "phase": "candidate",
             "expected_version_id": "candidate-version",
             "fabric_origin": "https://fabric.example",
+            "expected_digest": TEST_FABRICD_DIGEST,
         }
         child = SLEEPWAKE_PATH
         with tempfile.TemporaryDirectory() as td:
@@ -119,7 +123,7 @@ class WorkerMatrixTests(unittest.TestCase):
                 sys.executable, str(child), "--output", str(child_output), "--execute", "--ack-execute",
                 "--attempts", "10", "--phase", "candidate", "--matrix-id", "run-child-red",
                 "--attempt-id", "run-child-red-candidate", "--worker-id", "candidate-version",
-                "--source-repo", source_repo, "--fabric-url", "https://fabric.example",
+                "--source-repo", source_repo, "--fabric-url", "https://fabric.example", "--digest", TEST_FABRICD_DIGEST,
             ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             self.assertNotEqual(child_process.returncode, 0)
             child_artifact = json.loads(child_output.read_text())
@@ -169,7 +173,66 @@ class WorkerMatrixTests(unittest.TestCase):
             self.assertEqual(plan["cycles"], 10)
             self.assertEqual(plan["status"], "PLAN_ONLY")
             self.assertFalse(plan["mutated"])
+            self.assertEqual(plan["contract"]["expected_fabricd_digest"], TEST_FABRICD_DIGEST)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_live_requires_explicit_fabricd_digest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with self.assertRaisesRegex(matrix.Stop, "explicit --fabricd-digest"):
+                matrix.main([
+                    "--output", str(root / "evidence.json"), "--spawn-dir", str(root),
+                    "--fleet-url", "https://fleet.example", "--fabric-origin", "https://fabric.example",
+                    "--fabric-app-id", TEST_FABRIC_APP_ID, "--fleet-key-file", str(root / "fleet.key"),
+                    "--source-repo", str(root), "--source-sha", "a" * 40,
+                    "--cold-witness-command", "mock", "--execute", "--ack-destructive",
+                ])
+
+    def test_companion_digest_is_required_and_mismatch_is_red(self):
+        with self.assertRaisesRegex(matrix.Stop, "explicit current Fabricd digest"):
+            matrix.cold_witness(
+                ["mock"],
+                {"matrix_run_id": "missing-pin", "phase": "candidate", "expected_version_id": "v1", "fabric_origin": "https://fabric.example"},
+                SOURCE_REPO,
+            )
+
+        request = {
+            "matrix_run_id": "mismatch-pin",
+            "phase": "candidate",
+            "expected_version_id": "v1",
+            "fabric_origin": "https://fabric.example",
+            "expected_digest": TEST_FABRICD_DIGEST,
+        }
+        response = {
+            "schema_version": "evidence/v1",
+            "status": "RED",
+            "contract": {
+                "fabric_url": "https://fabric.example",
+                "fabric_origin": "https://fabric.example",
+                "wake_route": "/health",
+                "health_path": "/health",
+                "phase": "candidate",
+                "matrix_id": "mismatch-pin",
+                "attempts_required": 10,
+                "expected_digest": "sha256:" + "0" * 64,
+            },
+            "preflight": {"provenance": {"source_repo": SOURCE_REPO}},
+            "attempts": [],
+            "failure": {"kind": "assertion", "message": "digest mismatch"},
+        }
+        old_run = matrix.subprocess.run
+        try:
+            def fake_run(argv, **kwargs):
+                output_path = Path(argv[argv.index("--output") + 1])
+                output_path.write_text(json.dumps(response))
+                output_path.chmod(0o600)
+                return types.SimpleNamespace(returncode=1)
+
+            matrix.subprocess.run = fake_run
+            with self.assertRaisesRegex(matrix.Stop, "digest binding"):
+                matrix.cold_witness(["mock"], request, SOURCE_REPO)
+        finally:
+            matrix.subprocess.run = old_run
 
     def test_artifact_refuses_existing_symlink(self):
         with tempfile.TemporaryDirectory() as td:
@@ -202,7 +265,8 @@ class WorkerMatrixTests(unittest.TestCase):
             "phase": "candidate",
             "expected_version_id": "candidate-version",
             "fabric_origin": "https://fabric.example",
-            "fabric_app_id": matrix.FABRIC_APP_ID,
+            "fabric_app_id": TEST_FABRIC_APP_ID,
+            "expected_digest": TEST_FABRICD_DIGEST,
             "sleep_after_seconds": 300,
             "source_sha": "41293ef2457b0a728fcc25faad16bd0e1506ab62",
         }
@@ -216,12 +280,12 @@ class WorkerMatrixTests(unittest.TestCase):
                 "phase": "candidate",
                 "matrix_id": "run-1",
                 "outcome": "PASS",
-                "pre_wake": {"status": "scale_zero", "state": "inactive", "observed_at": f"2026-09-08T00:02:{number:02d}Z", "instances": [{"id": "singleton-instance", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": matrix.EXPECTED_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]},
+                "pre_wake": {"status": "scale_zero", "state": "inactive", "observed_at": f"2026-09-08T00:02:{number:02d}Z", "instances": [{"id": "singleton-instance", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]},
                 "wake": {"route": "/health", "http": 200, "observed_at": "2026-09-08T00:01:00Z"},
                 "deployment": {"worker": {"version": "candidate-version", "percentage": 100}},
-                "instance": {"id": "singleton-instance", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": matrix.EXPECTED_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"},
+                "instance": {"id": "singleton-instance", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"},
             })
-        response = {"schema_version": "evidence/v1", "status": "PASS", "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "candidate", "matrix_id": "run-1", "attempts_required": 10, "app_id": matrix.FABRIC_APP_ID, "sleep_after_seconds": 300}, "preflight": {"provenance": {"source_repo": source_repo, "source_sha": request["source_sha"]}}, "attempts": attempts}
+        response = {"schema_version": "evidence/v1", "status": "PASS", "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "candidate", "matrix_id": "run-1", "attempts_required": 10, "app_id": TEST_FABRIC_APP_ID, "expected_digest": TEST_FABRICD_DIGEST, "sleep_after_seconds": 300}, "preflight": {"provenance": {"source_repo": source_repo, "source_sha": request["source_sha"]}}, "attempts": attempts}
         seen = {}
         old_run = matrix.subprocess.run
         try:
@@ -244,15 +308,16 @@ class WorkerMatrixTests(unittest.TestCase):
         self.assertIn("--app-id", seen["argv"])
         self.assertIn("--source-sha", seen["argv"])
         self.assertIn("--sleep-after-seconds", seen["argv"])
+        self.assertEqual(seen["argv"][seen["argv"].index("--digest") + 1], TEST_FABRICD_DIGEST)
         self.assertNotIn("--single-attempt", seen["argv"])
 
     def test_companion_artifact_rejects_duplicate_attempt_identity(self):
         source_repo = SOURCE_REPO
-        request = {"matrix_run_id": "run-1", "phase": "rollback", "expected_version_id": matrix.STABLE_VERSION, "fabric_origin": "https://fabric.example"}
+        request = {"matrix_run_id": "run-1", "phase": "rollback", "expected_version_id": matrix.STABLE_VERSION, "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
         attempts = []
         for number in range(1, 11):
-            attempts.append({"attempt": number, "attempt_id": "rollback-01", "outcome": "PASS", "phase": "rollback", "matrix_id": "run-1", "started_at": f"2026-09-08T00:00:{number:02d}Z", "finished_at": f"2026-09-08T00:01:{number:02d}Z", "pre_wake": {"status": "scale_zero", "state": "inactive", "instances": [{"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": matrix.EXPECTED_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]}, "wake": {"route": "/health", "http": 200}, "deployment": {"worker": {"version": matrix.STABLE_VERSION, "percentage": 100}}, "instance": {"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": matrix.EXPECTED_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"}})
-        response = {"schema_version": "evidence/v1", "status": "PASS", "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "rollback", "matrix_id": "run-1", "attempts_required": 10}, "preflight": {"provenance": {"source_repo": source_repo}}, "attempts": attempts}
+            attempts.append({"attempt": number, "attempt_id": "rollback-01", "outcome": "PASS", "phase": "rollback", "matrix_id": "run-1", "started_at": f"2026-09-08T00:00:{number:02d}Z", "finished_at": f"2026-09-08T00:01:{number:02d}Z", "pre_wake": {"status": "scale_zero", "state": "inactive", "instances": [{"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]}, "wake": {"route": "/health", "http": 200}, "deployment": {"worker": {"version": matrix.STABLE_VERSION, "percentage": 100}}, "instance": {"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"}})
+        response = {"schema_version": "evidence/v1", "status": "PASS", "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "rollback", "matrix_id": "run-1", "attempts_required": 10, "expected_digest": TEST_FABRICD_DIGEST}, "preflight": {"provenance": {"source_repo": source_repo}}, "attempts": attempts}
         old_run = matrix.subprocess.run
         try:
             def fake_run(argv, **kwargs):
@@ -269,11 +334,11 @@ class WorkerMatrixTests(unittest.TestCase):
 
     def test_failed_companion_preserves_sanitized_partial_evidence(self):
         source_repo = SOURCE_REPO
-        request = {"matrix_run_id": "run-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example"}
+        request = {"matrix_run_id": "run-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
         response = {
             "schema_version": "evidence/v1",
             "status": "RED",
-            "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "candidate", "matrix_id": "run-red", "attempts_required": 10},
+            "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "candidate", "matrix_id": "run-red", "attempts_required": 10, "expected_digest": TEST_FABRICD_DIGEST},
             "preflight": {"provenance": {"source_repo": source_repo}},
             "attempts": [{
                 "attempt": 1,
@@ -309,7 +374,7 @@ class WorkerMatrixTests(unittest.TestCase):
     def test_real_sleepwake_red_artifact_flows_to_consumer_on_nonzero(self):
         """Exercise producer result_artifact -> worker consumer, including nested failure."""
         source_repo = SOURCE_REPO
-        request = {"matrix_run_id": "run-producer-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example"}
+        request = {"matrix_run_id": "run-producer-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
         config = sleepwake.RunConfig(
             attempts=10,
             phase="candidate",
@@ -359,7 +424,7 @@ class WorkerMatrixTests(unittest.TestCase):
 
     def test_red_artifact_without_structured_cause_is_refused(self):
         fixture = Path(__file__).with_name("fixtures") / "sleepwake-red-missing-failure.json"
-        request = {"matrix_run_id": "run-missing-cause", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example"}
+        request = {"matrix_run_id": "run-missing-cause", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
         old_run = matrix.subprocess.run
         try:
             def fake_run(argv, **kwargs):
@@ -437,7 +502,7 @@ class WorkerMatrixTests(unittest.TestCase):
                     "--fleet-key-file", str(key), "--cold-witness-command", "mock",
                     "--source-repo", SOURCE_REPO,
                     "--matrix-run-id", "run-coordinator-red", "--source-sha", "c" * 40,
-                    "--fabric-app-id", matrix.FABRIC_APP_ID, "--execute", "--ack-destructive",
+                    "--fabric-app-id", TEST_FABRIC_APP_ID, "--fabricd-digest", TEST_FABRICD_DIGEST, "--execute", "--ack-destructive",
                 ])
             finally:
                 matrix.Wrangler, matrix.fleet_idle, matrix.source_sha, matrix.clean_checkout_sha, matrix.cold_witness = old_cls, old_fleet, old_sha, old_clean, old_cold
@@ -611,15 +676,15 @@ class WorkerMatrixTests(unittest.TestCase):
                 def fake_cold(command, request, source_repo):
                     events.append("cold:" + request["phase"])
                     return {"status": "PASS", "phase": request["phase"], "matrix_run_id": request["matrix_run_id"], "expected_version_id": request["expected_version_id"], "attempts": [
-                        {"attempt": n, "attempt_id": f"{request['phase']}-{n}", "started_at": "2026-09-08T00:00:00Z", "finished_at": "2026-09-08T00:01:00Z", "pre_wake": {"status": "scale_zero", "observed_at": "2026-09-08T00:00:00Z"}, "health": {"status": 200, "route": "/health", "observed_at": "2026-09-08T00:00:00Z", "phase": request["phase"], "attempt_id": f"{request['phase']}-{n}", "independent_request": True}, "instance": {"id": f"{request['phase']}-instance-{n}", "created_at": f"2026-09-08T00:{0 if request['phase'] == 'candidate' else 1:02d}:{n:02d}Z", "state": "running", "digest": matrix.EXPECTED_FABRICD_DIGEST, "independent": True}}
+                        {"attempt": n, "attempt_id": f"{request['phase']}-{n}", "started_at": "2026-09-08T00:00:00Z", "finished_at": "2026-09-08T00:01:00Z", "pre_wake": {"status": "scale_zero", "observed_at": "2026-09-08T00:00:00Z"}, "health": {"status": 200, "route": "/health", "observed_at": "2026-09-08T00:00:00Z", "phase": request["phase"], "attempt_id": f"{request['phase']}-{n}", "independent_request": True}, "instance": {"id": f"{request['phase']}-instance-{n}", "created_at": f"2026-09-08T00:{0 if request['phase'] == 'candidate' else 1:02d}:{n:02d}Z", "state": "running", "digest": TEST_FABRICD_DIGEST, "independent": True}}
                         for n in range(1, 11)
                     ], "contract": {"fabric_origin": request.get("fabric_origin"), "wake_route": "/health", "health_path": "/health"}}
                 matrix.cold_witness = fake_cold
                 result_code = matrix.main([
                     "--output", str(output), "--spawn-dir", str(root),
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://health.example",
-                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root),
-                    "--source-sha", "a" * 40, "--fabric-app-id", matrix.FABRIC_APP_ID, "--execute", "--ack-destructive",
+                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--fabricd-digest", TEST_FABRICD_DIGEST,
+                    "--source-sha", "a" * 40, "--fabric-app-id", TEST_FABRIC_APP_ID, "--execute", "--ack-destructive",
                 ])
                 self.assertEqual(result_code, 0, output.read_text())
             finally:
@@ -707,8 +772,8 @@ class WorkerMatrixTests(unittest.TestCase):
                 self.assertEqual(matrix.main([
                     "--output", str(output), "--spawn-dir", str(root),
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://health.example",
-                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root),
-                    "--source-sha", "b" * 40, "--fabric-app-id", matrix.FABRIC_APP_ID, "--execute", "--ack-destructive",
+                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--fabricd-digest", TEST_FABRICD_DIGEST,
+                    "--source-sha", "b" * 40, "--fabric-app-id", TEST_FABRIC_APP_ID, "--execute", "--ack-destructive",
                 ]), 1)
             finally:
                 matrix.Wrangler, matrix.fleet_idle, matrix.health, matrix.source_sha, matrix.clean_checkout_sha = old_cls, old_fleet, old_health, old_sha, old_clean
