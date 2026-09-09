@@ -52,7 +52,9 @@ fi
 if [ "$1" = containers ] && [ "$2" = info ]; then
   if [ -e "${DIRECT_MOCK_LOG}.fabricd-deleted" ] && [ "$3" = 22222222-2222-2222-2222-222222222222 ]; then exit 1; fi
   if [ "$3" = 22222222-2222-2222-2222-222222222222 ]; then
-    printf '%s\n' '{"name":"corelink-fabricd-fabricdcontainer","image":"registry.example/fabric@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version_id":"v-pin"}'
+    info_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    [ "${DIRECT_MOCK_INFO_MODE:-exact}" = wrong ] && info_digest=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    printf '%s\n' "{\"name\":\"corelink-fabricd-fabricdcontainer\",\"image\":\"registry.example/fabric@sha256:$info_digest\",\"version_id\":\"v-pin\"}"
     exit 0
   fi
   printf '%s\n' 'registry.example/spawn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'registry.example/fabric@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
@@ -71,7 +73,15 @@ if [ "$1" = containers ] && [ "$2" = instances ]; then
     wrong-digest) digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
     failed) state=failed ;;
   esac
-  printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\",\"digest\":\"$digest\"}]}"
+  if [ "${DIRECT_MOCK_INSTANCE_DIGEST:-present}" = absent ]; then
+    printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\"}]}"
+  elif [ "${DIRECT_MOCK_INSTANCE_DIGEST:-present}" = empty ]; then
+    printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\",\"digest\":\"\"}]}"
+  elif [ "${DIRECT_MOCK_INSTANCE_DIGEST:-present}" = malformed ]; then
+    printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\",\"digest\":123}]}"
+  else
+    printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\",\"digest\":\"$digest\"}]}"
+  fi
   exit 0
 fi
 if [ "$1" = containers ] && [ "$2" = delete ]; then
