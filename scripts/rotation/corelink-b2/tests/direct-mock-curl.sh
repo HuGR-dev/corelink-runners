@@ -14,6 +14,23 @@ if [[ "$url" == *'/internal/v1/fleet/busy' ]]; then
   n=$((n + 1)); [ -z "${DIRECT_MOCK_FLEET_COUNTER:-}" ] || printf '%s' "$n" > "$DIRECT_MOCK_FLEET_COUNTER"
   if [ "${DIRECT_MOCK_FAIL:-}" = fleet_post_busy ] && [ "$n" -eq 2 ]; then printf '{"busy":1,"unverifiable":0}\n'; else printf '{"busy":0,"unverifiable":0}\n'; fi; exit 0
 fi
+if [[ "$url" == *'/v1/usage' ]]; then
+  found=0
+  for arg in "$@"; do
+    if [[ "$arg" == /dev/fd/* || "$arg" == /proc/self/fd/* ]]; then
+      if grep -Fq 'authorization: Bearer ' "$arg" && ! grep -Fq 'x-corelink-internal-auth:' "$arg"; then found=1; fi
+    fi
+  done
+  [ "$found" = 1 ] || exit 9
+  printf '%s\n' 'canary_pat_preflight_request' >> "${DIRECT_MOCK_LOG:?}"
+  case "${DIRECT_MOCK_FAIL:-}" in
+    canary_pat_401) printf '{}\n401';;
+    canary_pat_transport) exit 7;;
+    canary_pat_schema) printf '{"tenant":"canary","plan_cap":1,"plan_ceiling_vcpu_h":null,"active_now":0}\n200';;
+    *) printf '{"tenant":"canary","plan_cap":1,"plan_ceiling_vcpu_h":null,"active_now":0,"peak_this_instance":0}\n200';;
+  esac
+  exit 0
+fi
 if [[ "$url" == *'/v1/attestation/key' ]]; then
   n=0; [ -z "${DIRECT_MOCK_KEY_COUNTER:-}" ] || [ ! -f "$DIRECT_MOCK_KEY_COUNTER" ] || n="$(<"$DIRECT_MOCK_KEY_COUNTER")"
   n=$((n + 1)); [ -z "${DIRECT_MOCK_KEY_COUNTER:-}" ] || printf '%s' "$n" > "$DIRECT_MOCK_KEY_COUNTER"
