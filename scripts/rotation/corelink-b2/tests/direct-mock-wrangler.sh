@@ -46,6 +46,8 @@ if [ "$1" = containers ] && [ "$2" = list ]; then
     printf '%s\n' 'fabricd_absence_confirmed' >> "${DIRECT_MOCK_LOG}"
     printf '%s\n' '[]'
   elif [ "${DIRECT_MOCK_DISCOVERY_MODE:-ready}" = never ]; then
+    n=0; [ -z "${DIRECT_MOCK_DISCOVERY_COUNTER:-}" ] || [ ! -f "${DIRECT_MOCK_DISCOVERY_COUNTER}" ] || n="$(<"${DIRECT_MOCK_DISCOVERY_COUNTER}")"
+    n=$((n + 1)); [ -z "${DIRECT_MOCK_DISCOVERY_COUNTER:-}" ] || printf '%s' "$n" > "${DIRECT_MOCK_DISCOVERY_COUNTER}"
     printf '%s\n' '[]'
   elif [ "${DIRECT_MOCK_DISCOVERY_MODE:-ready}" = ambiguous ]; then
     printf '%s\n' '[{"id":"22222222-2222-2222-2222-222222222222","name":"corelink-fabricd-fabricdcontainer"},{"id":"33333333-3333-3333-3333-333333333333","name":"corelink-fabricd-fabricdcontainer"}]'
