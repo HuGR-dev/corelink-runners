@@ -27,6 +27,8 @@ SLEEP_SPEC.loader.exec_module(sleepwake)
 
 TEST_FABRIC_APP_ID = "recaptured-fabricd-app-20260908"
 TEST_FABRICD_DIGEST = matrix.CURRENT_FABRICD_DIGEST
+TEST_STABLE_VERSION = "11111111-1111-4111-8111-111111111111"
+TEST_STALE_VERSION = "22222222-2222-4222-8222-222222222222"
 
 
 class WorkerMatrixTests(unittest.TestCase):
@@ -46,7 +48,7 @@ class WorkerMatrixTests(unittest.TestCase):
     def test_stability_monitor_records_two_ordered_timestamps_and_default_is_120(self):
         class Stable:
             def deployments(self):
-                return [{"id": "deployment-stable", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": matrix.STABLE_VERSION, "percentage": 100}]}]
+                return [{"id": "deployment-stable", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": TEST_STABLE_VERSION, "percentage": 100}]}]
 
             def version(self, version_id):
                 return {"id": version_id, "resources": {"bindings": [
@@ -56,13 +58,13 @@ class WorkerMatrixTests(unittest.TestCase):
 
         sleeps = []
         stamps = iter(("2026-09-08T00:00:00Z", "2026-09-08T00:02:00Z"))
-        samples = self._real_monitor(Stable(), matrix.STABLE_VERSION, sleeper=sleeps.append, clock=lambda: next(stamps))
+        samples = self._real_monitor(Stable(), TEST_STABLE_VERSION, sleeper=sleeps.append, clock=lambda: next(stamps))
         self.assertEqual(sleeps, [120])
         self.assertEqual([row["observed_at"] for row in samples], ["2026-09-08T00:00:00Z", "2026-09-08T00:02:00Z"])
 
     def test_zero_stability_interval_is_rejected_without_test_override(self):
         with self.assertRaisesRegex(matrix.Stop, "cannot be zero"):
-            self._real_monitor(object(), matrix.STABLE_VERSION, interval_seconds=0)
+            self._real_monitor(object(), TEST_STABLE_VERSION, interval_seconds=0)
 
     def test_operator_lock_serializes_and_refuses_second_holder(self):
         with tempfile.TemporaryDirectory() as td:
@@ -79,13 +81,13 @@ class WorkerMatrixTests(unittest.TestCase):
             def deployments(self):
                 return [{"id": "external-deployment", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": "external-version", "percentage": 100}]}]
 
-            def rollback_stable(self):
+            def rollback_stable(self, stable_version):
                 type(self).rollback_calls += 1
                 return 0
 
         writer = ExternalWriter()
         with self.assertRaisesRegex(matrix.Stop, "external Worker writer"):
-            matrix.guarded_rollback(writer, "our-candidate-version")
+            matrix.guarded_rollback(writer, "our-candidate-version", TEST_STABLE_VERSION)
         self.assertEqual(ExternalWriter.rollback_calls, 0)
 
     def test_source_sha_requires_clean_checkout_and_explicit_declaration(self):
@@ -165,6 +167,8 @@ class WorkerMatrixTests(unittest.TestCase):
                     "https://fleet.invalid/internal/v1/fleet/busy",
                     "--fabric-origin",
                     "https://health.invalid/health",
+                    "--stable-version-id",
+                    TEST_STABLE_VERSION,
                 ]
             )
             self.assertEqual(rc, 0)
@@ -174,7 +178,58 @@ class WorkerMatrixTests(unittest.TestCase):
             self.assertEqual(plan["status"], "PLAN_ONLY")
             self.assertFalse(plan["mutated"])
             self.assertEqual(plan["contract"]["expected_fabricd_digest"], TEST_FABRICD_DIGEST)
+            self.assertEqual(plan["stable_version"], TEST_STABLE_VERSION)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
+    def test_plan_requires_a_canonical_current_stable_version_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            common = [
+                "--output", str(root / "plan.json"), "--spawn-dir", str(root),
+                "--fleet-url", "https://fleet.example", "--fabric-origin", "https://fabric.example",
+            ]
+            with self.assertRaisesRegex(matrix.Stop, "explicit current stable Worker version ID"):
+                matrix.main(common)
+            with self.assertRaisesRegex(matrix.Stop, "canonical UUID"):
+                matrix.main(common + ["--stable-version-id", "stale-version"])
+            with self.assertRaisesRegex(matrix.Stop, "canonical UUID"):
+                matrix.main(common + ["--stable-version-id", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"])
+
+    def test_stale_stable_version_refuses_before_any_mutation(self):
+        class CurrentWorker:
+            def deployments(self):
+                return [{"id": "deployment-current", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": TEST_STABLE_VERSION, "percentage": 100}]}]
+
+            def version(self, version_id):
+                return {"id": version_id, "resources": {"bindings": [
+                    {"name": "AUTOSCALER_INTAKE_PAUSED", "text": "1"},
+                    {"name": "AUTOSCALER_REDRIVE_PAUSED", "text": "1"},
+                ]}}
+
+        with self.assertRaisesRegex(matrix.Stop, "exact stable version"):
+            matrix.worker_witness(CurrentWorker(), expected=TEST_STALE_VERSION)
+
+    def test_stable_version_drift_is_refused_during_monitor(self):
+        class DriftingWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def deployments(self):
+                self.calls += 1
+                active = TEST_STABLE_VERSION if self.calls == 1 else TEST_STALE_VERSION
+                return [{"id": f"deployment-{self.calls}", "created_on": f"2026-09-08T00:0{self.calls}:00Z", "versions": [{"version_id": active, "percentage": 100}]}]
+
+            def version(self, version_id):
+                return {"id": version_id, "resources": {"bindings": [
+                    {"name": "AUTOSCALER_INTAKE_PAUSED", "text": "1"},
+                    {"name": "AUTOSCALER_REDRIVE_PAUSED", "text": "1"},
+                ]}}
+
+        with self.assertRaisesRegex(matrix.Stop, "exact stable version"):
+            self._real_monitor(
+                DriftingWorker(), TEST_STABLE_VERSION, interval_seconds=0,
+                test_override=True, sleeper=lambda _seconds: None,
+            )
 
     def test_live_requires_explicit_fabricd_digest(self):
         with tempfile.TemporaryDirectory() as td:
@@ -183,6 +238,7 @@ class WorkerMatrixTests(unittest.TestCase):
                 matrix.main([
                     "--output", str(root / "evidence.json"), "--spawn-dir", str(root),
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://fabric.example",
+                    "--stable-version-id", TEST_STABLE_VERSION,
                     "--fabric-app-id", TEST_FABRIC_APP_ID, "--fleet-key-file", str(root / "fleet.key"),
                     "--source-repo", str(root), "--source-sha", "a" * 40,
                     "--cold-witness-command", "mock", "--execute", "--ack-destructive",
@@ -313,10 +369,10 @@ class WorkerMatrixTests(unittest.TestCase):
 
     def test_companion_artifact_rejects_duplicate_attempt_identity(self):
         source_repo = SOURCE_REPO
-        request = {"matrix_run_id": "run-1", "phase": "rollback", "expected_version_id": matrix.STABLE_VERSION, "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
+        request = {"matrix_run_id": "run-1", "phase": "rollback", "expected_version_id": TEST_STABLE_VERSION, "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
         attempts = []
         for number in range(1, 11):
-            attempts.append({"attempt": number, "attempt_id": "rollback-01", "outcome": "PASS", "phase": "rollback", "matrix_id": "run-1", "started_at": f"2026-09-08T00:00:{number:02d}Z", "finished_at": f"2026-09-08T00:01:{number:02d}Z", "pre_wake": {"status": "scale_zero", "state": "inactive", "instances": [{"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]}, "wake": {"route": "/health", "http": 200}, "deployment": {"worker": {"version": matrix.STABLE_VERSION, "percentage": 100}}, "instance": {"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"}})
+            attempts.append({"attempt": number, "attempt_id": "rollback-01", "outcome": "PASS", "phase": "rollback", "matrix_id": "run-1", "started_at": f"2026-09-08T00:00:{number:02d}Z", "finished_at": f"2026-09-08T00:01:{number:02d}Z", "pre_wake": {"status": "scale_zero", "state": "inactive", "instances": [{"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "inactive", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:02:{number:02d}Z"}]}, "wake": {"route": "/health", "http": 200}, "deployment": {"worker": {"version": TEST_STABLE_VERSION, "percentage": 100}}, "instance": {"id": "same", "created_at": "2026-09-08T00:01:00Z", "state": "running", "digest": TEST_FABRICD_DIGEST, "updated_at": f"2026-09-08T00:03:{number:02d}Z"}})
         response = {"schema_version": "evidence/v1", "status": "PASS", "contract": {"fabric_url": "https://fabric.example", "fabric_origin": "https://fabric.example", "wake_route": "/health", "health_path": "/health", "phase": "rollback", "matrix_id": "run-1", "attempts_required": 10, "expected_digest": TEST_FABRICD_DIGEST}, "preflight": {"provenance": {"source_repo": source_repo}}, "attempts": attempts}
         old_run = matrix.subprocess.run
         try:
@@ -445,7 +501,7 @@ class WorkerMatrixTests(unittest.TestCase):
 
         class FakeWrangler:
             def __init__(self, spawn_dir):
-                self.active = matrix.STABLE_VERSION
+                self.active = TEST_STABLE_VERSION
 
             def preflight(self):
                 return {"npm_ci": 0, "typecheck": 0, "test": 0}
@@ -455,9 +511,9 @@ class WorkerMatrixTests(unittest.TestCase):
                 self.active = "candidate-version"
                 return 0
 
-            def rollback_stable(self):
+            def rollback_stable(self, stable_version):
                 events.append("rollback")
-                self.active = matrix.STABLE_VERSION
+                self.active = TEST_STABLE_VERSION
                 return 0
 
             def deployments(self):
@@ -501,7 +557,7 @@ class WorkerMatrixTests(unittest.TestCase):
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://fabric.example",
                     "--fleet-key-file", str(key), "--cold-witness-command", "mock",
                     "--source-repo", SOURCE_REPO,
-                    "--matrix-run-id", "run-coordinator-red", "--source-sha", "c" * 40,
+                    "--matrix-run-id", "run-coordinator-red", "--stable-version-id", TEST_STABLE_VERSION, "--source-sha", "c" * 40,
                     "--fabric-app-id", TEST_FABRIC_APP_ID, "--fabricd-digest", TEST_FABRICD_DIGEST, "--execute", "--ack-destructive",
                 ])
             finally:
@@ -574,9 +630,9 @@ class WorkerMatrixTests(unittest.TestCase):
     def test_latest_deployment_and_pauses_are_exact(self):
         rows = [
             {"id": "old", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": "old-v", "percentage": 100}]},
-            {"id": "new", "created_on": "2026-09-08T01:00:00Z", "versions": [{"version_id": matrix.STABLE_VERSION, "percentage": 100}]},
+            {"id": "new", "created_on": "2026-09-08T01:00:00Z", "versions": [{"version_id": TEST_STABLE_VERSION, "percentage": 100}]},
         ]
-        self.assertEqual(matrix.active_version(rows)[0], matrix.STABLE_VERSION)
+        self.assertEqual(matrix.active_version(rows)[0], TEST_STABLE_VERSION)
         version = {
             "resources": {
                 "bindings": [
@@ -619,7 +675,7 @@ class WorkerMatrixTests(unittest.TestCase):
             def __init__(self, spawn_dir):
                 self.deploy_calls = 0
                 self.rollback_calls = 0
-                self.active = matrix.STABLE_VERSION
+                self.active = TEST_STABLE_VERSION
 
             def candidate_deploy(self):
                 events.append("candidate_deploy")
@@ -630,10 +686,10 @@ class WorkerMatrixTests(unittest.TestCase):
             def preflight(self):
                 return {"npm_ci": 0, "typecheck": 0, "test": 0}
 
-            def rollback_stable(self):
+            def rollback_stable(self, stable_version):
                 events.append("rollback")
                 self.rollback_calls += 1
-                self.active = matrix.STABLE_VERSION
+                self.active = TEST_STABLE_VERSION
                 return 0
 
             def deployments(self):
@@ -683,7 +739,7 @@ class WorkerMatrixTests(unittest.TestCase):
                 result_code = matrix.main([
                     "--output", str(output), "--spawn-dir", str(root),
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://health.example",
-                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--fabricd-digest", TEST_FABRICD_DIGEST,
+                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--stable-version-id", TEST_STABLE_VERSION, "--fabricd-digest", TEST_FABRICD_DIGEST,
                     "--source-sha", "a" * 40, "--fabric-app-id", TEST_FABRIC_APP_ID, "--execute", "--ack-destructive",
                 ])
                 self.assertEqual(result_code, 0, output.read_text())
@@ -700,10 +756,10 @@ class WorkerMatrixTests(unittest.TestCase):
             self.assertEqual(evidence["candidate_deployment_id_cardinality"], 1)
             self.assertEqual(len(evidence["records"]), 10)
             for record in evidence["records"]:
-                self.assertEqual(record["prior"]["version_id"], matrix.STABLE_VERSION)
+                self.assertEqual(record["prior"]["version_id"], TEST_STABLE_VERSION)
                 self.assertEqual(record["candidate"]["traffic_percent"], 100)
-                self.assertEqual(record["rollback"]["version_id"], matrix.STABLE_VERSION)
-                self.assertEqual(record["rollback_target_version_id"], matrix.STABLE_VERSION)
+                self.assertEqual(record["rollback"]["version_id"], TEST_STABLE_VERSION)
+                self.assertEqual(record["rollback_target_version_id"], TEST_STABLE_VERSION)
                 self.assertEqual(record["source_sha"], "a" * 40)
                 self.assertEqual(record["candidate_health"]["phase"], "candidate")
                 self.assertEqual(record["rollback_health"]["phase"], "rollback")
@@ -738,12 +794,12 @@ class WorkerMatrixTests(unittest.TestCase):
             def preflight(self):
                 return {"npm_ci": 0, "typecheck": 0, "test": 0}
 
-            def rollback_stable(self):
+            def rollback_stable(self, stable_version):
                 type(self).rollback_calls += 1
                 return 0
 
             def deployments(self):
-                return [{"id": "stable-deployment", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": matrix.STABLE_VERSION, "percentage": 100}]}]
+                return [{"id": "stable-deployment", "created_on": "2026-09-08T00:00:00Z", "versions": [{"version_id": TEST_STABLE_VERSION, "percentage": 100}]}]
 
             def version(self, version_id):
                 return {"id": version_id, "resources": {"bindings": [
@@ -772,7 +828,7 @@ class WorkerMatrixTests(unittest.TestCase):
                 self.assertEqual(matrix.main([
                     "--output", str(output), "--spawn-dir", str(root),
                     "--fleet-url", "https://fleet.example", "--fabric-origin", "https://health.example",
-                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--fabricd-digest", TEST_FABRICD_DIGEST,
+                    "--fleet-key-file", str(key), "--cold-witness-command", "mock", "--source-repo", str(root), "--stable-version-id", TEST_STABLE_VERSION, "--fabricd-digest", TEST_FABRICD_DIGEST,
                     "--source-sha", "b" * 40, "--fabric-app-id", TEST_FABRIC_APP_ID, "--execute", "--ack-destructive",
                 ]), 1)
             finally:
