@@ -45,6 +45,12 @@ forensic envelope — never depending on the acquiring instance being alive.
    idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in the existing self-applying
    DDL. A fresh and an already-populated DB both just work (ADR-0002 deploy posture).
 5. **Cap-safety untouched.** The advisory-lock admission path is not modified.
+6. **Close remains required.** A held lease reaches release only through close (or
+   the abnormal reaper path); close owns teardown, metrics, provider cost, billing,
+   and attestation finalization.
+7. **No external close acknowledgement.** Envelope ingest and poll are optional
+   CoreLink telemetry surfaces. Production close does not wait for a client ACK or a
+   fixed acknowledgement window.
 
 ## Decision
 
@@ -75,7 +81,8 @@ reaper (any instance):
    and often is the reaper): full fidelity, finalize through the existing
    `close_abnormal` path;
 2. else reads the **durable checkpoint** and emits a partial envelope from it
-   (`close_reason=expired|crashed`, `capture_incomplete=true`);
+   (`close_reason=expired|crashed`, `capture_incomplete=true` because the capture is
+   abnormal/partial);
 3. else (no hook **and** no checkpoint — the lease died before its first turn) emits
    an explicit **`no_capture` marker** envelope — so the loss is **recorded, never
    silent** (satisfies CoreLink's "never silently dropped" requirement).
@@ -85,7 +92,8 @@ reaper (any instance):
   (step 1), and that is preserved.
 - **Delivery:** at-least-once; downstream consumers may deduplicate by `lease_id`.
   The envelope is retained until drained or the 24h contract TTL, and the durable
-  row makes "retain until drained" possible.
+  row makes "retain until drained" possible. Polling is optional; it does not replace
+  the required close finalization.
 
 ### Decision-3 — checkpoint cadence + `no_capture` acceptability ✅ (RATIFIED)
 
@@ -117,8 +125,8 @@ Both sub-points are **owner-ratified** (2026-06-14):
   the in-crate `cross_instance_reaper_without_hook_emits_durable_checkpoint`. The
   frozen `corelink-runner` envelope mechanism is UNTOUCHED.
 - **Phase 2b — per-turn checkpoint WRITE (Decision-3a). ✅ SHIPPED (PR #48, commit 78182c1).**
-  The per-turn `set_envelope_checkpoint` IS called in production: `checkpoint_turn` fires from
-  the §13.2 ingest handler on every `model_turn`, and the non-destructive
+  The per-turn `set_envelope_checkpoint` is called when optional telemetry is ingested:
+  `checkpoint_turn` fires from the §13.2 ingest handler on every `model_turn`, and the non-destructive
   `snapshot()`/`snapshot_metrics()` projection is live in the runner envelope crate.
   (Verified 2026-06-17: `checkpoint_turn`, `no_capture` Tier-3, and the Pg `envelope_checkpoint`
   column all present on `main`.)
@@ -132,6 +140,9 @@ Both sub-points are **owner-ratified** (2026-06-14):
 - The multi-instance regression suite (`mod pg_runs`) extends: instance B reaps a
   lease instance A acquired (cross-instance deadline backstop); a non-owning instance
   emits the durable-checkpoint envelope.
+- Close remains the required teardown/release/finalization boundary for metrics,
+  provider cost, billing, and attestation; optional ingest/poll telemetry does not
+  introduce an external acknowledgement dependency.
 - RUNBOOK §5a (Phase 1) and §5b (Phase 2a) known-limitations are now both **closed**
   ("resolved — durable-reap-state, ADR-0004"). The abnormal envelope is durably emitted
   from any instance (never silently dropped). The Phase-2b per-turn WRITE feed is now also

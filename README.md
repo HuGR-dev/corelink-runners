@@ -66,7 +66,7 @@ Eight crates in one Cargo workspace (`crates/`):
 
 | Crate | Role |
 |---|---|
-| `corelink-runner` | Execution core: lease lifecycle, isolation, teardown, boot, concurrency/expiry/recovery, Actions-YAML shim, fence enforcement (`materialize`/`enforce`), X4 supply-chain oracle, §13 envelope (derivation collector, CaptureHook, JobClose ack). |
+| `corelink-runner` | Execution core: lease lifecycle, isolation, teardown, boot, concurrency/expiry/recovery, Actions-YAML shim, fence enforcement (`materialize`/`enforce`), X4 supply-chain oracle, §13 envelope (derivation collector, CaptureHook, local close finalization). |
 | `corelink-fabric` | Control-plane core: `LeaseLedger` trait + in-memory and Postgres (`PgLedger`) implementations, `SlotMeter` bounded billing journal, `FairScheduler` (CP4), plan/tier types, `BoxRegistry`, crash/expiry reaper. |
 | `corelink-fabric-server` | HTTP server binary (`corelink-fabricd`): axum router, auth middleware, lease/exec/attestation handlers, tower load-shed, global concurrency limit, admin tenant endpoint, cloud backend wiring. |
 | `corelink-fabric-api` | Frozen wire DTOs: `AcquireRequest`, `ExecRequest`, `CloseResponse`, etc. Shared by the server and the CLI — no drift possible. |
@@ -175,8 +175,9 @@ free plan + private repo, no branch protection).
 | [`docs/product/pricing.md`](docs/product/pricing.md) | Pricing model: full rationale, loss-impossible guarantee, competitive position |
 | [`docs/cli.md`](docs/cli.md) | `corelink` CLI reference (`smoke`, `verify`) |
 | [`docs/api/v1-reference.md`](docs/api/v1-reference.md) | Full `/v1` HTTP API reference — every endpoint, DTO, auth, status code |
-| Legacy integration contract | fabric wire + envelope contract v1.4.0 (historical framing; the §13/attestation mechanisms it specifies are the fabric's own + live) |
-| [`docs/spec/corelink-fabric-stub.md`](docs/spec/corelink-fabric-stub.md) | CoreLink-side fabric/scheduler/billing stub |
+| [Legacy integration contract](docs/spec/hugit-integration-contract.md) | Historical wire + envelope provenance (v1.4.0); the active contract is owned by CoreLink |
+| [Historical fabric design stub](docs/spec/corelink-fabric-stub.md) | Retired CoreLink-side fabric/scheduler/billing design skeleton |
+| [Historical seam map](docs/interop.md) | Retired M0 interop map; current seams are documented by the API and ADRs |
 | [`docs/deploy/fabric-server.md`](docs/deploy/fabric-server.md) | `corelink-fabricd` env vars and Docker deploy |
 | [`docs/deploy/northflank-postgres-runbook.md`](docs/deploy/northflank-postgres-runbook.md) | Northflank + Postgres production deploy runbook |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Full item-by-item roadmap: closed, in-flight, remaining |
