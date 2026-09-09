@@ -21,9 +21,15 @@ if [[ "$url" == *'/v1/attestation/key' ]]; then
   printf '{"keys":[{"key_id":"%s","pubkey_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","expires_ms":null}]}\n' "$key_id"; exit 0
 fi
 if [[ "$url" == *'/v1/health' || "$url" == */health ]]; then
-  has_writeout=0; has_fail=0; for arg in "$@"; do [ "$arg" = --write-out ] && has_writeout=1; [ "$arg" = --fail ] && has_fail=1; done
+  has_writeout=0; has_fail=0; has_output=0; for arg in "$@"; do [ "$arg" = --write-out ] && has_writeout=1; [ "$arg" = --fail ] && has_fail=1; [ "$arg" = --output ] && has_output=1; done
   [ "$has_writeout" = 1 ] && [ "$has_fail" = 0 ] || exit 12
-  case "${DIRECT_MOCK_FAIL:-}" in health_status) printf 'ok\n500';;health_schema) printf 'not-ok\n200';;*) printf 'ok\n200';;esac
+  if [ "$has_output" = 1 ]; then
+    [ -z "${DIRECT_MOCK_WAKE_FILE:-}" ] || : > "$DIRECT_MOCK_WAKE_FILE"
+    [ -z "${DIRECT_MOCK_LOG:-}" ] || printf '%s\n' 'fabricd_health_wake_request' >> "$DIRECT_MOCK_LOG"
+    case "${DIRECT_MOCK_FAIL:-}" in health_status) printf '500';;health_schema) printf '200';;*) printf '200';;esac
+  else
+    case "${DIRECT_MOCK_FAIL:-}" in health_status) printf 'ok\n500';;health_schema) printf 'not-ok\n200';;*) printf 'ok\n200';;esac
+  fi
   exit 0
 fi
 if [[ "$url" == *'/v1/spawn' ]]; then
