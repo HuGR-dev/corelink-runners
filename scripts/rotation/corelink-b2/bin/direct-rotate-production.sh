@@ -412,14 +412,14 @@ close_response_valid(){
     (.tokens | type == "object" and (keys | sort) == ["cache_read", "cache_write", "input", "output", "total"] and all(.[]; type == "number" and floor == . and . >= 0)) and
     (.tool_breakdown | type == "array" and all(.[]; type == "object" and (keys | sort) == ["count", "tool"] and (.tool | type == "string") and (.count | type == "number" and floor == . and . >= 0))) and
     all([.active_ms, .cost_usd_micros, .model_turns, .tool_calls, .wall_ms][]; type == "number" and floor == . and . >= 0)) and
-  ((.check_result == null) or
+  (has("check_result") and ((.check_result == null) or
     (.check_result | type == "object" and
       (keys | sort) == ["artifacts", "def_digest", "duration_ms", "exit", "memo_key", "produced_at", "runner_ref", "stderr_ref", "stdout_ref", "toolchain_digest", "tree_hash"] and
       all([.memo_key, .tree_hash, .def_digest, .toolchain_digest, .runner_ref, .stdout_ref, .stderr_ref][]; type == "string") and
       (.exit | type == "number" and floor == .) and
       all([.duration_ms, .produced_at][]; type == "number" and floor == . and . >= 0) and
       (.artifacts | type == "array" and all(.[]; type == "object" and (keys | sort) == ["digest", "path"] and (.digest | type == "string") and (.path | type == "string")))
-    )) and
+    ))) and
   (.attestation | type == "object" and (keys | sort) == ["def", "model", "principal", "runner", "sig", "tree"] and all([.tree, .def, .runner, .model, .sig][]; type == "string") and (.principal | type == "array" and all(.[]; type == "string"))) and
   (.result_binding_sig | type == "string" and length > 0) and
   (.result_binding_sig_v2 | type == "string" and length > 0) and
