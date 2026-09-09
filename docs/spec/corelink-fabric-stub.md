@@ -1,8 +1,12 @@
-# CoreLink Runners — fabric spec  ⟨STUB — for the CoreLink techlead to fill⟩
+# CoreLink Runners — fabric spec  ⟨RETIRED HISTORICAL STUB⟩
 
-> **🟡 NEW HERE? Read `docs/handoff/corelink-techlead-onboarding.md` FIRST** — it is
-> your complete briefing (what this is, why it exists, what already exists, and exactly
-> what to do). Then come back and fill this stub.
+> **RETIRED HISTORICAL DESIGN SKELETON — NOT AN ACTIVE PLAN OR RELEASE GATE.**
+> ADR-0014 supersedes its external-consumer framing. Keep this file for design
+> provenance; current product and contract behavior lives in the API, feature
+> catalog, ADRs, and roadmap.
+
+> **Historical onboarding note:** `docs/handoff/corelink-techlead-onboarding.md` is
+> retained as dated provenance. It is not an active instruction to fill this stub.
 >
 > **⚠️ hugit / campaign #3 is DISCONTINUED (owner-confirmed 2026-07).** This stub was
 > written when hugit was the intended consumer, so it frames the seam in "hugit" terms.
@@ -11,16 +15,13 @@
 > `[hugit-required §X]` markers below denote requirements the fabric's own wire contract
 > imposes. The mechanisms are live and direct-to-ICP.
 >
-> **To: CoreLink techlead.** The wire seam is fully specified in
-> `hugit-integration-contract.md` (historical hugit framing; hugit discontinued) — please
-> read it first; it is the set of constraints the fabric must satisfy. This document is the
-> **other half**: the production fabric *you* own. It is a deliberate skeleton — fill each
-> `⟨FILL⟩` with what you want/need on your side, with the same rigor. The HuGR techlead
-> designed the product (`docs/product/product.md`) and the wire contract; you own the
-> metal, the scheduler, and the unit economics underneath.
+> **Historical ownership note:** the wire seam was recorded in
+> `hugit-integration-contract.md` (historical hugit framing; hugit discontinued), and
+> this file recorded the former fabric-side design questions. It is retained as a
+> provenance skeleton; do not treat its `⟨FILL⟩` markers as current work.
 >
-> Nothing here is decided yet — these are the decisions to make. Where the wire contract
-> imposes a hard requirement, it's marked **[hugit-required]** (historical label) and
+> The following undecided items are historical. Where the old wire contract imposed a
+> hard requirement, it is marked **[hugit-required]** (historical label) and
 > cross-referenced.
 
 ---

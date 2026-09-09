@@ -1563,15 +1563,17 @@ agent-exec). Real customer e2e remains a direct-product exercise — ⚫.
 **Reality:** 🟡 built-not-proven / ⚫ direct customer e2e pending.
 
 ### S2.3.2 — Streaming the agent trajectory (§13.2 turn-feed) 🟡 built-not-proven / ⚫ historical dispatch
-**As a** CoreLink ledger consumer, **I want** the in-box agent loop to stream its raw transcript out through an authenticated hook, **so that** I can persist both the full and compacted transcript blobs without the runner ever storing bytes.
+**As a** CoreLink telemetry consumer, **I want** the in-box agent loop to optionally stream bounded transcript telemetry through an authenticated hook, **so that** I can observe the agent path without the runner ever storing bytes.
 **Flow:**
-1. At acquire, a `CaptureHook` is registered
-2. the in-box agent loop `POST /v1/leases/{id}/envelope/ingest` (per-lease **write-only ingest token**, NOT the tenant PAT)
-3. The ledger consumer polls `GET .../envelope/events` (raw) + `.../envelope/meta` (per-turn metadata) with the tenant PAT
-4. at `close`, the exactly-once job-close signal fires; both blobs finalized before `Released`.
+1. At acquire, a `CaptureHook` is registered for optional telemetry
+2. the in-box agent loop may `POST /v1/leases/{id}/envelope/ingest` (per-lease **write-only ingest token**, NOT the tenant PAT)
+3. A CoreLink consumer may poll `GET .../envelope/events` (raw) + `.../envelope/meta` (per-turn metadata) with the tenant PAT
+4. `close` remains required: teardown completes, the lease is released, and metrics, provider cost, billing, and attestation are finalized atomically.
 
-**Expected:** Bounded in-flight only — **nothing persisted** on the runner (§13.3);
-overflow is honest (`capture_incomplete`), never a silent drop. Redaction is
+**Expected:** Ingest and poll are optional CoreLink telemetry and are not a GA gate.
+The surfaces are bounded in-flight only — **nothing persisted** on the runner (§13.3).
+`capture_incomplete` means actual local overflow, undrained residue, or abnormal
+partial capture; it is never a missing external JobClose ACK. Redaction is
 forge-side; the runner forwards raw bytes.
 **Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; the ingest
 token is `HMAC(derived_key, "envelope-ingest:v1:"+lease_id)` (the P0 fix that replaced
@@ -1581,8 +1583,8 @@ consumption by a former external project was withdrawn; direct CoreLink consumpt
 - *Exfiltrated ingest token* — authorizes ingest to that **one soon-dead lease** only;
   no tenant takeover (api §ingest).
 - *Abnormal close (Expired/Crashed)* — a **partial** envelope is flushed, marked
-  `close_reason` + `capture_incomplete` (§13.5 Option B); fire-and-forget, teardown
-  never waits.
+  `close_reason` + `capture_incomplete` (§13.5 Option B); the flag records the
+  actual abnormal partial, and teardown never waits for an external ACK.
 **Feature(s):** F-2.5, F-4.9 — §13.2 capture hook · scoped ingest token · no-persistence · abnormal-flush.
 **Reality:** 🟡 built-not-proven / ⚫ direct customer consumption pending.
 
@@ -1916,19 +1918,20 @@ fence red-team (`C5a`/`C5b`) green; the credential-scan attestation proves
 **Reality:** 🟢 LIVE-proven (isolation).
 
 ### S4.3 — The agent streams its trajectory out (but the box stores nothing) 🟡 built-not-proven
-**As an** agent, **I want** to stream my model turns / tool calls / results as they happen, **so that** the forge captures my full + compacted transcript — while the box I run on never persists a byte.
+**As an** agent, **I want** to optionally stream my model turns / tool calls / results as they happen, **so that** CoreLink can observe bounded telemetry — while the box I run on never persists a byte.
 **Flow:**
-1. The agent loop `POST .../envelope/ingest` per turn (scoped ingest token)
+1. The agent loop may `POST .../envelope/ingest` per turn (scoped ingest token)
 2. the runner forwards in-flight only
-3. The ledger consumer persists
-4. at close, `wall_ms`/`active_ms` finalize both blobs atomically.
+3. an optional CoreLink consumer may poll the bounded events/meta surfaces
+4. at close, `wall_ms`/`active_ms` finalize with the required metrics, provider cost, billing, and attestation before release.
 
-**Expected:** The runner never buffers/persists beyond in-flight forwarding (§13.3);
-overflow ⇒ `capture_incomplete`, honest.
+**Expected:** The telemetry routes are optional and are not a GA gate. The runner
+never buffers/persists beyond in-flight forwarding (§13.3); actual local overflow,
+undrained residue, or abnormal partial capture ⇒ `capture_incomplete`, honestly.
 **Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; poll-drain with no durable write on the forward path (`envelope.rs`, `no_durable_write_anywhere_on_forward_path`, S7.13); scoped write-only ingest token (S2.3.2). A former external consumer is not part of current acceptance.
 **Variations & failures:**
 - *Overflow* — the surface latches `raw_overflow`/`meta_overflow` → `capture_incomplete: true` at close (never a silent drop, S7.13).
-- *Abnormal close (Expired/Crashed)* — a partial envelope is flushed, marked `capture_incomplete` (§13.5 Option B, S2.3.2); teardown never waits.
+- *Abnormal close (Expired/Crashed)* — a partial envelope is flushed, marked `capture_incomplete` (§13.5 Option B, S2.3.2); teardown never waits for an external ACK.
 - *Exfiltrated ingest token* — writes to that one soon-dead lease only, no tenant takeover (S7.14).
 **Feature(s):** F-4.9 — §13.2 turn-feed · no-persistence.
 **Reality:** 🟡 built-not-proven.
@@ -2144,7 +2147,7 @@ together — **owner-gated on volume** (MEMORY: fabricd-multi-instance-scaling).
 1. A global in-flight concurrency limit sheds excess; `GET /v1/health` is mounted **outside** the limiter so an LB/orchestrator can always probe liveness under saturation (api §health).
 
 **Expected:** Saturation degrades cleanly — the global in-flight limit sheds excess with a `503` while `GET /v1/health` (mounted outside the limiter) still answers 200, so an LB/orchestrator can always distinguish "saturated but up" from "down" (S15.3).
-**Acceptance / evidence:** `load_shedding.rs` acceptance; close ack-window + global-limit/load-shed
+**Acceptance / evidence:** `load_shedding.rs` acceptance; close finalization + global-limit/load-shed
 (ROADMAP audit fixes).
 **Variations & failures:**
 - *Health under saturation* — always answerable (outside the limiter); a 200 = saturated-but-up, a timeout = down (S15.3).
@@ -4417,7 +4420,7 @@ Coined terms, used verbatim throughout. (Feature mechanics live in `docs/product
 | **env-0 / cred-ticket** | The env-0 credential ticket: a lease-bound, single-use ticket the box redeems for a short-lived CAS PAT — the secret is never stored on the box (F-5.9). |
 | **Fence / FenceManifest** | The per-claim isolation manifest that is materialized + enforced fail-closed; a red-team suite proves escape attempts fail (F-4.2/F-4.4). |
 | **The mint** | The per-job minting of a scoped CAS/runner PAT (`mint_attempts`/`mint_failures` counters). A mint failure degrades to a **cold** run (fail-open-to-cold), not an outage. |
-| **§13 envelope** | The CoreLink §13 mechanism: agent-execution metrics (`IntentMetrics`) + the §13.2 turn-feed capture hook + JobClose ack state machine (F-4.9). |
+| **§13 envelope** | The CoreLink §13 mechanism: agent-execution metrics (`IntentMetrics`) + optional §13.2 turn-feed telemetry + required local close finalization for teardown, release, metrics, provider cost, billing, and attestation (F-4.9). No external JobClose ACK or fixed wait is part of the contract; `capture_incomplete` records actual local loss, residue, or abnormal partial capture. |
 | **`intent_metrics_sig`** | The signature over the attested per-job cost/metrics delivered atomically at close (F-5.4). |
 | **X4** | The supply-chain verify-before-spawn oracle (image pinning / digest verification) + red-team machinery (F-4.5). |
 | **Conformance vector** | Byte-identical CoreLink golden fixtures committed under `conformance/`; the drift tripwire breaks on any type divergence (F-3.3). |

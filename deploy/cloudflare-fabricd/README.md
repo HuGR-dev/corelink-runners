@@ -1,6 +1,7 @@
 # Deploying `corelink-fabricd` on Cloudflare Containers (gap-#1 option b)
 
-The Rust control plane (RunnerLease API · §13 envelope · attestation key) runs as
+The Rust control plane (RunnerLease API · §13 envelope telemetry · required close
+finalization · attestation key) runs as
 ONE singleton CF Container, fronted by a thin proxy Worker. The container stays
 available while real activity is recent; after 5m without a real request it may
 scale to zero and cold-start on the next request. The minute cron is an
@@ -94,7 +95,7 @@ Worker rollout.
 HOST="https://corelink-fabricd.<account-subdomain>.workers.dev"   # printed by deploy
 curl -s $HOST/v1/health                       # → ok
 curl -s $HOST/v1/attestation/key              # → key_id faa5b7726ccd2c52 (the prod pubkey)
-# acquire with a real tenant PAT → 200 Held; GET .../envelope/meta → 200 (not 404)
+# acquire with a real tenant PAT → 200 Held; envelope/meta is optional telemetry
 ```
 
 These application-route calls are wake-capable. Use them only while validating
@@ -127,7 +128,7 @@ instance. Two failure modes were observed + closed on 2026-07-07/08:
   box**; (b) provision HTTP bounded to 30s; (c) a **`FABRIC_PROVISION_MAX_INFLIGHT`
   semaphore** (default 16) bounds concurrent provisions (excess awaits a permit
   async, not on a thread).
-- **Single close wedged the plane** (2026-07-07): ONE off-box close black-holed
+- **Single close wedged the plane** (historical implementation incident, 2026-07-07): ONE off-box close black-holed
   `/v1/health` on the 1-vCPU box. Root cause: the close's `block_in_place` pg
   work (`pg_ledger.rs`) runs ON a runtime worker; on 1 vCPU (1 worker) the whole
   runtime stalls. The configured **`standard-2` provider shape is 1 vCPU / 6 GiB /
@@ -135,18 +136,14 @@ instance. Two failure modes were observed + closed on 2026-07-07/08:
   probe evidence tied to that shape. **Verified 2026-07-08:**
   health stayed `200` across all 30 polls (0.4–1.0s) through a 32s close.
 
-**Close latency — diagnosed, NOT a bug (2026-07-08).** A raw close (e.g. `curl`)
-takes ~32s, but that is the **§13.2 JobClose ack window** (`ack_timeout`, hardcoded
-`Duration::from_secs(30)` at `leases.rs:964`): every off-box/agent lease registers
-a §13 CaptureHook at acquire, and the close blocks up to 30s (fail-closed) waiting
-for the client's **JobClose ack**. A non-acking test client waits the full 30s; a
-REAL acking client (the direct CoreLink CLI/SDK path — proven metrics round-trip) collapses the
-window to ~0 and the close returns in **~2.7s** (teardown + attestation + 3 pg
-writes). So the close is fast for real traffic — the "slow close" was a
-non-acking-test artifact, not pg latency. The pg work itself is ~2.7s; no offload
-needed at current scale. The real requirement — the plane staying UP during any
-long ack-wait — is handled by `close_ack_gate`, which bounds concurrent ack-waits;
-the 2026-07-08 probe kept health at `200` across 30 polls during a 32s close.
+The dated probe recorded health at `200` across 30 polls during a roughly 32-second
+close. That is historical implementation evidence, not the production contract.
+The current close contract is deterministic about ownership: close tears down the
+box, finalizes metrics, provider cost, billing, and attestation, then releases the
+lease. It does not require or await an external JobClose ACK and has no fixed
+30-second wait. Envelope ingest and poll are optional telemetry; local overflow,
+undrained residue, or an abnormal partial flush is reported through
+`capture_incomplete`.
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
 ledger. The **pg ledger has two gates**: a non-empty `DATABASE_URL` secret **and**

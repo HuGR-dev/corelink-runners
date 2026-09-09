@@ -78,7 +78,7 @@ The whole doc at a glance: feature area → headline evidence → where the code
 | # | Feature area | Headline | Where |
 |---|---|---|---|
 | 1 | Value proposition & pricing model | 🟢 principle LIVE; ceiling-enforcement 🟡 | `plans.rs`, `compute_meter.rs`, `pricing.md` |
-| 2 | Direct, memoized-check, power-user, Workspaces and agent-exec front doors | 🟢 dogfood LIVE; external 🔵; workspaces ⚫ | `dto.rs`, `interop.md`, ADR-0007 |
+| 2 | Direct, memoized-check, power-user, Workspaces and agent-exec front doors | 🟢 dogfood LIVE; external 🔵; workspaces ⚫ | `dto.rs`, historical `interop.md`, ADR-0007 |
 | 3 | Frozen wire contract & conformance | 🟢 LIVE (Rust tripwire); TS gap ⚪ | `corelink-runners-contracts/`, `conformance/` |
 | 4 | Execution core (lease/isolate/boot/fence/X4/§13/attest) | 🟢 LIVE (182+ tests) | `crates/corelink-runner/` |
 | 5 | Control plane (API/admission/ledger/attest/reaper/moat) | 🟢 LIVE singleton; pg + N>1 🔵; queue ⚫ | `corelink-fabric-server/`, `corelink-fabric/` |
@@ -171,7 +171,7 @@ slot-pinning that burns the ceiling on junk) is not yet a heuristic — the rate
 
 ## 2. Two front doors, one fabric
 
-Same lease/isolate/cap/teardown spine; distinct buyers and execution models (whitepaper §9; `interop.md §4`;
+Same lease/isolate/cap/teardown spine; distinct buyers and execution models (whitepaper §9; historical `interop.md §4`;
 ADR-0007). Cards F-2.1..F-2.4 are the four front doors; F-2.5 is the CoreLink agent-exec real-cost
 gate rides on.
 
@@ -477,8 +477,8 @@ identity. *(`ws` is workspace lifecycle, NOT a websocket module.)*
 
 ### F-4.9 — §13 envelope — agent-execution metrics  🟢
 
-**What** The contract §13 mechanism: metrics emission + capture-hook surfaces + no-persistence (in-process;
-M1 adds transport + PAT).
+**What** The contract §13 mechanism: metrics emission + optional capture-hook telemetry + no-persistence
+(in-process; close remains the required release/finalization operation).
 **Where** `envelope/`.
 **Status** 🟢 LIVE.
 **Details** — mechanism · what · where:
@@ -490,8 +490,10 @@ M1 adds transport + PAT).
 | Non-destructive `snapshot`/`project` | turn-boundary checkpoint without tripping finalize (ADR-0004 Phase 2b) | `collector.rs:174-231` |
 | `CaptureHook` (2 surfaces) | raw-event + per-turn `TurnMeta` bounded in-memory queues; bearer-gated subscribe; per-surface overflow flags; bytes forwarded byte-identical (redaction is forge-side, §13.3) | `envelope/hook.rs:167-381` |
 | Drain (in-flight-only) | `next_event`/`next_meta` pop-front, released after forwarding — no durable persistence | `envelope/hook.rs:394-409` |
-| JobClose ack state machine | finalize → publish CloseSignal → bearer-gated ack window → fail-closed CloseOutcome; residue/overflow ⇒ `capture_incomplete` | `envelope/close.rs:126-185`; default `ack_timeout`=30s + `buffer_capacity`=256 set at `handlers/leases.rs:1182-1183`, consumed at `close.rs:155` |
-| `close_abnormal` (§13.5) | expiry/crash: partial flush, `capture_incomplete=true`, `close_reason` on the wrapper (never inside frozen IntentMetrics) | `envelope/close.rs:203-240,44-78` |
+| Close finalization | required close finalizes local metrics and releases the lease after teardown; no production external JobClose ACK or fixed wait | `envelope/close.rs` |
+| `capture_incomplete` | true only for actual local capture loss (overflow or undrained residue) or an abnormal partial flush; never a missing external ACK marker | `envelope/close.rs` |
+| Optional envelope telemetry | ingest accepts scoped in-box events; poll drains in-flight events/meta; either surface may be unused and is not a GA gate | `handlers/envelope.rs`, `envelope/hook.rs` |
+| `close_abnormal` (§13.5) | expiry/crash: partial flush, `capture_incomplete=true`, `close_reason` on the wrapper (never inside frozen IntentMetrics) | `envelope/close.rs` |
 
 **Exercised by** S4.3, S4.4, S2.3.2.
 **Validated by** `acceptance_s13`, `acceptance_envelope_e2e`, `envelope_wire`.
@@ -530,9 +532,9 @@ fail-closed.
 | `POST /v1/leases/{id}/exec` | CheckDef→CheckResult, gate order scope/held/expired/exec/attest | `app.rs:1921`, `exec_handler.rs` | 🟢 |
 | `POST /v1/leases/{id}/agent-exec` + `GET .../{step_id}` | egress arbitrary-command drive, never memoized, async step-store | `app.rs:1925,1929`, `agent_exec.rs` | 🟢 |
 | `POST /v1/queue/trigger` | §9 landing-queue trigger, attested, at-least-once dedup (cap 4096) | `app.rs:1933`, `queue.rs:64` | 🟢 |
-| `POST /v1/leases/{id}/close` | §13 close: teardown-first → ack window → Held→Released → atomic metrics+result | `app.rs:1934`, `close.rs` | 🟢 |
-| `GET /v1/leases/{id}/envelope/events\|meta` | §13.2 drain (tenant PAT) | `app.rs:1939,1940` | 🟢 |
-| `POST /v1/leases/{id}/envelope/ingest` | §13.2 write, per-lease scoped-token (outside PAT layer) | `app.rs:1891` | 🟢 |
+| `POST /v1/leases/{id}/close` | required close: teardown-first → local finalization → Held→Released → atomic metrics, cost, billing, and attestation | `app.rs:1934`, `close.rs` | 🟢 |
+| `GET /v1/leases/{id}/envelope/events\|meta` | optional §13.2 telemetry drain (tenant PAT) | `app.rs:1939,1940` | 🟢 optional |
+| `POST /v1/leases/{id}/envelope/ingest` | optional §13.2 telemetry write, per-lease scoped token (outside PAT layer) | `app.rs:1891` | 🟢 optional |
 | `POST /v1/leases/{id}/cas-cred` | C2c cred-ticket redeem → per-job CAS PAT (single-use) | `app.rs:1896`, `cas_cred.rs` | DEFAULT-OFF |
 | `GET /v1/usage` + `/v1/usage/history` | tenant-facing live usage (cap·active·peak) + history | `app.rs:1910,1913` | 🟢 |
 | `GET /v1/metrics/tenant` | §6 per-tenant wait histogram | `app.rs:1911` | 🟢 (count 0 in reject mode) |
@@ -543,8 +545,8 @@ fail-closed.
 | `POST /webhooks/github` | Stage-B autoscaler, HMAC-authed | `server.rs:1418`, `webhook.rs` | DEFAULT-OFF |
 
 **Load-shed layer:** `GlobalConcurrencyLimit` + `LoadShed` → 503 on work routes (health/key excluded);
-defaults `MAX_INFLIGHT_REQUESTS=1024` (`app.rs:651`), `CLOSE_ACK_MAX_INFLIGHT=256` (`:633`),
-`PROVISION_MAX_INFLIGHT=16` (`:645`); the load-shed cap == the 1024 in-flight ceiling (no separate constant).
+defaults `MAX_INFLIGHT_REQUESTS=1024` (`app.rs:651`) and `PROVISION_MAX_INFLIGHT=16` (`:645`);
+the load-shed cap == the 1024 in-flight ceiling (no separate constant).
 **Reserved:** `ADMIN_TENANT_BY_ID` (`paths.rs:128`, `/internal/v1/admin/tenants/{id}`) is defined but
 **unwired** — see Appendix B.
 **Exercised by** S1.2.1–S1.2.5, S2.1.2, S2.3.1, S5.2.3.
@@ -1043,7 +1045,7 @@ references pre-built `@sha256` digests.
 ## 11. Integration seams (family)
 
 - **Consumes CoreLink Cache** — CAS/AC/R2 + tenancy + PAT, as a layer, never forked. Auth Bearer PAT
-  (`interop.md §2`). Dedup is **intra-tenant at GA**; cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`) — the
+  (historical seam map, `interop.md §2`). Dedup is **intra-tenant at GA**; cross-tenant is staged (`CAP-DEDUP-CROSS-TENANT`) — the
   tense-discipline rule (`docs/review/2026-06-09-cross-tenant-dedup-claim.md`).
 - **Direct CoreLink consumers** — the `corelink` CLI, SDK/conformance clients, GitHub App path and explicitly
   contracted Workspaces integrations consume the fabric's public contracts. No named external project is required.
@@ -1097,8 +1099,7 @@ rotation semantics in `docs/deploy/secret-rotation-checklist.md`. Verified again
 `FABRIC_LEDGER_POOL_SIZE` · `FABRIC_PG_TLS` (disable\|require).
 **Admission/load-shed:** `FABRIC_ADMISSION_MODE` (reject\|queue) · `FABRIC_ADMISSION_QUEUE_WAIT_MS` ·
 `FABRIC_ADMISSION_TICK_MS` (default 50) · `FABRIC_ADMISSION_TICK_SLOTS` (default 64) · `FABRIC_ADMISSION_PARK_CAP`
-(default 8) · `FABRIC_MAX_INFLIGHT_REQUESTS` (default 1024) · `FABRIC_CLOSE_ACK_MAX_INFLIGHT` (default 256) ·
-`FABRIC_PROVISION_MAX_INFLIGHT` (default 16).
+(default 8) · `FABRIC_MAX_INFLIGHT_REQUESTS` (default 1024) · `FABRIC_PROVISION_MAX_INFLIGHT` (default 16).
 **Reaper:** `FABRIC_REAP_INTERVAL_SECS` (default 30) · `FABRIC_PENDING_MAX_AGE_SECS` (default 300) ·
 `FABRIC_CRASH_PROBE_INTERVAL_SECS` (opt-in, no default).
 **Ops surfaces (secrets → 404 unset):** `FABRIC_OBSERVABILITY_KEY` · `FABRIC_ADMIN_KEY`. Headers:
@@ -1176,8 +1177,8 @@ Runners features. The line is *execution and contract ownership (ours) vs buyer-
    versions match source (source ≠ deployed is the only remaining unknown, resolvable only on live config).
 6. **G2 metadata/link-local egress** — NOT closed on the CF path by the `deniedHosts` mechanism (no CIDR match,
    raw-socket bypass); needs platform-network-layer filtering (F-4.2).
-7. **`docs/spec/corelink-fabric-stub.md`** is a deliberate `⟨FILL⟩` skeleton (the CoreLink-techlead side), not a
-   feature spec — not inventoried.
+7. **`docs/spec/corelink-fabric-stub.md`** is a historical, retired `⟨FILL⟩` skeleton (the former
+   CoreLink-techlead side), not a feature spec — not inventoried.
 8. **`sleepAfter` (R3 over-corrected → restored R4)** — `sleepAfter` IS set, as a TS Container-class property
    (not a wrangler key): `RunnerContainer` `"15m"` (`deploy/cloudflare/src/index.ts:311`), `CheckHostContainer`
    `"45m"` (`:367`), `FabricdContainer` `"1h"` (`deploy/cloudflare-fabricd/src/index.ts:100`). It is an **idle
