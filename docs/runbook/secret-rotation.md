@@ -15,13 +15,14 @@ artifact.
 
 | Input | Requirement |
 |---|---|
-| `SECRET_NAME` | `FABRIC_CRED_TICKET_SECRET`, the exact secret targeted by the current executable harness. The proof route is the cred-ticket mint/redeem contract below. |
-| `OLD_SECRET_FILE` | OOB file containing the currently accepted value, readable only by the operator. |
-| `NEW_SECRET_FILE` | OOB file containing the new value, readable only by the operator. |
-| `APP_ID` | UUID for the Cloudflare Containers application named `corelink-fabricd`, obtained by a read-only provider query. It is not a logical container class, Worker name, or GitHub App id. |
-| `HEALTH_URL` | Owner-supplied fabricd health URL for the post-recovery liveness check. |
-| `PROOF_ROUTE` | The harness uses `POST /v1/test/mint-cred-ticket` and `POST /v1/leases/{lease_id}/cas-cred`, then probes the returned CLW endpoint. `/v1/health` is only a liveness check and is not proof. |
-| `ROLLBACK_FILE` | OOB custody location for the old value, retained until the change is accepted. |
+| `AU18_OLD_SECRET_FILE` | OOB file containing the currently accepted `FABRIC_CRED_TICKET_SECRET` value, readable only by the operator and retained for rollback. |
+| `AU18_NEW_SECRET_FILE` | OOB path where the harness creates the new value; it must not exist before the run. |
+| `AU18_TEST_MINT_KEY_FILE` | OOB file containing the temporary test-mint key, readable only by the operator. |
+| `AU18_PAT_FILE` | OOB file containing the tenant-scoped acquiring PAT, readable only by the operator. |
+| `AU18_INTROSPECT_KEY_FILE`, `AU18_FLEET_BUSY_KEY_FILE`, `AU18_OBSERVABILITY_KEY_FILE` | OOB internal-auth files, each regular, non-symlink, mode `0600`, and operator-owned. |
+| `AU18_APP_ID` | UUID for the Cloudflare Containers application named `corelink-fabricd`, obtained by a read-only provider query. It is not a logical container class, Worker name, or GitHub App id. |
+| `AU18_HEALTH_URL` | Fabricd health URL for the post-recovery liveness check; the harness default is the configured Fabricd `/health` endpoint. |
+| Fixed proof routes | The harness uses `POST /v1/test/mint-cred-ticket` and `POST /v1/leases/{lease_id}/cas-cred`, then probes the returned CLW endpoint. `/v1/health` is only a liveness check and is not proof. |
 | `CHANGE_ID` | Owner-approved change window and accountable owner identity. |
 
 The account is the Cloudflare account in `deploy/cloudflare-fabricd/wrangler.jsonc`:
@@ -34,14 +35,9 @@ Set the owner supplied OOB paths in the private operator shell using the
 run it from a clean checkout with both destructive-action acknowledgements:
 
 ```sh
-AU18_APP_ID="$APP_ID" \
-AU18_OLD_SECRET_FILE="$OLD_SECRET_FILE" \
-AU18_TEST_MINT_KEY_FILE="$TEST_MINT_KEY_FILE" \
-AU18_PAT_FILE="$PAT_FILE" \
-AU18_NEW_SECRET_FILE="$NEW_SECRET_FILE" \
-AU18_INTROSPECT_KEY_FILE="$INTROSPECT_KEY_FILE" \
-AU18_FLEET_BUSY_KEY_FILE="$FLEET_BUSY_KEY_FILE" \
-AU18_OBSERVABILITY_KEY_FILE="$OBSERVABILITY_KEY_FILE" \
+export AU18_APP_ID AU18_OLD_SECRET_FILE AU18_TEST_MINT_KEY_FILE AU18_PAT_FILE \
+  AU18_NEW_SECRET_FILE AU18_INTROSPECT_KEY_FILE AU18_FLEET_BUSY_KEY_FILE \
+  AU18_OBSERVABILITY_KEY_FILE
 scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh --execute --ack-destructive
 ```
 
@@ -55,10 +51,10 @@ new-secret path. Never substitute a global or network-resolved Wrangler.
 Run these commands from the repository root. Save their non-secret
 outputs in the private change record. `secret list` reports names only.
 
-Resolve `APP_ID` by name before the change. The UUID must be the row named
+Resolve `AU18_APP_ID` by name before the change. The UUID must be the row named
 `corelink-fabricd` in the provider output; do not substitute the logical
-container class, the Worker name, or a GitHub App id. Set `APP_ID` and
-`HEALTH_URL` in the private operator shell from that owner/provider record,
+container class, the Worker name, or a GitHub App id. Set `AU18_APP_ID` and
+`AU18_HEALTH_URL` in the private operator shell from that owner/provider record,
 then run. The UUID is never guessed or copied from an application log.
 
 ```sh
@@ -67,7 +63,7 @@ cd deploy/cloudflare-fabricd
 ./node_modules/.bin/wrangler secret list --name corelink-fabricd
 ./node_modules/.bin/wrangler deployments list --name corelink-fabricd
 ./node_modules/.bin/wrangler containers list
-./node_modules/.bin/wrangler containers info "$APP_ID"
+./node_modules/.bin/wrangler containers info "$AU18_APP_ID"
 ```
 
 Record `before_worker_version_id`, `before_container_version_id`,
@@ -79,8 +75,10 @@ health response as a substitute for the provider version or image reads.
 ## Rotation
 
 The fabricd container reads secrets at boot. Updating a secret alone does not
-reload the running container. Set `SECRET_NAME` and `NEW_SECRET_FILE` in the
-private operator shell from the owner inputs. The files must be regular,
+reload the running container. The current harness rotates the fixed secret
+`FABRIC_CRED_TICKET_SECRET`. Set `AU18_OLD_SECRET_FILE` and
+`AU18_NEW_SECRET_FILE` in the private operator shell from the owner inputs.
+The files must be regular,
 non-symlink files with mode `0600`, owned by the operator, and readable only by
 that operator. Check them before the clock starts:
 
@@ -111,8 +109,8 @@ check_secret_file() {
     return 1
   fi
 }
-check_secret_file "$NEW_SECRET_FILE" || exit 1
-check_secret_file "$ROLLBACK_FILE" || exit 1
+check_secret_file "$AU18_NEW_SECRET_FILE" || exit 1
+check_secret_file "$AU18_OLD_SECRET_FILE" || exit 1
 ```
 
 Disable shell tracing for the credential operation and pass the file on
@@ -120,19 +118,33 @@ standard input. Do not use command substitution, `echo`, or `cat` for a secret:
 
 ```sh
 set +x
-./node_modules/.bin/wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$NEW_SECRET_FILE" || exit 1
+./node_modules/.bin/wrangler secret put FABRIC_TEST_MINT_KEY --name corelink-fabricd < "$AU18_TEST_MINT_KEY_FILE" || exit 1
+delete_and_confirm_absence || exit 1
+./node_modules/.bin/wrangler deploy --keep-vars --strict \
+  --var "FABRIC_TEST_MINT_TENANTS:ee30f7ba-fc25-4d71-939e-ebe130b4c6a3" \
+  --containers-rollout=immediate || exit 1
+./node_modules/.bin/wrangler secret put FABRIC_CRED_TICKET_SECRET --name corelink-fabricd < "$AU18_NEW_SECRET_FILE" || exit 1
 # Keep tracing disabled for the remainder of the change window.
 ```
 
 The delete/redeploy pair is a controlled mutation and requires the approved
 change window, monitoring, and the rollback value. After deleting the
-application, use `wrangler deploy --containers-rollout=immediate`: the
-`none` mode can update the Worker while leaving a deleted Containers
-application absent. Immediate rollout recreates the current application from
-the immutable digest already pinned in `deploy/cloudflare-fabricd/wrangler.jsonc`.
+application, use `--keep-vars --strict` with the temporary tenant binding and
+`--containers-rollout=immediate`: the `none` mode can update the Worker while
+leaving a deleted Containers application absent. Immediate rollout recreates
+the current application from the immutable digest already pinned in
+`deploy/cloudflare-fabricd/wrangler.jsonc`.
 The post-rollout provider read must prove the exact application name and the
 same image digest. A failed delete or deploy is fail-closed: surface the
 failure, do not claim proof, and run the recovery block immediately.
+
+Every harness recreation first confirms that the existing application is
+absent. The temporary `FABRIC_TEST_MINT_TENANTS` binding is then armed with
+the fixed tenant value `ee30f7ba-fc25-4d71-939e-ebe130b4c6a3` for the
+mint/proof window and is explicitly blanked in a second strict immediate
+rollout after proof. `--keep-vars` preserves unrelated bindings and `--strict`
+rejects configuration drift; do not replace either flag or omit the
+arm/disarm lifecycle.
 
 Immediately before the first secret write, take two read-only provider samples
 of the active Worker version, Containers application version, and image digest,
@@ -145,15 +157,15 @@ change window or mutate a secret.
 delete_and_confirm_absence() {
   set +e
   for attempt in 1 2; do
-    ./node_modules/.bin/wrangler containers delete "$APP_ID"
+    ./node_modules/.bin/wrangler containers delete "$AU18_APP_ID"
     delete_status=$?
     state_dir=$(mktemp -d)
-    ./node_modules/.bin/wrangler containers info "$APP_ID" >"$state_dir/info" 2>&1
+    ./node_modules/.bin/wrangler containers info "$AU18_APP_ID" >"$state_dir/info" 2>&1
     info_status=$?
     ./node_modules/.bin/wrangler containers list >"$state_dir/list" 2>&1
     list_status=$?
     if test "$info_status" -ne 0 && test "$list_status" -eq 0 && \
-       ! grep -Fq "$APP_ID" "$state_dir/list"; then
+       ! grep -Fq "$AU18_APP_ID" "$state_dir/list"; then
       return 0
     fi
     echo "container absence not confirmed after delete attempt $attempt" >&2
@@ -163,12 +175,20 @@ delete_and_confirm_absence() {
 
 rollback_fabricd() {
   set +x
-  ./node_modules/.bin/wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || return 1
+  ./node_modules/.bin/wrangler secret put FABRIC_CRED_TICKET_SECRET --name corelink-fabricd < "$AU18_OLD_SECRET_FILE" || return 1
+  ./node_modules/.bin/wrangler secret put FABRIC_TEST_MINT_KEY --name corelink-fabricd < "$AU18_TEST_MINT_KEY_FILE" || return 1
   delete_and_confirm_absence || return 1
-  ./node_modules/.bin/wrangler deploy --containers-rollout=immediate || return 1
-  curl --fail --silent "$HEALTH_URL" >/dev/null || return 1
-  # Run the owner-supplied PROOF_ROUTE fixture with the old value here. Record
-  # only its contract status; a missing or failed proof keeps rollback RED.
+  ./node_modules/.bin/wrangler deploy --keep-vars --strict \
+    --var "FABRIC_TEST_MINT_TENANTS:ee30f7ba-fc25-4d71-939e-ebe130b4c6a3" \
+    --containers-rollout=immediate || return 1
+  curl --fail --silent "$AU18_HEALTH_URL" >/dev/null || return 1
+  # Run the fixed mint/redeem proof routes with the old value here. Record only
+  # contract statuses; a missing or failed proof keeps rollback RED.
+  ./node_modules/.bin/wrangler secret delete FABRIC_TEST_MINT_KEY --name corelink-fabricd || return 1
+  delete_and_confirm_absence || return 1
+  ./node_modules/.bin/wrangler deploy --keep-vars --strict \
+    --var "FABRIC_TEST_MINT_TENANTS:" \
+    --containers-rollout=immediate || return 1
 }
 
 set +e
@@ -179,7 +199,9 @@ if test "$delete_status" -ne 0; then
   set -e
   exit 1
 fi
-./node_modules/.bin/wrangler deploy --containers-rollout=immediate
+./node_modules/.bin/wrangler deploy --keep-vars --strict \
+  --var "FABRIC_TEST_MINT_TENANTS:ee30f7ba-fc25-4d71-939e-ebe130b4c6a3" \
+  --containers-rollout=immediate
 deploy_status=$?
 if test "$deploy_status" -ne 0; then
   echo "fabricd deploy failed; rotation is RED and recovery is required" >&2
@@ -198,17 +220,34 @@ the failure; do not turn downtime into a successful rotation.
 
 ## Required proof
 
-Use the owner-supplied `PROOF_ROUTE` and request fixture. First send the old
-value and record only the HTTP status, contract error code, and timestamp. A
-successful request with the old value is a failure. Then send the new value
-and record only the accepted status/contract result and timestamp. The request
-body, headers, and output must be scrubbed before preservation.
+Use the fixed cred-ticket proof routes. First mint/redeem with the old value
+and record only the HTTP status, contract error code, and timestamp. A
+successful old-value redeem is a failure. Then mint/redeem with the new value,
+prove the returned CLW endpoint, and record only the accepted status/contract
+result and timestamp. The request body, headers, and output must be scrubbed
+before preservation.
 
 Capture the post-change provider state:
 
 ```sh
 ./node_modules/.bin/wrangler deployments list --name corelink-fabricd
-./node_modules/.bin/wrangler containers info "$APP_ID"
+./node_modules/.bin/wrangler containers info "$AU18_APP_ID"
+```
+
+After the proof, complete the normal cleanup lifecycle: delete the temporary
+test-mint secret, confirm application absence, and recreate with the temporary
+tenant binding explicitly blanked. Preserve the same strict immediate rollout
+flags and re-capture the provider state; do not leave the test key or tenant
+allowlist armed.
+
+```sh
+./node_modules/.bin/wrangler secret delete FABRIC_TEST_MINT_KEY --name corelink-fabricd
+delete_and_confirm_absence || exit 1
+./node_modules/.bin/wrangler deploy --keep-vars --strict \
+  --var "FABRIC_TEST_MINT_TENANTS:" \
+  --containers-rollout=immediate || exit 1
+./node_modules/.bin/wrangler deployments list --name corelink-fabricd
+./node_modules/.bin/wrangler containers info "$AU18_APP_ID"
 ```
 
 The probe is eligible for PASS only when all of these are true:
@@ -231,18 +270,27 @@ clock exceeds 600 seconds, record `RED` and do not claim AU1.8.
 
 ## Rollback
 
-If the new value fails its proof, restore the old value from the OOB rollback
-file. Set `ROLLBACK_FILE` in the private operator shell, then force the same
-boot reload through the recovery function above. The explicit commands are:
+If the new value fails its proof, restore the old value from
+`AU18_OLD_SECRET_FILE`. Set that path in the private operator shell, then force the
+same boot reload through the recovery function above. The explicit commands
+are:
 
 ```sh
 set +x
-./node_modules/.bin/wrangler secret put "$SECRET_NAME" --name corelink-fabricd < "$ROLLBACK_FILE" || exit 1
+./node_modules/.bin/wrangler secret put FABRIC_CRED_TICKET_SECRET --name corelink-fabricd < "$AU18_OLD_SECRET_FILE" || exit 1
+./node_modules/.bin/wrangler secret put FABRIC_TEST_MINT_KEY --name corelink-fabricd < "$AU18_TEST_MINT_KEY_FILE" || exit 1
 delete_and_confirm_absence || exit 1
-./node_modules/.bin/wrangler deploy --containers-rollout=immediate || exit 1
-curl --fail --silent "$HEALTH_URL" >/dev/null || exit 1
-# Run the owner-supplied PROOF_ROUTE fixture with the old value and record its
-# contract status before claiming that rollback recovered the service.
+./node_modules/.bin/wrangler deploy --keep-vars --strict \
+  --var "FABRIC_TEST_MINT_TENANTS:ee30f7ba-fc25-4d71-939e-ebe130b4c6a3" \
+  --containers-rollout=immediate || exit 1
+curl --fail --silent "$AU18_HEALTH_URL" >/dev/null || exit 1
+# Run the fixed mint/redeem proof routes with the old value and record their
+# contract statuses before claiming that rollback recovered the service.
+./node_modules/.bin/wrangler secret delete FABRIC_TEST_MINT_KEY --name corelink-fabricd || exit 1
+delete_and_confirm_absence || exit 1
+./node_modules/.bin/wrangler deploy --keep-vars --strict \
+  --var "FABRIC_TEST_MINT_TENANTS:" \
+  --containers-rollout=immediate || exit 1
 ```
 
 Record rollback status and provider version ids. Never delete the old value
