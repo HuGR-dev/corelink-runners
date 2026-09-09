@@ -408,7 +408,7 @@ close_response_valid(){
   (.released | type == "boolean" and . == true) and
   (.capture_incomplete | type == "boolean" and . == false) and
   (.metrics | type == "object" and
-    ((keys | sort) == ["active_ms", "cost_usd_micros", "model_turns", "tool_breakdown", "tool_calls", "tokens", "wall_ms"]) and
+    ((keys | sort) == ["active_ms", "cost_usd_micros", "model_turns", "tokens", "tool_breakdown", "tool_calls", "wall_ms"]) and
     (.tokens | type == "object" and (keys | sort) == ["cache_read", "cache_write", "input", "output", "total"] and all(.[]; type == "number" and floor == . and . >= 0)) and
     (.tool_breakdown | type == "array" and all(.[]; type == "object" and (keys | sort) == ["count", "tool"] and (.tool | type == "string") and (.count | type == "number" and floor == . and . >= 0))) and
     all([.active_ms, .cost_usd_micros, .model_turns, .tool_calls, .wall_ms][]; type == "number" and floor == . and . >= 0)) and
