@@ -37,12 +37,12 @@ from urllib.request import Request, urlopen
 
 APP_NAME = "corelink-fabricd-fabricdcontainer"
 WORKER_NAME = "corelink-spawn-worker"
-EXPECTED_DIGEST = "sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565"
+EXPECTED_DIGEST = "sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210"
 # Exact provenance pin for the digest. Hashes have no ordering; an exact
 # digest-to-build binding is the local equivalent of checking ancestry from
 # the #515 fix.
 FIX_515_SHA = "313185850eeddc66bb4833598e4acc1e97ad128d"
-EXPECTED_BUILD_SHA = "3f7afa9224340120de690170d5e5fe5ce8cd58ef"
+EXPECTED_BUILD_SHA = "eec8afbf481461586ac3a7087f4fcd8c411542c7"
 SLEEP_AFTER_SECONDS = 300
 ATTEMPTS = 10
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}$", re.IGNORECASE)
@@ -260,14 +260,19 @@ def instance_refs(snapshot: InstanceSnapshot) -> list[str]:
     return [value for value in refs if value is not None]
 
 
-def provenance(source_repo: Path | None = None, declared_sha: str | None = None) -> dict[str, Any]:
+def provenance(
+    source_repo: Path | None = None,
+    declared_sha: str | None = None,
+    expected_digest_value: str | None = None,
+) -> dict[str, Any]:
+    expected = expected_digest(expected_digest_value or EXPECTED_DIGEST)
     path = Path(__file__).with_name("provenance.json")
     try:
         with path.open(encoding="utf-8") as stream:
             value = json.load(stream)
     except (OSError, json.JSONDecodeError) as exc:
         raise CapabilityError("versioned fabricd digest/build provenance is unavailable") from exc
-    if not isinstance(value, dict) or value.get("digest") != EXPECTED_DIGEST or value.get("build_sha") != EXPECTED_BUILD_SHA or value.get("fix_515_sha") != FIX_515_SHA:
+    if not isinstance(value, dict) or value.get("digest") != expected or value.get("build_sha") != EXPECTED_BUILD_SHA or value.get("fix_515_sha") != FIX_515_SHA:
         raise CapabilityError("fabricd digest/build provenance does not prove the #515 ancestry")
     configured_repo = source_repo or (Path(os.environ["CORELINK_SOURCE_REPO"]) if os.environ.get("CORELINK_SOURCE_REPO") else None)
     if configured_repo is None:
@@ -298,7 +303,7 @@ def provenance(source_repo: Path | None = None, declared_sha: str | None = None)
     )
     if check.returncode != 0:
         raise CapabilityError("local provenance build SHA does not prove #515 ancestry")
-    return {"source": path.name, "source_repo": str(repo), "source_sha": source_sha.lower(), "digest": EXPECTED_DIGEST, "build_sha": EXPECTED_BUILD_SHA, "fix_515_sha": FIX_515_SHA, "fix_515_ancestor": True}
+    return {"source": path.name, "source_repo": str(repo), "source_sha": source_sha.lower(), "digest": expected, "build_sha": EXPECTED_BUILD_SHA, "fix_515_sha": FIX_515_SHA, "fix_515_ancestor": True}
 
 
 def safe_error(exc: BaseException) -> dict[str, str]:
@@ -595,7 +600,11 @@ class SleepWakeHarness:
             raise CapabilityError("sleep_after_seconds must be exactly 300")
         if not isinstance(self.config.app_id, str) or not self.config.app_id.strip():
             raise CapabilityError("explicit current FABRIC_APP_ID is required")
-        source = provenance(Path(self.config.source_repo) if self.config.source_repo else None, self.config.source_sha)
+        source = provenance(
+            Path(self.config.source_repo) if self.config.source_repo else None,
+            self.config.source_sha,
+            self.expected,
+        )
         app = discover_app(self.provider, self.config.app_name, self.expected)
         if app["id"] != self.config.app_id:
             raise HarnessError("fabricd application id does not match the phase binding")
@@ -919,7 +928,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sleep-after-seconds", type=float, default=SLEEP_AFTER_SECONDS)
     parser.add_argument("--poll-deadline-seconds", type=float, default=120.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
-    parser.add_argument("--digest", default=os.environ.get("EXPECTED_FABRICD_DIGEST", EXPECTED_DIGEST))
+    parser.add_argument("--digest", default=os.environ.get("EXPECTED_FABRICD_DIGEST"), help="explicit immutable Fabricd image digest (required for live/preflight)")
     parser.add_argument("--phase", choices=("candidate", "rollback"), default=os.environ.get("B2_PHASE", "candidate"))
     parser.add_argument("--matrix-id", default=os.environ.get("B2_MATRIX_ID", "b2-fabricd-sleepwake"))
     parser.add_argument("--attempt-id", default=os.environ.get("B2_ATTEMPT_ID"), help="optional correlation prefix; attempts become <prefix>-01..10")
@@ -930,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-build-sha", default=os.environ.get("EXPECTED_FABRICD_BUILD_SHA", EXPECTED_BUILD_SHA))
     parser.add_argument("--fabric-url", default=os.environ.get("FABRIC_URL"), help="exact HTTPS fabricd origin (required for preflight/execute)")
     args = parser.parse_args(argv)
-    config = RunConfig(attempts=args.attempts, sleep_after_s=args.sleep_after_seconds, poll_deadline_s=args.poll_deadline_seconds, poll_interval_s=args.poll_interval_seconds, digest=args.digest, fabric_url=args.fabric_url, phase=args.phase, matrix_id=args.matrix_id, attempt_id_prefix=args.attempt_id, app_id=args.app_id, source_repo=args.source_repo, source_sha=args.source_sha, worker_id=args.worker_id, expected_build_sha=args.expected_build_sha)
+    config = RunConfig(attempts=args.attempts, sleep_after_s=args.sleep_after_seconds, poll_deadline_s=args.poll_deadline_seconds, poll_interval_s=args.poll_interval_seconds, digest=args.digest or EXPECTED_DIGEST, fabric_url=args.fabric_url, phase=args.phase, matrix_id=args.matrix_id, attempt_id_prefix=args.attempt_id, app_id=args.app_id, source_repo=args.source_repo, source_sha=args.source_sha, worker_id=args.worker_id, expected_build_sha=args.expected_build_sha)
     try:
         if config.attempts != ATTEMPTS and not (args.single_attempt and config.attempts == 1):
             raise HarnessError("the canonical harness requires exactly 10 attempts")
@@ -938,6 +947,8 @@ def main(argv: list[str] | None = None) -> int:
             raise HarnessError("--execute requires --ack-execute")
         if args.ack_execute and not args.execute and not args.preflight:
             raise HarnessError("an execute acknowledgement requires --execute or --preflight")
+        if (args.execute or args.preflight) and not args.digest:
+            raise HarnessError("live/preflight mode requires an explicit --digest (or EXPECTED_FABRICD_DIGEST)")
         if (args.execute or args.preflight) and not config.source_sha:
             raise CapabilityError("live/preflight mode requires an explicit --source-sha")
         if not args.execute and not args.preflight:
