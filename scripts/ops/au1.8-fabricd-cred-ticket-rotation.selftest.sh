@@ -18,6 +18,56 @@ git -C "$repo" add tracked
 git -C "$repo" commit -q -m baseline
 head="$(git -C "$repo" rev-parse HEAD)"
 
+dispatch_case() {
+  local label="$1" version="${2-}" case_repo case_repo_real case_log case_err sha rc
+  case_repo="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch.XXXXXX")"
+  case_repo_real="$(cd "$case_repo" && pwd -P)"
+  mkdir -p "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin"
+  cp "$here/../../deploy/cloudflare-fabricd/wrangler.jsonc" "$case_repo/deploy/cloudflare-fabricd/wrangler.jsonc"
+  case "$label" in
+    missing) : ;;
+    wrong|correct)
+      # shellcheck disable=SC2016
+      printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "%s|%s\\n" "$PWD" "$*" >> "${DISPATCH_LOG:?}"' \
+        "if [ \"\${1:-}\" = --version ]; then printf '%s\\n' '$version'; exit 0; fi" \
+        'if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then printf '\''{"token":"dispatch-test-token-1234567890"}\n'\''; exit 0; fi' \
+        'exit 1' > "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      chmod 700 "$case_repo/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      ;;
+    *) echo "unknown dispatch test case: $label" >&2; exit 1 ;;
+  esac
+  git -C "$case_repo" init -q
+  git -C "$case_repo" config user.email au1.8-dispatch@example.invalid
+  git -C "$case_repo" config user.name au1.8-dispatch
+  git -C "$case_repo" add -f .
+  git -C "$case_repo" commit -qm baseline
+  sha="$(git -C "$case_repo" rev-parse HEAD)"
+  case_log="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-log.XXXXXX")"
+  case_err="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-err.XXXXXX")"
+  set +e
+  DISPATCH_LOG="$case_log" AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
+    "$harness" --execute --ack-destructive >/dev/null 2>"$case_err"
+  rc=$?
+  set -e
+  case "$label" in
+    missing) [[ "$rc" != 0 ]] && rg -q 'missing local Wrangler binary' "$case_err" ;;
+    wrong) [[ "$rc" != 0 ]] && rg -q 'local Wrangler version mismatch' "$case_err" ;;
+    correct) [[ "$rc" != 0 ]] && grep -F -q "$case_repo_real/deploy/cloudflare-fabricd|--config $case_repo_real/deploy/cloudflare-fabricd/wrangler.jsonc containers list --json" "$case_log" ;;
+  esac
+  local result=$?
+  rm -rf -- "$case_repo" "$case_log" "$case_err"
+  return "$result"
+}
+
+if dispatch_case missing; then :; else echo 'FAIL: missing local Wrangler must refuse before provider work' >&2; exit 1; fi
+if dispatch_case wrong 4.104.0; then :; else echo 'FAIL: wrong local Wrangler version must refuse' >&2; exit 1; fi
+if dispatch_case correct 4.105.0; then :; else echo 'FAIL: local Wrangler dispatch must preserve cwd and config' >&2; exit 1; fi
+if rg -n '\bnpx\b' "$harness" >/dev/null; then
+  echo 'FAIL: AU1.8 must not resolve Wrangler through npx' >&2
+  exit 1
+fi
+
 validate() {
   local status_json="${2-}"
   [[ -n "$status_json" ]] || status_json='{"num_shards":1,"ledger_cross_instance_safe":true}'
@@ -74,6 +124,7 @@ unset_local_regression() {
     scrub_file() { :; }
     log_event() { :; }
     WRANGLER=("$mock")
+    run_wrangle() { "${WRANGLER[@]}" "$@"; }
     WORKER_NAME=corelink-fabricd
     CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
     result="$(capture_remote_bindings sample version-a)"
