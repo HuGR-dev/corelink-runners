@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 readonly ACK1='ACK-DIRECT-CORELINK-ROTATION-LIVE-20260908' ACK2='ACK-FORWARD-ONLY-RECOVERY-PAIR-LIVE-20260908'
 PACKAGE_ROOT="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"; readonly PACKAGE_ROOT
-MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 FABRICD_CONVERGENCE_TIMEOUT_SECS=300 FABRICD_CONVERGENCE_INTERVAL_SECS=5 FABRICD_COMMAND_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
+MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 REFREEZE_TIMEOUT_SECS=30 FABRICD_CONVERGENCE_TIMEOUT_SECS=300 FABRICD_CONVERGENCE_INTERVAL_SECS=5 FABRICD_COMMAND_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
 readonly SPAWN_WRANGLER_VERSION='4.103.0' FABRICD_WRANGLER_VERSION='4.105.0'
 OOB_DIR="$HOME/.corelink/rotation-b2-20260908"; EVIDENCE_DIR="$OOB_DIR/evidence-direct"; FLEET_KEY_FILE="$OOB_DIR/fleet-busy-read-key"; CANARY_PAT_FILE="$OOB_DIR/corelink-canary-tenant-pat"
 SPAWN_URL='https://corelink-spawn-worker.gmhelmold.workers.dev'; FABRICD_URL='https://corelink-fabricd.gmhelmold.workers.dev'
@@ -67,7 +67,16 @@ assert_control_secret_bindings(){ local label="$1" config="$2" list;list="$(secr
   local missing;missing="$(printf '%s' "$list"|jq -r '["CLOUDFLARE_SPAWN_AUTH_TOKEN","CLOUDFLARE_EXEC_AUTH_TOKEN","CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"] as $required | ($required - ([ .[] | select((.name|type)=="string" and (.type=="secret_text" or .type=="secret")) | .name ])) | join(",")')";if [ -n "$missing" ];then die "required control bindings missing: $missing";fi;record "${label}_control_bindings=spawn,exec,lifecycle_names_types_only";}
 preflight_control_bindings(){ local config="$1" list missing label;case "$config" in "$SPAWN_CONFIG") label=spawn;;"$FABRICD_CONFIG") label=fabricd;;*) die 'unsupported preflight binding config';;esac;list="$(secret_list "$config")"||die "secret list preflight failed: $label";missing="$(printf '%s' "$list"|jq -r '["CLOUDFLARE_SPAWN_AUTH_TOKEN","CLOUDFLARE_EXEC_AUTH_TOKEN","CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"] as $required | (if type=="array" then ($required - ([ .[] | select((.name|type)=="string" and (.type=="secret_text" or .type=="secret")) | .name ])) else $required end) | join(",")')";if [ -n "$missing" ];then record "preflight_${label}_control_bindings=missing:$missing";[ "$BOOTSTRAP_SPLIT_AUTH" = 1 ]||die "missing control bindings for $label: $missing (rerun with --bootstrap-split-auth)";record "bootstrap_split_auth=explicit";else record "preflight_${label}_control_bindings=present";fi;}
 SPAWN_CONFIG='' FABRICD_CONFIG='' LOCK='' LOCKED=0 REFREEZE_REQUIRED=0 FINAL_FROZEN=0
-refreeze(){ run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate >/dev/null;run_wrangle "$SPAWN_CONFIG" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 >/dev/null;record 'freeze=fabricd_then_spawn';}
+refreeze(){
+  local started now remaining
+  started="$(date +%s)"
+  run_wrangle_with_timeout "$FABRICD_CONFIG" "$REFREEZE_TIMEOUT_SECS" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate >/dev/null||return
+  now="$(date +%s)"
+  remaining=$((REFREEZE_TIMEOUT_SECS - (now - started)))
+  [ "$remaining" -gt 0 ]||return 124
+  run_wrangle_with_timeout "$SPAWN_CONFIG" "$remaining" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 >/dev/null||return
+  record 'freeze=fabricd_then_spawn'
+}
 cleanup(){ local rc=$?;if [ "$LOCKED" = 1 ]&&[ "$REFREEZE_REQUIRED" = 1 ]&&[ "$FINAL_FROZEN" != 1 ];then refreeze >/dev/null 2>&1||true;record 'exit_refreeze=attempted';fi;[ -z "$LOCK" ]||rmdir "$LOCK" 2>/dev/null||true;exit "$rc";};trap cleanup EXIT
 [ -n "$ROOT" ]&&[ -n "$COMMIT" ]&&[ -n "$SPAWN_VERSION" ]&&[ -n "$FABRICD_VERSION" ]&&[ -n "$SPAWN_APP" ]&&[ -n "$FABRICD_APP" ]&&[ -n "$CANARY_IMAGE" ]&&[ -n "$OLD_TOKEN_FILE" ]||die 'missing pins';[[ "$COMMIT" =~ ^[a-f0-9]{40}$ && "$CANARY_IMAGE" =~ @sha256:[a-f0-9]{64}$ && "$SPAWN_APP" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ && "$FABRICD_APP" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]||die 'malformed pin';safe_dir "$OOB_DIR";safe_file "$FLEET_KEY_FILE";safe_file "$CANARY_PAT_FILE";safe_file "$OLD_TOKEN_FILE"
 SPAWN_CONFIG="$ROOT/deploy/cloudflare/wrangler.jsonc";FABRICD_CONFIG="$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc"
@@ -114,6 +123,19 @@ assert_fabricd_identity_digest(){ local info="$1";printf '%s' "$info"|jq -e --ar
 assert_fabricd_frozen(){ local v="$1" vars;vars="$(run_wrangle "$FABRICD_CONFIG" versions view "$v" --name corelink-fabricd --json)"||die 'fabricd freeze read failed';printf '%s' "$vars"|jq -e '[..|objects|select(.name?=="FABRIC_ADMISSION_PAUSED")|(.text? // .value? // "")]|length==1 and .[0]=="1"' >/dev/null||die 'fabricd admission freeze mismatch';}
 fabricd_app_is_absent(){ local info list info_rc list_rc;set +e;info="$(fabricd_info 2>/dev/null)";info_rc=$?;list="$(run_wrangle "$FABRICD_CONFIG" containers list --json 2>/dev/null)";list_rc=$?;set -e;[ "$info_rc" != 0 ]&&[ "$list_rc" = 0 ]||return 1;printf '%s' "$list"|jq -e --arg id "$FABRICD_APP" '[..|objects|select(.id?==$id)]|length==0' >/dev/null;}
 kill_tree(){ local parent child;parent="$1";if command -v pgrep >/dev/null 2>&1;then for child in $(pgrep -P "$parent" 2>/dev/null);do kill_tree "$child";done;fi;kill -KILL "$parent" 2>/dev/null||true;}
+kill_subprocess_tree(){
+  local parent="$1" pgid=''
+  # Job control gives the timeout child its own process group on macOS, where
+  # setsid is not part of the base system.  Killing that group closes the
+  # race in which a grandchild is reparented while the direct child dies.
+  pgid="$(ps -o pgid= -p "$parent" 2>/dev/null|tr -d '[:space:]')"||true
+  if [ -n "$pgid" ]&&[ "$pgid" = "$parent" ]&&[ "$pgid" != "$$" ]&&[ "$pgid" != 0 ];then
+    /bin/kill -KILL -- "-$pgid" 2>/dev/null||true
+  fi
+  # Keep the recursive fallback for shells/platforms that do not preserve the
+  # process group created by job control.
+  kill_tree "$parent"
+}
 run_wrangle_with_timeout(){
   local config="$1" timeout_secs="$2" work output error status status_tmp pid started now rc child_rc
   shift 2
@@ -121,6 +143,7 @@ run_wrangle_with_timeout(){
   chmod 700 "$work"
   output="$work/stdout";error="$work/stderr";status="$work/status";status_tmp="$work/status.tmp"
   : >"$output";: >"$error";chmod 600 "$output" "$error"
+  set -m
   (
     set +e
     run_wrangle "$config" "$@" >"$output" 2>"$error"
@@ -128,6 +151,7 @@ run_wrangle_with_timeout(){
     printf '%s\n' "$child_rc" >"$status_tmp" && mv -f "$status_tmp" "$status"
     exit "$child_rc"
   ) & pid=$!
+  set +m
   started="$(date +%s)"
   while :; do
     if [ -s "$status" ]; then
@@ -144,7 +168,7 @@ run_wrangle_with_timeout(){
     fi
     now="$(date +%s)"
     if [ "$((now-started))" -ge "$timeout_secs" ]; then
-      kill_tree "$pid"
+      kill_subprocess_tree "$pid"
       wait "$pid" 2>/dev/null||true
       rm -f "$output" "$error" "$status" "$status_tmp"
       rmdir "$work" 2>/dev/null||true
@@ -153,7 +177,7 @@ run_wrangle_with_timeout(){
     sleep 1
   done
 }
-run_delete_with_timeout(){ local pid started now;run_wrangle "$FABRICD_CONFIG" containers delete "$FABRICD_APP" >/dev/null 2>&1 & pid=$!;started="$(date +%s)";while kill -0 "$pid" 2>/dev/null;do now="$(date +%s)";if [ "$((now-started))" -ge "$DELETE_TIMEOUT_SECS" ];then kill_tree "$pid";wait "$pid" 2>/dev/null||true;return 124;fi;sleep 1;done;wait "$pid";}
+run_delete_with_timeout(){ run_wrangle_with_timeout "$FABRICD_CONFIG" "$DELETE_TIMEOUT_SECS" containers delete "$FABRICD_APP" >/dev/null 2>&1; }
 delete_fabricd_and_confirm_absence(){ local info attempt delete_rc;info="$(fabricd_info 2>/dev/null)"||die 'fabricd identity unavailable before delete';assert_fabricd_identity_digest "$info";for attempt in 1 2;do set +e;run_delete_with_timeout;delete_rc=$?;set -e;if fabricd_app_is_absent;then record "fabricd_container_absence_confirmed attempt:$attempt delete_rc:$delete_rc";return 0;fi;[ "$attempt" = 2 ]||sleep 1;done;die 'fabricd container absence not confirmed';}
 resolve_fabricd_app_id(){ local list;list="$(run_wrangle "$FABRICD_CONFIG" containers list --json)"||die 'fabricd application list failed';printf '%s' "$list"|jq -er '[..|objects|select(.name?=="corelink-fabricd-fabricdcontainer" and (.id?|type)=="string")|.id]|unique|if length==1 then .[0] else error("exact fabricd application is absent or ambiguous") end';}
 fabricd_health_ok(){
