@@ -113,12 +113,22 @@ cleanup() {
 trap cleanup EXIT
 
 snapshot() {
-  local label="$1" deploys info version image
+  local label="$1" deploys info container version image
   deploys="$(capture "$label-deployments" run_wrangler deployments list --name "$WORKER_NAME" --json)" || return 1
-  info="$(capture "$label-container" run_wrangler containers info "$APP_ID" --json)" || return 1
-  jq -e --arg n "$APP_NAME" '.name == $n' "$info" >/dev/null || { log_event "$label app_name=RED"; return 1; }
+  # Wrangler 4.105.0 rejects `containers info APP --json`. The supported
+  # machine-readable surface is the complete list; select the exact pinned
+  # application id and fail closed if the provider returns zero or multiple
+  # matches. Keep this lookup independent of human-formatted CLI output.
+  info="$(capture "$label-containers" run_wrangler containers list --json)" || return 1
+  container="$(jq -ce --arg id "$APP_ID" --arg n "$APP_NAME" '
+    [.. | objects | select(.id? == $id)]
+    | if length != 1 then error("exact fabricd application id is absent or ambiguous")
+      elif .[0].name? != $n then error("fabricd application identity mismatch")
+      else .[0]
+      end
+  ' "$info")" || { log_event "$label app_identity=RED"; return 1; }
   version="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
-  image="$(jq -er '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if length == 1 then .[0] else error("ambiguous image digest") end' "$info")" || return 1
+  image="$(printf '%s\n' "$container" | jq -er '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if length == 1 then .[0] else error("ambiguous image digest") end')" || return 1
   printf '%s\t%s\n' "$version" "$image"
 }
 assert_frozen() {

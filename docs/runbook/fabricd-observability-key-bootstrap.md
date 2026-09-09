@@ -23,6 +23,13 @@ other than `--stability-seconds 120` is rejected. Other values, including zero,
 are accepted only by the explicit network-free `--mode mock` test path. A
 version or digest drift during the wait is RED and prevents the secret write.
 
+The provider snapshot uses the pinned Wrangler 4.105.0 `containers list
+--json` command, then selects exactly one object whose `id` equals the pinned
+application id and whose `name` equals `corelink-fabricd-fabricdcontainer`.
+Missing, duplicate, or schema-mismatched entries fail closed. The snapshot
+does not use `containers info APP --json`, because that flag is rejected by
+this pinned Wrangler release.
+
 After the gates pass it writes only `FABRIC_OBSERVABILITY_KEY` through
 `wrangler secret put`, deletes the exact named fabricd container, and recreates
 it with `--keep-vars --strict --containers-rollout=immediate`. It then verifies
@@ -40,8 +47,9 @@ scripts/ops/tests/fabricd-observability-key-bootstrap.selftest.sh
 shellcheck scripts/ops/fabricd-observability-key-bootstrap.sh scripts/ops/tests/*.sh
 ```
 
-The self-test is network-free and covers success, deployment drift, bad key
-metadata, wrong digest, status verification failure, failed refreeze, and a
-held local lock. A live command must provide `--execute --ack
+The self-test is network-free and covers the unsupported legacy Wrangler flag,
+the supported list schema, missing and duplicate application ids, success,
+deployment drift, bad key metadata, wrong digest, status verification failure,
+failed refreeze, and a held local lock. A live command must provide `--execute --ack
 ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908` plus the required
 pins and OOB file paths documented by the script's `--help`/argument names.
