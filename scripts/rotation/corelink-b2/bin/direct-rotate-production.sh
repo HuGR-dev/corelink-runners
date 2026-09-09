@@ -42,12 +42,21 @@ curl_secret(){ local f="$1";shift;safe_file "$f"||die 'secret must be nofollow o
 curl_secret_status(){ local f="$1";shift;safe_file "$f"||die 'secret must be nofollow owner-owned 0600';local s;s="$(<"$f")";[ -n "$s" ]||die 'empty secret';"$CURL_BIN" --silent --show-error --output /dev/null --write-out '%{http_code}' --config <(printf '%s\n' "header = \"authorization: Bearer $s\"") "$@";}
 curl_fleet(){ safe_file "$FLEET_KEY_FILE"||die 'fleet key must be nofollow owner-owned 0600';local s;s="$(<"$FLEET_KEY_FILE")";[ -n "$s" ]||die 'empty fleet key';"$CURL_BIN" --fail --silent --show-error --config <(printf '%s\n' "header = \"x-corelink-internal-auth: $s\"") "$SPAWN_URL/internal/v1/fleet/busy";}
 assert_empty_fleet(){ local stage="$1" fleet;fleet="$(curl_fleet)"||die "fleet $stage read failed";printf '%s' "$fleet"|jq -e '(.busy|tonumber)==0 and (.unverifiable|tonumber)==0' >/dev/null||die "fleet $stage busy/unverifiable nonzero";record "fleet_${stage}=busy:0 unverifiable:0";}
-secret_list(){ local config="$1" name;case "$config" in
+secret_list(){ local config="$1" name out err rc;case "$config" in
   "$SPAWN_CONFIG") name=corelink-spawn-worker;;
   "$FABRICD_CONFIG") name=corelink-fabricd;;
   *) die 'unsupported secret-list config';;
 esac
-run_wrangle "$config" secret list --name "$name" --json
+out="$(mktemp "${TMPDIR:-/tmp}/corelink-secret-list.XXXXXXXX")"||return 1
+err="$(mktemp "${TMPDIR:-/tmp}/corelink-secret-list-err.XXXXXXXX")"||{ rm -f "$out";return 1; }
+if run_wrangle "$config" secret list --name "$name" --format json >"$out" 2>"$err";then
+  if ! jq -e 'type=="array" and all(.[]; (.name|type)=="string" and (.type|type)=="string")' "$out" >/dev/null 2>/dev/null;then rm -f "$out" "$err";return 1;fi
+  cat "$out";rc=$?
+else
+  rc=$?
+fi
+rm -f "$out" "$err"
+return "$rc"
 }
 assert_control_secret_bindings(){ local label="$1" config="$2" list;list="$(secret_list "$config")"||die "secret list failed: $label";printf '%s' "$list"|jq -e 'type=="array" and all(.[]; (.name|type)=="string" and (.type|type)=="string")' >/dev/null||die "secret list shape invalid: $label";
   local missing;missing="$(printf '%s' "$list"|jq -r '["CLOUDFLARE_SPAWN_AUTH_TOKEN","CLOUDFLARE_EXEC_AUTH_TOKEN","CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"] as $required | ($required - ([ .[] | select((.name|type)=="string" and (.type=="secret_text" or .type=="secret")) | .name ])) | join(",")')";if [ -n "$missing" ];then die "required control bindings missing: $missing";fi;record "${label}_control_bindings=spawn,exec,lifecycle_names_types_only";}

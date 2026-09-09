@@ -23,12 +23,21 @@ if [ "$1" = secret ] && [ "$2" = put ]; then
   fi
 fi
 if [ "$1" = secret ] && [ "$2" = list ]; then
+  if [ "${3:-}" != --name ] || [ -z "${4:-}" ] || [ "${5:-}" != --format ] || [ "${6:-}" != json ] || [ "$#" -ne 6 ]; then
+    printf '%s\n' 'unknown or unsupported secret list format; use --format json' >&2
+    exit 2
+  fi
   if [ "${DIRECT_MOCK_SECRET_LIST:-present}" = missing ]; then
     printf '%s\n' '[]'
   elif [ "${DIRECT_MOCK_SECRET_LIST:-present}" = partial ]; then
     printf '%s\n' '[{"name":"CLOUDFLARE_SPAWN_AUTH_TOKEN","type":"secret_text"}]'
+  elif [ "${DIRECT_MOCK_SECRET_LIST:-present}" = malformed ]; then
+    printf '%s\n' '{not-json}'
   else
     printf '%s\n' '[{"name":"CLOUDFLARE_SPAWN_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_EXEC_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_LIFECYCLE_AUTH_TOKEN","type":"secret_text"}]'
+  fi
+  if [ "${DIRECT_MOCK_SECRET_LIST:-present}" = stderr ]; then
+    printf '%s\n' 'synthetic warning stays on stderr' >&2
   fi
   exit 0
 fi
