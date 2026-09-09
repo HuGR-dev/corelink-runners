@@ -8,7 +8,7 @@ MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' 
 readonly SPAWN_WRANGLER_VERSION='4.103.0' FABRICD_WRANGLER_VERSION='4.105.0'
 OOB_DIR="$HOME/.corelink/rotation-b2-20260908"; EVIDENCE_DIR=''; EVIDENCE_DIR_EXPLICIT=0; FLEET_KEY_FILE="$OOB_DIR/fleet-busy-read-key"; CANARY_PAT_FILE="$OOB_DIR/corelink-canary-tenant-pat"
 SPAWN_URL='https://corelink-spawn-worker.gmhelmold.workers.dev'; FABRICD_URL='https://corelink-fabricd.gmhelmold.workers.dev'
-die(){ printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
+die(){ local reason="$*" safe_reason;safe_reason="$(printf '%s' "$reason"|tr '\r\n' ' '|LC_ALL=C tr -c 'A-Za-z0-9._:/= -' '_')";if [ -n "${EVIDENCE_DIR:-}" ]&&[ -f "${EVIDENCE_DIR}/events.log" ]&&[ ! -L "${EVIDENCE_DIR}/events.log" ];then printf 'refusal=%s\n' "$safe_reason">>"$EVIDENCE_DIR/events.log"||true;fi;printf 'REFUSED: %s\n' "$reason" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do case "$1" in
 --mode) MODE="${2:?}";shift 2;;--attempt) ATTEMPT="${2:?}";shift 2;;--live-ack) LIVE_ACK="${2:?}";shift 2;;--recovery-ack) RECOVERY_ACK="${2:?}";shift 2;;--integration-root) ROOT="${2:?}";shift 2;;--expected-commit) COMMIT="${2:?}";shift 2;;--spawn-version) SPAWN_VERSION="${2:?}";shift 2;;--fabricd-version) FABRICD_VERSION="${2:?}";shift 2;;--spawn-app-id) SPAWN_APP="${2:?}";shift 2;;--fabricd-app-id) FABRICD_APP="${2:?}";shift 2;;--canary-image) CANARY_IMAGE="${2:?}";shift 2;;--oob-dir) OOB_DIR="${2:?}";shift 2;;--evidence-dir) EVIDENCE_DIR="${2:?}";EVIDENCE_DIR_EXPLICIT=1;shift 2;;--fleet-key-file) FLEET_KEY_FILE="${2:?}";shift 2;;--canary-pat-file) CANARY_PAT_FILE="${2:?}";shift 2;;--old-token-file) OLD_TOKEN_FILE="${2:?}";shift 2;;--mock-wrangler) MOCK_WRANGLER="${2:?}";shift 2;;--curl-bin) CURL_BIN="${2:?}";shift 2;;--verify-bin) VERIFY_BIN="${2:?}";shift 2;;--stability-secs) STABILITY_SECS="${2:?}";shift 2;;--delete-timeout-seconds) DELETE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-timeout-seconds) FABRICD_CONVERGENCE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-interval-seconds) FABRICD_CONVERGENCE_INTERVAL_SECS="${2:?}";shift 2;;--fabricd-command-timeout-seconds) FABRICD_COMMAND_TIMEOUT_SECS="${2:?}";shift 2;;--bootstrap-split-auth) BOOTSTRAP_SPLIT_AUTH=1;shift;;*) die "unknown argument $1";;esac;done
 [ "$EVIDENCE_DIR_EXPLICIT" = 1 ] || EVIDENCE_DIR="$OOB_DIR/evidence-direct"
@@ -26,7 +26,17 @@ if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no comman
 [ -n "$VERIFY_BIN" ] || VERIFY_BIN="$PACKAGE_ROOT/bin/verify-close-attestation.mjs"
 [ -x "$VERIFY_BIN" ] || die 'verifier must be executable'
 OWNER_UID="$(id -u)"; readonly OWNER_UID
-safe_file(){ [ -f "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 600 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };safe_dir(){ [ -d "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 700 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };sha(){ openssl dgst -sha256 -r "$1"|awk '{print $1}';};record(){ printf '%s\n' "$*">>"$EVIDENCE_DIR/events.log";}
+safe_file(){ [ -f "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 600 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };safe_dir(){ [ -d "$1" ]&&[ ! -L "$1" ]&&[ "$(stat -f '%OLp' "$1")" = 700 ]&&[ "$(stat -f '%u' "$1")" = "$OWNER_UID" ]; };sha(){ openssl dgst -sha256 -r "$1"|awk '{print $1}';};record(){ [ -n "${EVIDENCE_DIR:-}" ]&&[ -f "$EVIDENCE_DIR/events.log" ]&&[ ! -L "$EVIDENCE_DIR/events.log" ]&&printf '%s\n' "$*">>"$EVIDENCE_DIR/events.log";}
+json_fact(){ local json="$1" filter="$2" value; if value="$(printf '%s' "$json"|jq -r "$filter" 2>/dev/null)";then printf '%s' "$value";else printf '%s' '<malformed>';fi; }
+event_value(){ printf '%s' "$1"|tr '\r\n' ' '|LC_ALL=C tr -c 'A-Za-z0-9._:-' '_'; }
+record_response_facts(){
+  local label="$1" status="$2" body="$3" lease_fact state_fact released_fact capture_fact
+  lease_fact="$(json_fact "$body" 'if (.lease_id? | type) == "string" then .lease_id else "<missing>" end')"
+  state_fact="$(json_fact "$body" 'if (.state? | type) == "string" then .state else "<missing>" end')"
+  released_fact="$(json_fact "$body" 'if has("released") then (.released|tostring) else "<missing>" end')"
+  capture_fact="$(json_fact "$body" 'if has("capture_incomplete") then (.capture_incomplete|tostring) else "<missing>" end')"
+  record "$label=lease_id:$(event_value "$lease_fact") status:$(event_value "$status") state:$(event_value "$state_fact") released:$(event_value "$released_fact") capture_incomplete:$(event_value "$capture_fact")"
+}
 secret_file_valid(){ local f="$1";safe_file "$f"||return 1;[ -s "$f" ]||return 1;[ "$(tr -cd '\r' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1;[ "$(tr -cd '\n' <"$f"|wc -c|tr -d ' ')" = 0 ]||return 1;LC_ALL=C grep -Eq '^[A-Za-z0-9+/=]+$' "$f"; }
 canary_pat_file_valid(){
   local f="$1"
@@ -360,4 +370,86 @@ probe_control_domains(){
 probe_control_domains
 status="$(curl_secret_status "$OLD_TOKEN_FILE" --config <(printf '%s\n' 'header = "content-type: application/json"' 'request = POST' 'data = "{}"') "$SPAWN_URL/v1/spawn")"||die 'old token probe transport/TLS failure';[ "$status" = 401 ]||die 'old token status proof'
 record 'release_transition=marked_before_first_unfreeze';run_wrangle "$SPAWN_CONFIG" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:0>/dev/null;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:0 --containers-rollout=immediate>/dev/null
-payload="$(jq -nc --arg image "$CANARY_IMAGE" '{image_digest:$image,net_policy:"isolated",tmp_root:"/work/tmp",expiry_ms:60000}')";acquire="$(curl_secret "$CANARY_PAT_FILE" --config <(printf '%s\n' 'header = "content-type: application/json"' 'request = POST') --data "$payload" "$FABRICD_URL/v1/leases")"||die 'canary acquire';lease="$(printf '%s' "$acquire"|jq -er '.lease.lease_id')"||die 'missing .lease.lease_id';close="$(curl_secret "$CANARY_PAT_FILE" --config <(printf '%s\n' 'header = "content-type: application/json"' 'request = POST') --data '{"status":"succeeded"}' "$FABRICD_URL/v1/leases/$lease/close")"||die 'canary close';printf '%s' "$close"|jq -e --arg l "$lease" '.lease_id==$l and .released==true and .capture_incomplete==false'>/dev/null||die 'close teardown proof';printf '%s' "$close"|"$VERIFY_BIN" "$keys"||die 'fresh Corelink v1/v2 verifier';assert_empty_fleet post_canary;refreeze;FINAL_FROZEN=1;record 'outcome=complete_final_frozen'
+payload="$(jq -nc --arg image "$CANARY_IMAGE" '{image_digest:$image,net_policy:"isolated",tmp_root:"/work/tmp",expiry_ms:60000}')"
+if acquire_response="$(curl_secret_response "$CANARY_PAT_FILE" --config <(printf '%s\n' 'header = "content-type: application/json"' 'request = POST') --data "$payload" "$FABRICD_URL/v1/leases")";then
+  acquire_status="${acquire_response##*$'\n'}";acquire_body="${acquire_response%$'\n'*}"
+else
+  acquire_status=transport_error;acquire_body=''
+fi
+record_response_facts canary_acquire "$acquire_status" "$acquire_body"
+[ "$acquire_status" = 200 ]||die "canary acquire status $acquire_status (expected 200)"
+lease="$(printf '%s' "$acquire_body"|jq -er '.lease.lease_id | strings | select(length > 0)')"||die 'missing .lease.lease_id'
+
+probe_lease_state(){
+  local response body status
+  LEASE_STATE=unknown;LEASE_STATE_STATUS=transport_error
+  if response="$(curl_secret_response "$CANARY_PAT_FILE" "$FABRICD_URL/v1/leases/$lease")";then
+    status="${response##*$'\n'}";body="${response%$'\n'*}"
+  else
+    status=transport_error;body=''
+  fi
+  LEASE_STATE_STATUS="$status"
+  record_response_facts canary_lease_state "$status" "$body"
+  [ "$status" = 200 ]||return 1
+  LEASE_STATE="$(printf '%s' "$body"|jq -er '.state | strings | ascii_downcase')"||{ LEASE_STATE=malformed;return 1; }
+  case "$LEASE_STATE" in held|released|expired|crashed) return 0;; *) return 1;; esac
+}
+
+close_response_valid(){
+  local body="$1"
+  printf '%s' "$body"|jq -e --arg l "$lease" '
+  type == "object" and
+  ((keys - ["attestation", "capture_incomplete", "check_result", "fabric_key_id", "intent_metrics_sig", "lease_id", "metrics", "released", "result_binding_sig", "result_binding_sig_v2"]) | length == 0) and
+  (.lease_id == $l) and
+  (.released | type == "boolean" and . == true) and
+  (.capture_incomplete | type == "boolean" and . == false) and
+  (.metrics | type == "object" and
+    ((keys | sort) == ["active_ms", "cost_usd_micros", "model_turns", "tool_breakdown", "tool_calls", "tokens", "wall_ms"]) and
+    (.tokens | type == "object" and (keys | sort) == ["cache_read", "cache_write", "input", "output", "total"] and all(.[]; type == "number" and floor == . and . >= 0)) and
+    (.tool_breakdown | type == "array" and all(.[]; type == "object" and (keys | sort) == ["count", "tool"] and (.tool | type == "string") and (.count | type == "number" and floor == . and . >= 0))) and
+    all([.active_ms, .cost_usd_micros, .model_turns, .tool_calls, .wall_ms][]; type == "number" and floor == . and . >= 0)) and
+  ((.check_result == null) or
+    (.check_result | type == "object" and
+      (keys | sort) == ["artifacts", "def_digest", "duration_ms", "exit", "memo_key", "produced_at", "runner_ref", "stderr_ref", "stdout_ref", "toolchain_digest", "tree_hash"] and
+      all([.memo_key, .tree_hash, .def_digest, .toolchain_digest, .runner_ref, .stdout_ref, .stderr_ref][]; type == "string") and
+      (.exit | type == "number" and floor == .) and
+      all([.duration_ms, .produced_at][]; type == "number" and floor == . and . >= 0) and
+      (.artifacts | type == "array" and all(.[]; type == "object" and (keys | sort) == ["digest", "path"] and (.digest | type == "string") and (.path | type == "string")))
+    )) and
+  (.attestation | type == "object" and (keys | sort) == ["def", "model", "principal", "runner", "sig", "tree"] and all([.tree, .def, .runner, .model, .sig][]; type == "string") and (.principal | type == "array" and all(.[]; type == "string"))) and
+  (.result_binding_sig | type == "string" and length > 0) and
+  (.result_binding_sig_v2 | type == "string" and length > 0) and
+  (.fabric_key_id | type == "string" and length > 0) and
+  ((.intent_metrics_sig? == null) or (.intent_metrics_sig | type == "string" and length > 0))
+' >/dev/null
+}
+
+close_attempt=0;close_body='';close_status=''
+while [ "$close_attempt" -lt 3 ]; do
+  close_attempt=$((close_attempt + 1))
+  if close_response="$(curl_secret_response "$CANARY_PAT_FILE" --config <(printf '%s\n' 'header = "content-type: application/json"' 'request = POST') --data '{"status":"succeeded"}' "$FABRICD_URL/v1/leases/$lease/close")";then
+    close_status="${close_response##*$'\n'}";close_body="${close_response%$'\n'*}"
+  else
+    close_status=transport_error;close_body=''
+  fi
+  record_response_facts "canary_close_attempt_${close_attempt}" "$close_status" "$close_body"
+  if [ "$close_status" = 200 ];then
+    close_response_valid "$close_body"||die "canary close response invalid attempt:$close_attempt"
+    break
+  fi
+  probe_lease_state||die "canary close reconciliation failed status:$LEASE_STATE_STATUS state:$LEASE_STATE"
+  case "$LEASE_STATE" in
+    held)
+      [ "$close_attempt" -lt 3 ]||die 'canary close retry limit exhausted while lease held'
+      record "canary_close_retry=attempt:$((close_attempt + 1)) after:$close_attempt state:held"
+      ;;
+    released|expired|crashed) die "canary close refused after terminal lease state:$LEASE_STATE";;
+    *) die 'canary close refused after unknown lease state';;
+  esac
+done
+[ "$close_status" = 200 ]||die 'canary close did not return 200'
+probe_lease_state||die "canary final lease state proof failed status:$LEASE_STATE_STATUS state:$LEASE_STATE"
+[ "$LEASE_STATE" = released ]||die "canary final lease state is $LEASE_STATE (expected released)"
+printf '%s' "$close_body"|"$VERIFY_BIN" "$keys"||die 'fresh Corelink v1/v2 verifier'
+assert_empty_fleet post_canary
+refreeze;FINAL_FROZEN=1;record 'outcome=complete_final_frozen'
