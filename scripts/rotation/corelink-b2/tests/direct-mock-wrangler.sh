@@ -22,6 +22,14 @@ if [ "$1" = secret ] && [ "$2" = put ]; then
     printf '%s\n' 'mutated-after-first-put' > "${DIRECT_MOCK_MUTATE_FILE:?}"
   fi
 fi
+if [ "$1" = secret ] && [ "$2" = list ]; then
+  if [ "${DIRECT_MOCK_SECRET_LIST:-present}" = missing ]; then
+    printf '%s\n' '[]'
+  else
+    printf '%s\n' '[{"name":"CLOUDFLARE_SPAWN_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_EXEC_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_LIFECYCLE_AUTH_TOKEN","type":"secret_text"}]'
+  fi
+  exit 0
+fi
 if [ "$1" = containers ] && [ "$2" = list ]; then
   if [ -e "${DIRECT_MOCK_LOG}.fabricd-deleted" ]; then
     printf '%s\n' 'fabricd_absence_confirmed' >> "${DIRECT_MOCK_LOG}"
