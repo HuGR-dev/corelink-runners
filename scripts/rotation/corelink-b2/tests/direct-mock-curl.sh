@@ -33,6 +33,12 @@ if [[ "$url" == *'/v1/spawn' ]]; then
   if [ "$n" -eq 1 ]; then printf 503; else printf 401; fi
   exit 0
 fi
+if [[ "$url" == *'/v1/exec' ]]; then
+  counter="${DIRECT_MOCK_LOG}.exec-counter";n=0;[ -f "$counter" ]&&n="$(<"$counter")";n=$((n + 1));printf '%s' "$n" >"$counter";[ "$n" -eq 1 ]&&printf 400||printf 401;exit 0
+fi
+if [[ "$url" == *'/v1/status/'* ]]; then
+  counter="${DIRECT_MOCK_LOG}.lifecycle-counter";n=0;[ -f "$counter" ]&&n="$(<"$counter")";n=$((n + 1));printf '%s' "$n" >"$counter";[ "$n" -eq 1 ]&&printf 404||printf 401;exit 0
+fi
 if [[ "$url" == *'/v1/leases/'*'/close' ]]; then printf '{"lease_id":"lease_mock_12345678","released":true,"capture_incomplete":false}\n'; exit 0; fi
 if [[ "$url" == *'/v1/leases' ]]; then
   [ "${DIRECT_MOCK_FAIL:-}" != canary ] || exit 1
