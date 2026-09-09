@@ -90,6 +90,10 @@ check_secret_file() {
     echo "secret file must be a regular readable non-symlink: $file" >&2
     return 1
   fi
+  if ! [[ -s "$file" ]]; then
+    echo "secret file must be non-empty: $file" >&2
+    return 1
+  fi
   case "$(uname -s)" in
     Darwin)
       mode="$(stat -f '%Lp' "$file")"
