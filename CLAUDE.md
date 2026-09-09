@@ -82,8 +82,10 @@ external-consumer gates are historical and are not part of the live system.
 
 Read first: `docs/whitepaper/corelink-runners-v1.md` (**canonical vision** — source of
 truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/product/USE-SCENARIOS.md`
-(the current feature + scenario catalog) · `docs/spec/corelink-fabric-stub.md`
-(the CoreLink-side stub) · `docs/interop.md` (the seams, microscopic) ·
+(the current feature + scenario catalog). Historical design references are
+`docs/spec/corelink-fabric-stub.md` (retired fabric stub), `docs/interop.md`
+(retired M0 seam map), and `docs/spec/hugit-integration-contract.md` (retired
+external framing) ·
 `docs/adr/0002-hugr-identity.md` (identity) ·
 `docs/review/2026-06-09-cross-tenant-dedup-claim.md` (the tense rule) ·
 `docs/handoff/2026-06-10-runner-seed.md` (what arrived, what it proves, what remains).
@@ -100,6 +102,10 @@ truth) · `docs/product/product.md` · `docs/product/FEATURES.md` + `docs/produc
 - **Untrusted compute is the hard part.** Runners execute customer (and AI-agent) code.
   Isolation is fail-closed, per-claim fenced, secrets brokered (never on the box).
   This ops discipline is inherited deliberately from the CoreLink/cache stack.
+- **Close is required.** Every held lease must use close for teardown and release;
+  the close finalizes metrics, provider cost, billing, and attestation atomically.
+  Optional envelope ingest/poll telemetry never requires an external JobClose ACK
+  and never creates a fixed wait window.
 - **One front door: direct.** The former multi-product framing is **retired**. Runners is
   sold **directly to its own ICP** (infra/CI teams) — the single front door. Historical
   campaign records may describe the earlier two-front-door model; it is not current policy.

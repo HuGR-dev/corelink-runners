@@ -133,8 +133,9 @@ The COGS of a parallel-runner slot:
 
 Target: **> 50% gross margin at realistic utilization**, same bar as the cache product,
 *without* a markup on minutes (the value is the cache + the flat predictability, not a
-per-minute spread). **Action for the CoreLink techlead:** put real metal/density numbers
-behind this in `docs/spec/corelink-fabric-stub.md`.
+per-minute spread). **Historical design reference:** the former metal/density
+skeleton is retained in [`docs/spec/corelink-fabric-stub.md`](../spec/corelink-fabric-stub.md)
+and is not an active work item.
 
 ---
 
