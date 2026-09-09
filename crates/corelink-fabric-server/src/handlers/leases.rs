@@ -1206,7 +1206,9 @@ pub(crate) async fn finalize_admitted_lease(
     // the hook here carries the POLL credential; the box never holds it.
     let hook = CaptureHook::open(
         EnvelopeConfig {
-            ack_timeout: std::time::Duration::from_secs(30),
+            // Standalone production has no deployed ack endpoint or consumer.
+            // Do not block normal close on a retired external handshake.
+            ack_timeout: std::time::Duration::ZERO,
             buffer_capacity: 256,
         },
         &pat.0,

@@ -26,16 +26,9 @@
 //!
 //! ## Why the hook is re-registered with a short ack window
 //!
-//! `acquire` registers the lease's production capture hook with a 30s ack
-//! window and the tenant PAT as its poll/ack credential. The composition root
-//! owns that registration; a test legitimately swaps in an EQUIVALENT hook it
-//! can drive (the exact pattern `acceptance_env2.rs::open_and_register` uses) —
-//! SAME tenant-PAT credential (so polls and acks still use the PAT, Option A),
-//! a short ack window so the close does not block the full 30s, and a handle the
-//! test holds to play the forge-side subscriber (drain + ack). The HTTP flow —
-//! acquire, ingest, poll, close — still runs entirely through the real handlers;
-//! the metrics still finalize from the collector fed by the REAL ingest path.
-//! Only the test's role as the in-box subscriber is wired in-process.
+//! Production acquire registers an ACK-disabled standalone hook. A legacy test
+//! may legitimately swap in an equivalent hook with a nonzero timeout to
+//! exercise the in-process ack seam; that is not production transport.
 
 #[macro_use]
 #[path = "support/provider_binding.rs"]
@@ -51,7 +44,9 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use corelink_fabric::{InMemoryLedger, LeaseLedger, LeaseState, TenantId, TenantPlan};
+use corelink_fabric::{
+    InMemoryLedger, LeaseLedger, LeaseState, SlotEventKind, TenantId, TenantPlan,
+};
 use corelink_fabric_api::{
     AcquireRequest, AttestationKeySetResponse, CloseRequest, CloseResponse, paths,
 };
@@ -132,6 +127,7 @@ impl BoxProvisioner for EnvRecordingProvisioner {
 /// forge-side subscriber), and the recording provisioner's capture log.
 struct Harness {
     app: Router,
+    state: AppState,
     ledger: Arc<dyn LeaseLedger + Send + Sync>,
     registry: Arc<HookRegistry>,
     captured_env: CapturedEnvLog,
@@ -160,7 +156,8 @@ fn harness() -> Harness {
     state.provisioner = Arc::new(prov);
 
     Harness {
-        app: app_full(store, state, Arc::clone(&registry)),
+        app: app_full(store, state.clone(), Arc::clone(&registry)),
+        state,
         ledger,
         registry,
         captured_env,
@@ -285,11 +282,8 @@ fn assert_box_env_carries_scoped_token_not_pat(h: &Harness, lease_id: &str) {
     }
 }
 
-/// Open a fresh capture hook for `lease_id` with the SAME tenant-PAT poll/ack
-/// credential acquire uses (Option A) but a SHORT ack window, register it
-/// (replacing acquire's 30s hook — one lease, one hook), and return the handle
-/// so the test can play the forge-side subscriber (drain + ack). Mirrors
-/// `acceptance_env2.rs::open_and_register`.
+/// Open a legacy in-process ACK hook for `lease_id`, replacing the production
+/// standalone hook so this test can exercise the explicit compatibility seam.
 fn reregister_short_ack_hook(h: &Harness, lease_id: &str, ack_timeout: Duration) -> CaptureHook {
     let hook = CaptureHook::open(
         EnvelopeConfig {
@@ -677,22 +671,17 @@ async fn acquire_scoped_ingest_poll_close_attested_envelope_end_to_end() {
     );
 }
 
-/// Companion fail-closed assertion: when the forge never acks, the close STILL
-/// completes (the lease never hangs on the forge), within roughly the ack
-/// window, with `capture_incomplete: true` and the lease released — and the
-/// metrics STILL reflect the ingested turns. This pins the fail-closed posture
-/// of the same end-to-end flow (ingest → close) without a subscriber.
+/// Production standalone close has no ACK consumer. Acquire followed by normal
+/// close must be fast, complete when no local loss occurred, terminalize the
+/// lease, emit its terminal slot event, attest the result, and unregister the
+/// hook.
 #[tokio::test]
-async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_reflect_ingest() {
-    const ACK_TIMEOUT: Duration = Duration::from_millis(300);
+async fn standalone_acquire_close_is_fast_complete_and_cleans_up() {
     let h = harness();
+    let key = published_key(&h).await;
 
     let lease_id = acquire(&h).await;
     assert_box_env_carries_scoped_token_not_pat(&h, &lease_id);
-
-    // A short ack window; we do NOT register a forge subscriber, so the ack
-    // never comes.
-    reregister_short_ack_hook(&h, &lease_id, ACK_TIMEOUT);
 
     let ingest_path = lease_path(paths::ENVELOPE_INGEST, &lease_id);
     let scoped = scoped_token(&lease_id);
@@ -710,8 +699,36 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Close with no subscriber acking: it must complete anyway, honoring the
-    // window, flagging capture_incomplete.
+    // Drain both local forwarding surfaces before close. Standalone mode calls
+    // this actual local residue the capture-completeness signal; there is no
+    // external ACK to stand in for delivery.
+    let events_path = lease_path(paths::ENVELOPE_EVENTS, &lease_id);
+    let resp = h
+        .app
+        .clone()
+        .oneshot(get(&events_path, Some(TENANT_PAT)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await["events"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let meta_path = lease_path(paths::ENVELOPE_META, &lease_id);
+    let resp = h
+        .app
+        .clone()
+        .oneshot(get(&meta_path, Some(TENANT_PAT)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await["meta"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    // Production has no ACK transport or consumer. Close immediately without
+    // treating the absent retired ACK as local capture loss.
     let started = Instant::now();
     let close_path = lease_path(paths::LEASE_CLOSE, &lease_id);
     let resp = h
@@ -722,7 +739,7 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
             Some(TENANT_PAT),
             serde_json::to_string(&CloseRequest {
                 status: "succeeded".to_string(),
-                check_result: None,
+                check_result: Some(sample_check_result()),
                 cost_usd_micros: None,
             })
             .unwrap(),
@@ -734,18 +751,14 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
     assert_eq!(resp.status(), StatusCode::OK);
     let close: CloseResponse =
         serde_json::from_value(body_json(resp).await).expect("frozen CloseResponse shape");
-    assert!(close.released, "fail-closed still closes: released anyway");
+    assert!(close.released, "standalone close releases the held lease");
     assert!(
-        close.capture_incomplete,
-        "a missed ack window must surface as capture_incomplete — never silent"
+        !close.capture_incomplete,
+        "no overflow, residue, or abnormal end"
     );
     assert!(
-        elapsed >= ACK_TIMEOUT,
-        "the ack window was honored (elapsed {elapsed:?} < {ACK_TIMEOUT:?})"
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "the close must complete within ~the window, not hang ({elapsed:?})"
+        elapsed < Duration::from_secs(1),
+        "standalone close must not wait for a retired external ACK ({elapsed:?})"
     );
     // The metrics STILL reflect the ingested turn — the collector observes every
     // ingested event, independent of the ack.
@@ -753,10 +766,43 @@ async fn close_without_ack_is_fail_closed_capture_incomplete_metrics_still_refle
     assert_eq!(close.metrics.tokens.input, 7);
     assert_eq!(close.metrics.tokens.output, 11);
     assert_eq!(close.metrics.tokens.total, 18, "derived sum");
+    assert_eq!(close.check_result, Some(sample_check_result()));
+    assert!(
+        verify_execution(
+            &close.attestation,
+            &close.result_binding_sig,
+            close.check_result.as_ref().expect("echoed check result"),
+            &key,
+        )
+        .expect("well-formed standalone close attestation"),
+        "standalone close remains attested"
+    );
 
     assert_eq!(
         ledger_state(&h.ledger, &lease_id),
         LeaseState::Wire(RunnerState::Released)
+    );
+    let meter = h.state.slot_meter.lock().expect("slot meter readable");
+    assert!(
+        meter
+            .journal()
+            .iter()
+            .any(|event| event.lease_id == lease_id && event.kind == SlotEventKind::Released),
+        "winning close emits the Released terminal slot event"
+    );
+    drop(meter);
+
+    let events_path = lease_path(paths::ENVELOPE_EVENTS, &lease_id);
+    let resp = h
+        .app
+        .clone()
+        .oneshot(get(&events_path, Some(TENANT_PAT)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "close unregisters the hook"
     );
 }
 
