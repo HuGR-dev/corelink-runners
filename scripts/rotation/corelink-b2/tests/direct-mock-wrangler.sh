@@ -57,6 +57,19 @@ if [ "$1" = containers ] && [ "$2" = info ]; then
   fi
   printf '%s\n' 'registry.example/spawn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'registry.example/fabric@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fi
+if [ "$1" = containers ] && [ "$2" = instances ]; then
+  n=0; [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || [ ! -f "$DIRECT_MOCK_INSTANCE_COUNTER" ] || n="$(<"$DIRECT_MOCK_INSTANCE_COUNTER")"
+  n=$((n + 1)); [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || printf '%s' "$n" > "$DIRECT_MOCK_INSTANCE_COUNTER"
+  state=running; digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  case "${DIRECT_MOCK_CONVERGENCE_MODE:-ready}" in
+    delayed) [ "$n" -lt "${DIRECT_MOCK_CONVERGENCE_AFTER:-2}" ] && state=starting ;;
+    never) state=starting ;;
+    wrong-digest) digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
+    failed) state=failed ;;
+  esac
+  printf '%s\n' "{\"instances\":[{\"id\":\"fabricd-instance\",\"state\":\"$state\",\"digest\":\"$digest\"}]}"
+  exit 0
+fi
 if [ "$1" = containers ] && [ "$2" = delete ]; then
   if [ "${DIRECT_MOCK_DELETE_MODE:-}" = timeout-absent ]; then
     : > "${DIRECT_MOCK_LOG}.fabricd-deleted"

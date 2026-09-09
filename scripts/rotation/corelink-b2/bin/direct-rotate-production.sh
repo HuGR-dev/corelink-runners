@@ -4,19 +4,24 @@ set -euo pipefail
 umask 077
 readonly ACK1='ACK-DIRECT-CORELINK-ROTATION-LIVE-20260908' ACK2='ACK-FORWARD-ONLY-RECOVERY-PAIR-LIVE-20260908'
 PACKAGE_ROOT="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"; readonly PACKAGE_ROOT
-MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
+MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 FABRICD_CONVERGENCE_TIMEOUT_SECS=300 FABRICD_CONVERGENCE_INTERVAL_SECS=5 FABRICD_COMMAND_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
 readonly SPAWN_WRANGLER_VERSION='4.103.0' FABRICD_WRANGLER_VERSION='4.105.0'
 OOB_DIR="$HOME/.corelink/rotation-b2-20260908"; EVIDENCE_DIR="$OOB_DIR/evidence-direct"; FLEET_KEY_FILE="$OOB_DIR/fleet-busy-read-key"; CANARY_PAT_FILE="$OOB_DIR/corelink-canary-tenant-pat"
 SPAWN_URL='https://corelink-spawn-worker.gmhelmold.workers.dev'; FABRICD_URL='https://corelink-fabricd.gmhelmold.workers.dev'
 die(){ printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do case "$1" in
---mode) MODE="${2:?}";shift 2;;--attempt) ATTEMPT="${2:?}";shift 2;;--live-ack) LIVE_ACK="${2:?}";shift 2;;--recovery-ack) RECOVERY_ACK="${2:?}";shift 2;;--integration-root) ROOT="${2:?}";shift 2;;--expected-commit) COMMIT="${2:?}";shift 2;;--spawn-version) SPAWN_VERSION="${2:?}";shift 2;;--fabricd-version) FABRICD_VERSION="${2:?}";shift 2;;--spawn-app-id) SPAWN_APP="${2:?}";shift 2;;--fabricd-app-id) FABRICD_APP="${2:?}";shift 2;;--canary-image) CANARY_IMAGE="${2:?}";shift 2;;--oob-dir) OOB_DIR="${2:?}";shift 2;;--evidence-dir) EVIDENCE_DIR="${2:?}";shift 2;;--fleet-key-file) FLEET_KEY_FILE="${2:?}";shift 2;;--canary-pat-file) CANARY_PAT_FILE="${2:?}";shift 2;;--old-token-file) OLD_TOKEN_FILE="${2:?}";shift 2;;--mock-wrangler) MOCK_WRANGLER="${2:?}";shift 2;;--curl-bin) CURL_BIN="${2:?}";shift 2;;--verify-bin) VERIFY_BIN="${2:?}";shift 2;;--stability-secs) STABILITY_SECS="${2:?}";shift 2;;--delete-timeout-seconds) DELETE_TIMEOUT_SECS="${2:?}";shift 2;;--bootstrap-split-auth) BOOTSTRAP_SPLIT_AUTH=1;shift;;*) die "unknown argument $1";;esac;done
+--mode) MODE="${2:?}";shift 2;;--attempt) ATTEMPT="${2:?}";shift 2;;--live-ack) LIVE_ACK="${2:?}";shift 2;;--recovery-ack) RECOVERY_ACK="${2:?}";shift 2;;--integration-root) ROOT="${2:?}";shift 2;;--expected-commit) COMMIT="${2:?}";shift 2;;--spawn-version) SPAWN_VERSION="${2:?}";shift 2;;--fabricd-version) FABRICD_VERSION="${2:?}";shift 2;;--spawn-app-id) SPAWN_APP="${2:?}";shift 2;;--fabricd-app-id) FABRICD_APP="${2:?}";shift 2;;--canary-image) CANARY_IMAGE="${2:?}";shift 2;;--oob-dir) OOB_DIR="${2:?}";shift 2;;--evidence-dir) EVIDENCE_DIR="${2:?}";shift 2;;--fleet-key-file) FLEET_KEY_FILE="${2:?}";shift 2;;--canary-pat-file) CANARY_PAT_FILE="${2:?}";shift 2;;--old-token-file) OLD_TOKEN_FILE="${2:?}";shift 2;;--mock-wrangler) MOCK_WRANGLER="${2:?}";shift 2;;--curl-bin) CURL_BIN="${2:?}";shift 2;;--verify-bin) VERIFY_BIN="${2:?}";shift 2;;--stability-secs) STABILITY_SECS="${2:?}";shift 2;;--delete-timeout-seconds) DELETE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-timeout-seconds) FABRICD_CONVERGENCE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-interval-seconds) FABRICD_CONVERGENCE_INTERVAL_SECS="${2:?}";shift 2;;--fabricd-command-timeout-seconds) FABRICD_COMMAND_TIMEOUT_SECS="${2:?}";shift 2;;--bootstrap-split-auth) BOOTSTRAP_SPLIT_AUTH=1;shift;;*) die "unknown argument $1";;esac;done
 case "$MODE:$ATTEMPT" in plan:*|mock:primary|mock:recovery|live:primary|live:recovery);;*)die 'invalid mode/attempt';;esac
 if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no command is run, no secret is generated.' 'Live path: lock, baseline, freeze, forward cutover, proof, canary, refreeze.';exit 0;fi
 [ "$MODE" != live ] || { [ "$LIVE_ACK" = "$ACK1" ] && [ "$RECOVERY_ACK" = "$ACK2" ] || die 'both exact live acknowledgements required'; }
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock requires mock wrangler'
 [ "$STABILITY_SECS" -ge 0 ] 2>/dev/null || die 'stability seconds must be a nonnegative integer'
 [ "$DELETE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'delete timeout seconds must be a positive integer'
+[ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'fabricd convergence timeout seconds must be positive'
+[ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" -le 300 ] 2>/dev/null || die 'fabricd convergence timeout seconds must be at most 300'
+[ "$FABRICD_CONVERGENCE_INTERVAL_SECS" -gt 0 ] 2>/dev/null || die 'fabricd convergence interval seconds must be positive'
+[ "$FABRICD_CONVERGENCE_INTERVAL_SECS" -le 20 ] 2>/dev/null || die 'fabricd convergence interval seconds must be at most 20'
+[ "$FABRICD_COMMAND_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'fabricd command timeout seconds must be positive'
 [ -n "$VERIFY_BIN" ] || VERIFY_BIN="$PACKAGE_ROOT/bin/verify-close-attestation.mjs"
 [ -x "$VERIFY_BIN" ] || die 'verifier must be executable'
 OWNER_UID="$(id -u)"; readonly OWNER_UID
@@ -109,12 +114,105 @@ assert_fabricd_identity_digest(){ local info="$1";printf '%s' "$info"|jq -e --ar
 assert_fabricd_frozen(){ local v="$1" vars;vars="$(run_wrangle "$FABRICD_CONFIG" versions view "$v" --name corelink-fabricd --json)"||die 'fabricd freeze read failed';printf '%s' "$vars"|jq -e '[..|objects|select(.name?=="FABRIC_ADMISSION_PAUSED")|(.text? // .value? // "")]|length==1 and .[0]=="1"' >/dev/null||die 'fabricd admission freeze mismatch';}
 fabricd_app_is_absent(){ local info list info_rc list_rc;set +e;info="$(fabricd_info 2>/dev/null)";info_rc=$?;list="$(run_wrangle "$FABRICD_CONFIG" containers list --json 2>/dev/null)";list_rc=$?;set -e;[ "$info_rc" != 0 ]&&[ "$list_rc" = 0 ]||return 1;printf '%s' "$list"|jq -e --arg id "$FABRICD_APP" '[..|objects|select(.id?==$id)]|length==0' >/dev/null;}
 kill_tree(){ local parent child;parent="$1";if command -v pgrep >/dev/null 2>&1;then for child in $(pgrep -P "$parent" 2>/dev/null);do kill_tree "$child";done;fi;kill -KILL "$parent" 2>/dev/null||true;}
+run_wrangle_with_timeout(){
+  local config="$1" timeout_secs="$2" work output error status status_tmp pid started now rc child_rc
+  shift 2
+  work="$(mktemp -d "${TMPDIR:-/tmp}/corelink-wrangler.XXXXXXXX")"||return 1
+  chmod 700 "$work"
+  output="$work/stdout";error="$work/stderr";status="$work/status";status_tmp="$work/status.tmp"
+  : >"$output";: >"$error";chmod 600 "$output" "$error"
+  (
+    set +e
+    run_wrangle "$config" "$@" >"$output" 2>"$error"
+    child_rc=$?
+    printf '%s\n' "$child_rc" >"$status_tmp" && mv -f "$status_tmp" "$status"
+    exit "$child_rc"
+  ) & pid=$!
+  started="$(date +%s)"
+  while :; do
+    if [ -s "$status" ]; then
+      wait "$pid" 2>/dev/null||true
+      rc="$(<"$status")"
+      case "$rc" in
+        ''|*[!0-9]*) rc=125;;
+      esac
+      cat "$output"
+      cat "$error" >&2
+      rm -f "$output" "$error" "$status" "$status_tmp"
+      rmdir "$work" 2>/dev/null||true
+      return "$rc"
+    fi
+    now="$(date +%s)"
+    if [ "$((now-started))" -ge "$timeout_secs" ]; then
+      kill_tree "$pid"
+      wait "$pid" 2>/dev/null||true
+      rm -f "$output" "$error" "$status" "$status_tmp"
+      rmdir "$work" 2>/dev/null||true
+      return 124
+    fi
+    sleep 1
+  done
+}
 run_delete_with_timeout(){ local pid started now;run_wrangle "$FABRICD_CONFIG" containers delete "$FABRICD_APP" >/dev/null 2>&1 & pid=$!;started="$(date +%s)";while kill -0 "$pid" 2>/dev/null;do now="$(date +%s)";if [ "$((now-started))" -ge "$DELETE_TIMEOUT_SECS" ];then kill_tree "$pid";wait "$pid" 2>/dev/null||true;return 124;fi;sleep 1;done;wait "$pid";}
 delete_fabricd_and_confirm_absence(){ local info attempt delete_rc;info="$(fabricd_info 2>/dev/null)"||die 'fabricd identity unavailable before delete';assert_fabricd_identity_digest "$info";for attempt in 1 2;do set +e;run_delete_with_timeout;delete_rc=$?;set -e;if fabricd_app_is_absent;then record "fabricd_container_absence_confirmed attempt:$attempt delete_rc:$delete_rc";return 0;fi;[ "$attempt" = 2 ]||sleep 1;done;die 'fabricd container absence not confirmed';}
 resolve_fabricd_app_id(){ local list;list="$(run_wrangle "$FABRICD_CONFIG" containers list --json)"||die 'fabricd application list failed';printf '%s' "$list"|jq -er '[..|objects|select(.name?=="corelink-fabricd-fabricdcontainer" and (.id?|type)=="string")|.id]|unique|if length==1 then .[0] else error("exact fabricd application is absent or ambiguous") end';}
-assert_fabricd_health(){ local health health_status health_body;health="$($CURL_BIN --silent --show-error --write-out $'\n%{http_code}' "$FABRICD_URL/v1/health")"||die 'fabricd health transport/TLS failure';health_status="${health##*$'\n'}";health_body="$(printf '%s' "${health%$'\n'*}"|tr -d '\r\n')";[ "$health_status" = 200 ]&&[ "$health_body" = ok ]||die 'fabricd health status/schema proof';record 'fabricd_health=200_ok_after_recreate';}
+fabricd_health_ok(){
+  local health health_status health_body
+  health="$($CURL_BIN --silent --show-error --connect-timeout 10 --max-time 30 --write-out $'\n%{http_code}' "$FABRICD_URL/v1/health")"||return 1
+  health_status="${health##*$'\n'}"
+  health_body="$(printf '%s' "${health%$'\n'*}"|tr -d '\r\n')"
+  [ "$health_status" = 200 ]&&[ "$health_body" = ok ]
+}
+assert_fabricd_health(){ fabricd_health_ok||die 'fabricd health transport/TLS or status/schema proof';record 'fabricd_health=200_ok_after_recreate';}
+fabricd_instance_state(){
+  local instances="$1" expected_digest="$2"
+  printf '%s' "$instances"|jq -er --arg d "$expected_digest" '
+    def entries:
+      if type == "array" then .
+      elif (.instances|type) == "array" then .instances
+      elif (.result.instances|type) == "array" then .result.instances
+      elif (.result|type) == "array" then .result
+      else error("instances response has no instance array") end;
+    def state: (.state? // .status?.state? // "") | tostring | ascii_downcase;
+    def image: (.digest? // .image? // .configuration?.image? // "") | tostring;
+    (entries) as $instances |
+      if (($instances|map(select(state == "failed"))|length) > 0) then "failed"
+      elif (($instances|map(select(state == "running"))|length) != 1) then "not-ready"
+      elif (($instances|map(select(state == "running"))|.[0]|image) == $d
+            or (($instances|map(select(state == "running"))|.[0]|image)|endswith($d))) then "ready"
+      else "wrong-digest" end
+  '
+}
+assert_fabricd_converged(){
+  local expected_digest="${fimage##*@}" instances='' state='' started now poll=0 instances_rc=1
+  started="$(date +%s)"
+  while :; do
+    poll=$((poll + 1));state=''
+    set +e
+    instances="$(run_wrangle_with_timeout "$FABRICD_CONFIG" "$FABRICD_COMMAND_TIMEOUT_SECS" containers instances "$FABRICD_APP" --json 2>/dev/null)"
+    instances_rc=$?
+    if [ "$instances_rc" -eq 0 ]; then state="$(fabricd_instance_state "$instances" "$expected_digest" 2>/dev/null)"; fi
+    set -e
+    case "$state" in
+      ready)
+        if fabricd_health_ok; then
+          record "fabricd_convergence=ready poll:$poll app:$FABRICD_APP running:1 failed:0 digest:$expected_digest health:200_ok"
+          return 0
+        fi
+        ;;
+      failed) die 'fabricd convergence observed failed instance';;
+      wrong-digest) die 'fabricd convergence observed wrong instance digest';;
+      '') die 'fabricd convergence returned malformed instance state';;
+    esac
+    now="$(date +%s)"
+    if [ "$((now-started))" -ge "$FABRICD_CONVERGENCE_TIMEOUT_SECS" ]; then
+      die "fabricd convergence timed out after ${FABRICD_CONVERGENCE_TIMEOUT_SECS}s"
+    fi
+    sleep "$FABRICD_CONVERGENCE_INTERVAL_SECS"
+  done
+}
 pre_recreate_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$pre_recreate_version";record "fabricd_pre_recreate=app:$FABRICD_APP version:$pre_recreate_version digest:${fimage##*@} frozen=1"
-old_fabricd_app="$FABRICD_APP";delete_fabricd_and_confirm_absence;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate>/dev/null;FABRICD_APP="$(resolve_fabricd_app_id)";post_fabricd_info="$(fabricd_info)";assert_fabricd_identity_digest "$post_fabricd_info";post_fabricd_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$post_fabricd_version";assert_fabricd_health;record "fabricd_recreated=old_app:$old_fabricd_app app:$FABRICD_APP version:$post_fabricd_version digest:${fimage##*@} frozen=1"
+old_fabricd_app="$FABRICD_APP";delete_fabricd_and_confirm_absence;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate>/dev/null;FABRICD_APP="$(resolve_fabricd_app_id)";post_fabricd_info="$(fabricd_info)";assert_fabricd_identity_digest "$post_fabricd_info";post_fabricd_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$post_fabricd_version";assert_fabricd_converged;record "fabricd_recreated=old_app:$old_fabricd_app app:$FABRICD_APP version:$post_fabricd_version digest:${fimage##*@} frozen=1"
 assert_control_secret_bindings post_recreate_fabricd "$FABRICD_CONFIG";assert_control_secret_bindings post_recreate_spawn "$SPAWN_CONFIG"
 keys="$($CURL_BIN --fail --silent --show-error "$FABRICD_URL/v1/attestation/key")";key_id_after="$(printf '%s' "$keys"|jq -er 'if (.keys|type=="array" and length==1 and .[0].expires_ms==null and (.[0].key_id|type=="string" and length>0)) then .keys[0].key_id else error("invalid post-rotation key shape") end')"||die 'not exact one selected key';[ "$key_id_before" != "$key_id_after" ]||die 'attestation key did not change';record "attestation_key=changed_from:${key_id_before}_to:${key_id_after}_single_active"
 probe_control_domains(){
