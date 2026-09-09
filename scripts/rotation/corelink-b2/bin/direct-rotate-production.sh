@@ -17,9 +17,9 @@ if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no comman
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock requires mock wrangler'
 [ "$STABILITY_SECS" -ge 0 ] 2>/dev/null || die 'stability seconds must be a nonnegative integer'
 [ "$DELETE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'delete timeout seconds must be a positive integer'
-[ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'fabricd convergence timeout seconds must be positive'
+[[ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || die 'fabricd convergence timeout seconds must be a positive integer'
 [ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" -le 300 ] 2>/dev/null || die 'fabricd convergence timeout seconds must be at most 300'
-[ "$FABRICD_CONVERGENCE_INTERVAL_SECS" -gt 0 ] 2>/dev/null || die 'fabricd convergence interval seconds must be positive'
+[[ "$FABRICD_CONVERGENCE_INTERVAL_SECS" =~ ^[1-9][0-9]*$ ]] || die 'fabricd convergence interval seconds must be a positive integer'
 [ "$FABRICD_CONVERGENCE_INTERVAL_SECS" -le 20 ] 2>/dev/null || die 'fabricd convergence interval seconds must be at most 20'
 [ "$FABRICD_COMMAND_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'fabricd command timeout seconds must be positive'
 [ -n "$VERIFY_BIN" ] || VERIFY_BIN="$PACKAGE_ROOT/bin/verify-close-attestation.mjs"
@@ -179,7 +179,48 @@ run_wrangle_with_timeout(){
 }
 run_delete_with_timeout(){ run_wrangle_with_timeout "$FABRICD_CONFIG" "$DELETE_TIMEOUT_SECS" containers delete "$FABRICD_APP" >/dev/null 2>&1; }
 delete_fabricd_and_confirm_absence(){ local info attempt delete_rc;info="$(fabricd_info 2>/dev/null)"||die 'fabricd identity unavailable before delete';assert_fabricd_identity_digest "$info";for attempt in 1 2;do set +e;run_delete_with_timeout;delete_rc=$?;set -e;if fabricd_app_is_absent;then record "fabricd_container_absence_confirmed attempt:$attempt delete_rc:$delete_rc";return 0;fi;[ "$attempt" = 2 ]||sleep 1;done;die 'fabricd container absence not confirmed';}
-resolve_fabricd_app_id(){ local list;list="$(run_wrangle "$FABRICD_CONFIG" containers list --json)"||die 'fabricd application list failed';printf '%s' "$list"|jq -er '[..|objects|select(.name?=="corelink-fabricd-fabricdcontainer" and (.id?|type)=="string")|.id]|unique|if length==1 then .[0] else error("exact fabricd application is absent or ambiguous") end';}
+resolve_fabricd_app_id(){
+  local max_attempts attempt list='' list_rc=1 discovery='' app=''
+  max_attempts=$(( (FABRICD_CONVERGENCE_TIMEOUT_SECS + FABRICD_CONVERGENCE_INTERVAL_SECS - 1) / FABRICD_CONVERGENCE_INTERVAL_SECS ))
+  [ "$max_attempts" -ge 1 ] || max_attempts=1
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    set +e
+    list="$(run_wrangle_with_timeout "$FABRICD_CONFIG" "$FABRICD_COMMAND_TIMEOUT_SECS" containers list --json 2>/dev/null)"
+    list_rc=$?
+    set -e
+    if [ "$list_rc" -eq 0 ]; then
+      discovery="$(printf '%s' "$list"|jq -r '
+        [..|objects|select(.name?=="corelink-fabricd-fabricdcontainer")] as $apps |
+        if ($apps|length)>1 then "ambiguous"
+        elif ($apps|length)==0 then "absent"
+        elif (($apps[0].id?|type)!="string" or ($apps[0].id|length)==0) then "invalid"
+        else "ready:\($apps[0].id)" end
+      ' 2>/dev/null)" || discovery=''
+      case "$discovery" in
+        ready:*)
+          app="${discovery#ready:}"
+          FABRICD_APP="$app"
+          record "fabricd_discovery=ready poll:$attempt app:$app"
+          printf '%s\n' "$app"
+          return 0
+          ;;
+        ambiguous)
+          record "fabricd_discovery=ambiguous poll:$attempt"
+          die 'fabricd application discovery is ambiguous'
+          ;;
+        invalid)
+          record "fabricd_discovery=invalid poll:$attempt"
+          die 'fabricd application discovery returned an invalid exact-name application'
+          ;;
+      esac
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      sleep "$FABRICD_CONVERGENCE_INTERVAL_SECS"
+    fi
+  done
+  record "fabricd_discovery=timeout polls:$max_attempts"
+  die "fabricd application discovery timed out after $max_attempts attempts"
+}
 fabricd_health_ok(){
   local health health_status health_body
   health="$($CURL_BIN --silent --show-error --connect-timeout 10 --max-time 30 --write-out $'\n%{http_code}' "$FABRICD_URL/v1/health")"||return 1
