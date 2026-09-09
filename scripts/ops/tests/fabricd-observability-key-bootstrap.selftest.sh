@@ -23,6 +23,66 @@ make_fixture() {
   export root oob state commit
 }
 
+dispatch_case() {
+  local label="$1" version="${2-}" case_root case_real case_oob case_evidence_dir digest case_log case_err rc
+  case_root="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-dispatch.XXXXXXXX")"
+  case_real="$(cd "$case_root" && pwd -P)"
+  case_oob="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-dispatch-oob.XXXXXXXX")"
+  case_evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-dispatch-evidence.XXXXXXXX")"
+  mkdir -p "$case_root/deploy/cloudflare-fabricd/node_modules/.bin"
+  chmod 700 "$case_root" "$case_oob" "$case_evidence_dir"
+  cp "$here/../../../deploy/cloudflare-fabricd/wrangler.jsonc" "$case_root/deploy/cloudflare-fabricd/wrangler.jsonc"
+  digest="$(sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' "$case_root/deploy/cloudflare-fabricd/wrangler.jsonc" | head -n 1)"
+  case "$label" in
+    missing) : ;;
+    wrong|correct)
+      # shellcheck disable=SC2016
+      printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "%s|%s\\n" "$PWD" "$*" >> "${DISPATCH_LOG:?}"' \
+        "if [ \"\${1:-}\" = --version ]; then printf '%s\\n' '$version'; exit 0; fi" \
+        'if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then printf '\''{"token":"dispatch-test-token-1234567890"}\n'\''; exit 0; fi' \
+        'exit 1' > "$case_root/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      chmod 700 "$case_root/deploy/cloudflare-fabricd/node_modules/.bin/wrangler"
+      ;;
+    *) printf 'unknown dispatch test case: %s\n' "$label" >&2; exit 1 ;;
+  esac
+  git -C "$case_root" init -q
+  git -C "$case_root" config user.email obs-dispatch@example.invalid
+  git -C "$case_root" config user.name obs-dispatch
+  git -C "$case_root" add -f .
+  git -C "$case_root" commit -qm baseline
+  commit="$(git -C "$case_root" rev-parse HEAD)"
+  for key in fleet introspect pat; do printf '%s\n' dispatch-test-key > "$case_oob/$key"; chmod 600 "$case_oob/$key"; done
+  case_log="$(mktemp "${TMPDIR:-/tmp}/corelink-obs-dispatch-log.XXXXXXXX")"
+  case_err="$(mktemp "${TMPDIR:-/tmp}/corelink-obs-dispatch-err.XXXXXXXX")"
+  set +e
+  DISPATCH_LOG="$case_log" "$harness" --mode execute --ack ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908 \
+    --repo-root "$case_root" --expected-commit "$commit" --expected-version version-good \
+    --fabricd-app-id 22222222-2222-2222-2222-222222222222 --expected-image-digest "$digest" \
+    --oob-dir "$case_oob" --fleet-key-file "$case_oob/fleet" \
+    --introspect-key-file "$case_oob/introspect" --introspect-pat-file "$case_oob/pat" \
+    --tenant-id tenant-test --evidence-file "$case_evidence_dir/result.json" --stability-seconds 120 \
+    >/dev/null 2>"$case_err"
+  rc=$?
+  set -e
+  case "$label" in
+    missing) [[ "$rc" != 0 ]] && rg -q 'local Wrangler binary missing' "$case_err" ;;
+    wrong) [[ "$rc" != 0 ]] && rg -q 'local Wrangler version mismatch' "$case_err" ;;
+    correct) [[ "$rc" != 0 ]] && grep -F -q "$case_real/deploy/cloudflare-fabricd|--config $case_real/deploy/cloudflare-fabricd/wrangler.jsonc deployments list --name corelink-fabricd --json" "$case_log" ;;
+  esac
+  local result=$?
+  rm -rf -- "$case_root" "$case_oob" "$case_evidence_dir" "$case_log" "$case_err"
+  return "$result"
+}
+
+dispatch_case missing
+dispatch_case wrong 4.104.0
+dispatch_case correct 4.105.0
+if rg -n '\bnpx\b' "$harness" >/dev/null; then
+  printf '%s\n' 'unexpected npx Wrangler resolution' >&2
+  exit 1
+fi
+
 run_case() {
   local name="$1" scenario="$2" expected="$3" stability="${4:-0}"; make_fixture "$name"
   export MOCK_STATE="$state" MOCK_SCENARIO="$scenario" MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION='version-good' MOCK_TENANT='tenant-test'

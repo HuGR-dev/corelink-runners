@@ -8,6 +8,7 @@ umask 077
 readonly ACK='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908'
 readonly WORKER_NAME='corelink-fabricd' APP_NAME='corelink-fabricd-fabricdcontainer'
 readonly CONFIG_REL='deploy/cloudflare-fabricd/wrangler.jsonc'
+readonly WRANGLER_EXPECTED_VERSION='4.105.0'
 MODE=plan ACK_ARG='' ROOT='' COMMIT='' VERSION='' APP_ID='' DIGEST=''
 OOB_DIR="${CORELINK_OOB_DIR:-$HOME/.corelink/rotation-b2-20260908}" KEY_FILE=''
 FLEET_KEY_FILE='' INTROSPECT_KEY_FILE='' PAT_FILE='' TENANT_ID='' EVIDENCE_FILE=''
@@ -15,6 +16,7 @@ STATUS_URL='https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status'
 FLEET_URL='https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy'
 INTROSPECT_URL='https://corelink-api.humangr.com/internal/v1/auth/introspect'
 STABILITY_SECS=120 MOCK_WRANGLER='' CURL_BIN=curl TMP_DIR='' LOCK_DIR=''
+WRANGLER_DIR='' WRANGLER_BIN=''
 MUTATION_STARTED=0 FINAL_FROZEN=0
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
@@ -46,6 +48,7 @@ if [ "$MODE" = mock ]; then :; elif [ "$STABILITY_SECS" = 120 ]; then :; else di
 [[ "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || die 'expected commit must be a full SHA-1'
 [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'expected image digest must be sha256:<64 hex>'
 [ -d "$ROOT" ] || die 'repository root is not a directory'
+ROOT="$(cd "$ROOT" && pwd -P)"
 command -v "$CURL_BIN" >/dev/null 2>&1 || die 'curl is unavailable'
 EVIDENCE_FILE="${EVIDENCE_FILE:-$ROOT/docs/plan/evidence/fabricd-observability-key-bootstrap.json}"
 FLEET_KEY_FILE="${FLEET_KEY_FILE:-$OOB_DIR/fleet-busy-read-key}"
@@ -63,9 +66,10 @@ mkdir_private "$OOB_DIR"; mkdir_private "$(dirname -- "$EVIDENCE_FILE")"
 
 run_wrangler() {
   if [ "$MODE" = mock ]; then "$MOCK_WRANGLER" "$@"; return; fi
-  local token; token="$(npx --no-install wrangler auth token --json | jq -er '.token // .access_token // .')" || die 'wrangler OAuth unavailable'
+  local token
+  token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')" || die 'wrangler OAuth unavailable'
   [[ "$token" =~ ^[A-Za-z0-9._~+/=-]{16,}$ ]] || die 'invalid wrangler OAuth token'
-  CLOUDFLARE_API_TOKEN="$token" npx --no-install wrangler "$@"
+  (cd "$WRANGLER_DIR" && CLOUDFLARE_API_TOKEN="$token" "$WRANGLER_BIN" --config "$ROOT/$CONFIG_REL" "$@")
 }
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-bootstrap.XXXXXXXX")"; chmod 700 "$TMP_DIR"
 EVIDENCE_DIR="$TMP_DIR/evidence"; mkdir "$EVIDENCE_DIR"; chmod 700 "$EVIDENCE_DIR"
@@ -81,12 +85,22 @@ git -C "$ROOT" rev-parse --verify "$COMMIT^{commit}" >/dev/null || die 'expected
 [ "$(git -C "$ROOT" rev-parse HEAD)" = "$COMMIT" ] || die 'repository HEAD does not match expected commit'
 [ -z "$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)" ] || die 'repository worktree is not clean'
 grep -Fq "$DIGEST" "$config" || die 'expected immutable digest absent from canonical config'
+resolve_wrangler() {
+  [ "$MODE" = mock ] && return 0
+  WRANGLER_DIR="$ROOT/${CONFIG_REL%/*}"
+  WRANGLER_BIN="$WRANGLER_DIR/node_modules/.bin/wrangler"
+  [ -x "$WRANGLER_BIN" ] || die "local Wrangler binary missing: $WRANGLER_BIN"
+  local version
+  version="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" --version)" || die 'local Wrangler version probe failed'
+  [ "$version" = "$WRANGLER_EXPECTED_VERSION" ] || die "local Wrangler version mismatch: expected $WRANGLER_EXPECTED_VERSION, got $version"
+}
+resolve_wrangler
 LOCK_DIR="$OOB_DIR/.fabricd-observability-key-bootstrap.lock"; mkdir "$LOCK_DIR" 2>/dev/null || die 'another bootstrap holds the local lock'; chmod 700 "$LOCK_DIR"; log_event 'lock=acquired'
 
 cleanup() {
   local rc=$?; trap - EXIT
   if [ "$MUTATION_STARTED" = 1 ] && [ "$FINAL_FROZEN" != 1 ]; then
-    if run_safe refreeze run_wrangler deploy --config "$config" --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate; then log_event 'refreeze=GREEN admission_paused=1'; else log_event 'refreeze=RED escalation_required'; rc=1; fi
+    if run_safe refreeze run_wrangler deploy --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate; then log_event 'refreeze=GREEN admission_paused=1'; else log_event 'refreeze=RED escalation_required'; rc=1; fi
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
   if [ "$rc" = 0 ]; then
@@ -146,7 +160,7 @@ log_event "provider_stable=GREEN version=$baseline_version digest=$baseline_dige
 MUTATION_STARTED=1
 run_safe secret-put run_wrangler secret put FABRIC_OBSERVABILITY_KEY --name "$WORKER_NAME" < "$KEY_FILE" || die 'secret put failed'
 run_safe container-delete run_wrangler containers delete "$APP_ID" || die 'fabricd container delete failed'
-run_safe immediate-recreate run_wrangler deploy --config "$config" --keep-vars --strict --containers-rollout=immediate || die 'immediate fabricd recreate failed'
+run_safe immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'immediate fabricd recreate failed'
 post="$(snapshot post-recreate)" || die 'post-recreate provider capture failed'; post_version="${post%%$'\t'*}"; post_digest="${post#*$'\t'}"; [ "$post_digest" = "$DIGEST" ] || die 'recreated fabricd image digest changed'; assert_frozen "$post_version" || die 'admission freeze was not preserved after recreate'
 status_header="$TMP_DIR/status.header"; printf 'X-Corelink-Internal-Auth: ' > "$status_header"; tr -d '\r\n' < "$KEY_FILE" >> "$status_header"; printf '\n' >> "$status_header"; chmod 600 "$status_header"
 status_json="$TMP_DIR/status.json"; : > "$status_json"; chmod 600 "$status_json"; "$CURL_BIN" --fail --silent --show-error --connect-timeout 10 --max-time 30 --header "@$status_header" "$STATUS_URL" > "$status_json" 2>"$EVIDENCE_DIR/status.stderr" || die 'status verification failed'; scrub "$EVIDENCE_DIR/status.stderr"
