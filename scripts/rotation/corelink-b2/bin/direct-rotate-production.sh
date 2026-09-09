@@ -391,7 +391,11 @@ probe_lease_state(){
   LEASE_STATE_STATUS="$status"
   record_response_facts canary_lease_state "$status" "$body"
   [ "$status" = 200 ]||return 1
-  LEASE_STATE="$(printf '%s' "$body"|jq -er '.state | strings | ascii_downcase')"||{ LEASE_STATE=malformed;return 1; }
+  LEASE_STATE="$(printf '%s' "$body"|jq -er --arg l "$lease" '
+    if type != "object" or (keys | sort) != ["lease_id", "state"] or .lease_id != $l or (.state | type) != "string" then
+      error("invalid lease state response")
+    else .state | ascii_downcase end
+  ')"||{ LEASE_STATE=malformed;return 1; }
   case "$LEASE_STATE" in held|released|expired|crashed) return 0;; *) return 1;; esac
 }
 
