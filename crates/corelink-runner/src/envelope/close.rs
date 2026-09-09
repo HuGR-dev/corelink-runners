@@ -1,10 +1,9 @@
-//! `JobClose` — the §13.2 item-3 close/ack state machine over the capture
-//! hook: finalize → signal → bearer-gated ack window → fail-closed outcome
-//! (WP-B2).
+//! `JobClose` — the §13.2 item-3 close state machine over the capture hook:
+//! finalize → signal → optional in-process ack window → outcome (WP-B2).
 //!
 //! In-process mechanism only (same std `Mutex`/`Condvar` shared state as
-//! [`super::hook`]); the M1 fabric carries the same signal/ack handshake
-//! over the wire behind the same semantics. The lease itself is a SEAM:
+//! [`super::hook`]); production standalone runtime has no ack transport or
+//! consumer. The lease itself is a SEAM:
 //! this module exposes [`JobClose::released`] for the lease lifecycle to
 //! poll/consume — it never touches `lease.rs` or the `RunnerState`
 //! transitions directly.
@@ -99,25 +98,21 @@ impl JobClose {
         }
     }
 
-    /// Normal job close: finalize → signal → ack window → outcome.
+    /// Normal job close: finalize → signal → optional ack window → outcome.
     ///
     /// 1. Both capture surfaces close (further writes refused) and the
     ///    collector finalizes exactly once into the final [`IntentMetrics`].
     /// 2. The close signal is published carrying that SAME metrics value
     ///    (single source of truth) — subscribers see it via
     ///    [`Subscriber::wait_close_signal`].
-    /// 3. The machine waits up to `cfg.ack_timeout` (the runner config
-    ///    field) for a credential-valid [`Subscriber::ack`].
-    /// 4. Acked in window → `capture_incomplete: false` (capture permitting,
-    ///    see 5) and the lease is released only after the ack. Timeout →
-    ///    the close completes anyway (**fail-closed**: the forge MUST have
-    ///    written both blobs before acking, so a missing ack means capture
-    ///    is not confirmed — but the lease never hangs on the forge) with
-    ///    `capture_incomplete: true`.
-    /// 5. `capture_incomplete` is ALSO `true` — regardless of the ack — if
-    ///    either surface overflowed during the job, or undelivered residue
-    ///    remained in either buffer at close time (the forge had not
-    ///    drained both channels before the close signal).
+    /// 3. A nonzero `cfg.ack_timeout` retains the legacy in-process seam and
+    ///    waits for a credential-valid [`Subscriber::ack`]. `Duration::ZERO`
+    ///    is standalone runtime mode: it publishes the signal but completes
+    ///    immediately because production has no ack transport or consumer.
+    /// 4. In ack mode, a timeout marks capture incomplete. In standalone mode,
+    ///    the absence of that retired ack alone never does.
+    /// 5. In every mode `capture_incomplete` is `true` if either surface
+    ///    overflowed, or undelivered residue remained at close time.
     ///
     /// # Errors
     /// A second close attempt (normal or abnormal) on the same hook, or a
@@ -146,23 +141,30 @@ impl JobClose {
             .context("finalizing the metrics collector at job close")?;
 
         // (2) Publish the signal with the SAME metrics value the outcome
-        // will carry, and arm the ack window.
+        // will carry. A nonzero timeout is the explicit legacy test seam;
+        // standalone production runs it disabled and never waits for an
+        // external transport that does not exist.
         inner.close_signal = Some(CloseSignal {
             status,
             metrics: metrics.clone(),
         });
-        inner.ack_window_open = true;
+        let ack_required = !inner.cfg.ack_timeout.is_zero();
+        inner.ack_window_open = ack_required;
         let ack_timeout = inner.cfg.ack_timeout;
         self.shared.cv.notify_all();
 
-        // (3) Wait for a credential-valid ack up to the configured window.
-        // The condvar releases the lock while waiting, so the subscriber's
-        // ack (and any in-window draining) can proceed.
-        let (mut inner, _timeout) = self
-            .shared
-            .cv
-            .wait_timeout_while(inner, ack_timeout, |i| !i.acked)
-            .unwrap_or_else(|p| p.into_inner());
+        // (3) Wait only for an explicitly-enabled in-process ack seam. The
+        // condvar releases the lock while waiting, so a test subscriber can
+        // drain and ack. Standalone production keeps the lock and closes now.
+        let mut inner = if ack_required {
+            self.shared
+                .cv
+                .wait_timeout_while(inner, ack_timeout, |i| !i.acked)
+                .unwrap_or_else(|p| p.into_inner())
+                .0
+        } else {
+            inner
+        };
 
         // (4) Outcome: the window is over either way; a later ack is inert.
         // Residue is judged NOW — events the forge drained in-window count
@@ -179,7 +181,7 @@ impl JobClose {
         Ok(CloseOutcome {
             status,
             metrics,
-            capture_incomplete: lossy || !acked,
+            capture_incomplete: lossy || (ack_required && !acked),
             close_reason: CloseReason::Normal,
         })
     }
@@ -242,13 +244,13 @@ impl JobClose {
     /// `true` once the close state machine has produced its outcome and the
     /// lease may proceed to its terminal state. The lease seam:
     ///
-    /// - Acked close: the outcome (and so `released() == true`) happens
-    ///   ONLY AFTER the ack — the forge finalizes both blobs before the
-    ///   lease transitions to `Released` (§13.2 item 3).
-    /// - Timed-out close: **fail-closed still closes** — the job is over
-    ///   and the lease must not hang on a missing forge ack, so the outcome
-    ///   is produced (and `released() == true`) at the window's end with
-    ///   `capture_incomplete: true` carrying the incompleteness.
+    /// - An explicitly configured acked close: the outcome (and so
+    ///   `released() == true`) happens only after the ack.
+    /// - An explicitly configured timed-out close: **fail-closed still
+    ///   closes** with `capture_incomplete: true`.
+    /// - Standalone runtime (`ack_timeout == Duration::ZERO`): the outcome
+    ///   and release are immediate; only actual local loss marks capture
+    ///   incomplete.
     /// - Abnormal close: the outcome is immediate; the lease's terminal
     ///   `RunnerState` is `Expired`/`Crashed` rather than `Released`, but
     ///   the seam boolean has the same meaning (the close completed; the

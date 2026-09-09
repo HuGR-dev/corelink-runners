@@ -3,8 +3,8 @@
 //! lead-ratified).
 //!
 //! This module is composition only: the close SEMANTICS — finalize-once →
-//! [`CloseSignal`](corelink_runner::envelope::CloseSignal) → bearer-gated
-//! ack window → fail-closed `CloseOutcome` with the honest
+//! [`CloseSignal`](corelink_runner::envelope::CloseSignal) → optional
+//! in-process ack seam → `CloseOutcome` with the honest
 //! `capture_incomplete` flag — live in the frozen mechanism
 //! (`corelink_runner::envelope::close::JobClose`) and are DRIVEN here,
 //! never reimplemented.
@@ -31,8 +31,9 @@
 //!    §13 close machinery loses nothing.
 //! 5. **The close machinery, BEFORE the ledger moves** — only AFTER teardown
 //!    succeeds: if the lease has a registered [`CaptureHook`] (agent jobs),
-//!    `JobClose::close` runs to its outcome, honoring the runner-configured
-//!    ack window (§13.2 item 3); a lease without a hook closes plain
+//!    `JobClose::close` runs to its outcome. Production hooks use standalone
+//!    ACK-disabled mode; a nonzero timeout remains only for in-process tests.
+//!    A lease without a hook closes plain
 //!    (non-agent job: nothing was hooked, so the metrics are the honest zero
 //!    projection — observed-nothing, never fabricated). The exactly-once
 //!    close fires on the attempt whose teardown succeeded; a retry after a
@@ -216,54 +217,51 @@ pub(crate) async fn close(
     }
 
     // ── 5. The close machinery, BEFORE the ledger moves — and only AFTER
-    // teardown succeeded. Agent jobs have a registered hook: drive the frozen
-    // JobClose state machine (it blocks for up to the runner-configured ack
-    // window, so it runs on a blocking thread, off the async workers). A
-    // lease without a hook closes plain. The exactly-once close fires here, on
-    // the attempt whose teardown succeeded; a retry after a failed teardown
-    // never reached this gate, so the close signal is delivered exactly once.
+    // teardown succeeded. Production hooks are ACK-disabled, so normal close
+    // is immediate. A nonzero timeout remains a narrow in-process test seam;
+    // only that path enters the blocking wait and its semaphore. A lease
+    // without a hook closes plain. The exactly-once close fires here, on the
+    // attempt whose teardown succeeded; a retry after a failed teardown never
+    // reached this gate, so the close signal is delivered exactly once.
     let (mut metrics, capture_incomplete) = match registry.close_handle(&lease_id, &tenant) {
         Some((hook, price)) => {
-            // AUDIT P1: the ack wait below blocks for up to the §13.2 ack window
-            // (30s) on a std condvar, run via `spawn_blocking`. WITHOUT a bound,
-            // N concurrent closes pin N blocking-pool threads for the full
-            // window — exhausting the pool that ALSO serves provision/teardown/
-            // probe, so the ack becomes unreachable over HTTP and the server
-            // stalls. We gate ENTRY to the blocking wait on a bounded async
-            // semaphore: when all permits are taken, this close `.await`s a
-            // permit (parking NO thread) instead of pinning one. The permit is
-            // held only for the duration of the blocking close and dropped the
-            // instant it returns. Close semantics are byte-unchanged — the gate
-            // never touches the exactly-once latch, the fail-closed timeout, or
-            // the attestation emission. `acquire_owned` only errors if the
-            // semaphore is closed, which we never do → fail-closed on that
-            // impossible case.
-            let Ok(_ack_permit) = Arc::clone(&state.close_ack_gate).acquire_owned().await else {
-                return error_response(
-                    ApiError::FailClosed,
-                    "close ack gate unavailable; failing closed",
-                );
-            };
             let job_close = JobClose::new(&hook);
-            let outcome = tokio::task::spawn_blocking(move || {
+            let outcome = if hook.ack_required() {
+                // The compatibility seam can block on a std condvar. Bound
+                // only that obsolete-in-production path, leaving standalone
+                // close free of an unnecessary semaphore and pool offload.
+                let Ok(_ack_permit) = Arc::clone(&state.close_ack_gate).acquire_owned().await
+                else {
+                    return error_response(
+                        ApiError::FailClosed,
+                        "close ack gate unavailable; failing closed",
+                    );
+                };
+                match tokio::task::spawn_blocking(move || {
+                    job_close.close(status, Instant::now(), &price)
+                })
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        return error_response(
+                            ApiError::FailClosed,
+                            "close machinery panicked; failing closed",
+                        );
+                    }
+                }
+            } else {
                 job_close.close(status, Instant::now(), &price)
-            })
-            .await;
+            };
             match outcome {
-                Ok(Ok(outcome)) => (outcome.metrics, outcome.capture_incomplete),
+                Ok(outcome) => (outcome.metrics, outcome.capture_incomplete),
                 // The hook already closed while the ledger still reads Held:
                 // an internal inconsistency between the registry and the
                 // ledger — answered fail-closed, never papered over.
-                Ok(Err(e)) => {
+                Err(e) => {
                     return error_response(
                         ApiError::FailClosed,
                         &format!("close machinery refused on a held lease: {e:#}; failing closed"),
-                    );
-                }
-                Err(_) => {
-                    return error_response(
-                        ApiError::FailClosed,
-                        "close machinery panicked; failing closed",
                     );
                 }
             }
