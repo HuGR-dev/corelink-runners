@@ -78,9 +78,10 @@ The fabricd container reads secrets at boot. Updating a secret alone does not
 reload the running container. The current harness rotates the fixed secret
 `FABRIC_CRED_TICKET_SECRET`. Set `AU18_OLD_SECRET_FILE` and
 `AU18_NEW_SECRET_FILE` in the private operator shell from the owner inputs.
-The files must be regular,
-non-symlink files with mode `0600`, owned by the operator, and readable only by
-that operator. Check them before the clock starts:
+The existing old-secret file must be regular, non-empty, non-symlink, mode
+`0600`, owned by the operator, and readable only by that operator. The new
+secret path is a destination: it must be absent and must not be a symlink
+before the run. Check both conditions before the clock starts:
 
 ```sh
 check_secret_file() {
@@ -109,8 +110,11 @@ check_secret_file() {
     return 1
   fi
 }
-check_secret_file "$AU18_NEW_SECRET_FILE" || exit 1
 check_secret_file "$AU18_OLD_SECRET_FILE" || exit 1
+if test -e "$AU18_NEW_SECRET_FILE" || test -L "$AU18_NEW_SECRET_FILE"; then
+  echo "new secret destination must be absent and not a symlink: $AU18_NEW_SECRET_FILE" >&2
+  exit 1
+fi
 ```
 
 Disable shell tracing for the credential operation and pass the file on
