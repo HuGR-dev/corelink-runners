@@ -88,7 +88,7 @@ assert_empty_fleet preflight
 preflight_control_bindings "$SPAWN_CONFIG";preflight_control_bindings "$FABRICD_CONFIG"
 active_version(){ printf '%s' "$1"|jq -er 'sort_by(.created_on//"")|last|.versions[0].version_id'; }
 sd="$(run_wrangle "$SPAWN_CONFIG" deployments list --name corelink-spawn-worker --json)";fd="$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)";sv="$(active_version "$sd")";fv="$(active_version "$fd")";[ "$sv" = "$SPAWN_VERSION" ]||die 'spawn version mismatch';[ "$fv" = "$FABRICD_VERSION" ]||die 'fabricd version mismatch';if [ "$STABILITY_SECS" -gt 0 ];then sleep "$STABILITY_SECS";fi;sv2="$(active_version "$(run_wrangle "$SPAWN_CONFIG" deployments list --name corelink-spawn-worker --json)")";fv2="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";[ "$sv" = "$sv2" ]&&[ "$fv" = "$fv2" ]||die 'provider deployment changed during stability window';record "provider_stable_seconds=$STABILITY_SECS"
-si="$(run_wrangle "$SPAWN_CONFIG" containers info "$SPAWN_APP")";fi="$(run_wrangle "$FABRICD_CONFIG" containers info "$FABRICD_APP")";printf '%s' "$si"|grep -Fq "$CANARY_IMAGE"||die 'provider spawn image mismatch';fimage="$(grep -Eo 'registry[^" ]+@sha256:[a-f0-9]{64}' "$FABRICD_CONFIG"|tail -1)";[ -n "$fimage" ]||die 'fabricd config image missing';printf '%s' "$fi"|jq -e --arg n corelink-fabricd-fabricdcontainer '.name==$n' >/dev/null||die 'provider fabricd application identity mismatch';printf '%s' "$fi"|jq -e --arg d "${fimage##*@}" '[..|strings|scan("sha256:[0-9a-f]{64}")]|unique==[$d]' >/dev/null||die 'provider fabricd image mismatch';record "baseline=commit:$COMMIT spawn_config:$(sha "$SPAWN_CONFIG") fabricd_config:$(sha "$FABRICD_CONFIG") spawn_version:$SPAWN_VERSION fabricd_version:$FABRICD_VERSION fabricd_app:$FABRICD_APP"
+fimage="$(grep -Eo 'registry[^" ]+@sha256:[a-f0-9]{64}' "$FABRICD_CONFIG"|tail -1)";[ -n "$fimage" ]||die 'fabricd config image missing';si="$(run_wrangle "$SPAWN_CONFIG" containers info "$SPAWN_APP")";fi="$(run_wrangle "$FABRICD_CONFIG" containers info "$FABRICD_APP")";printf '%s' "$si"|grep -Fq "$CANARY_IMAGE"||die 'provider spawn image mismatch';printf '%s' "$fi"|jq -e --arg n corelink-fabricd-fabricdcontainer '.name==$n' >/dev/null||die 'provider fabricd application identity mismatch';printf '%s' "$fi"|jq -e --arg d "${fimage##*@}" '[..|strings|scan("sha256:[0-9a-f]{64}")]|unique==[$d]' >/dev/null||die 'provider fabricd image mismatch';record "baseline=commit:$COMMIT spawn_config:$(sha "$SPAWN_CONFIG") fabricd_config:$(sha "$FABRICD_CONFIG") spawn_version:$SPAWN_VERSION fabricd_version:$FABRICD_VERSION fabricd_app:$FABRICD_APP"
 keys_before="$($CURL_BIN --fail --silent --show-error "$FABRICD_URL/v1/attestation/key")"||die 'pre-rotation attestation key read';key_id_before="$(printf '%s' "$keys_before"|jq -er 'if (.keys|type=="array" and length==1 and .[0].expires_ms==null and (.[0].key_id|type=="string" and length>0)) then .keys[0].key_id else error("invalid pre-rotation key shape") end')"||die 'invalid pre-rotation attestation key shape'
 REFREEZE_REQUIRED=1
 run_wrangle "$SPAWN_CONFIG" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1>/dev/null;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate>/dev/null;record 'freeze=spawn_then_fabricd'
@@ -198,17 +198,38 @@ fabricd_instance_state(){
       elif (.result|type) == "array" then .result
       else error("instances response has no instance array") end;
     def state: (.state? // .status?.state? // "") | tostring | ascii_downcase;
-    def image: (.digest? // .image? // .configuration?.image? // "") | tostring;
+    def image_fields:
+      if type != "object" then [{name: "instance", value: .}]
+      else [
+        (if has("digest") then {name: "digest", value: .digest} else empty end),
+        (if has("image") then {name: "image", value: .image} else empty end),
+        (if has("configuration") then
+          if (.configuration|type) == "object" then
+            (if .configuration|has("image") then {name: "configuration.image", value: .configuration.image} else empty end)
+          else {name: "configuration", value: .configuration}
+          end
+        else empty end)
+      ] end;
+    def image_matches($field):
+      if ($field.value|type) != "string" then false
+      elif ($field.value|length) == 0 then false
+      elif $field.name == "digest" then $field.value == $d
+      elif $field.name == "image" or $field.name == "configuration.image" then
+        ($field.value == $d or ($field.value|endswith("@" + $d)))
+      else false end;
     (entries) as $instances |
       if (($instances|map(select(state == "failed"))|length) > 0) then "failed"
       elif (($instances|map(select(state == "running"))|length) != 1) then "not-ready"
-      elif (($instances|map(select(state == "running"))|.[0]|image) == $d
-            or (($instances|map(select(state == "running"))|.[0]|image)|endswith($d))) then "ready"
-      else "wrong-digest" end
+      else
+        ($instances|map(select(state == "running"))|.[0]|image_fields) as $fields |
+        if ($fields|length) == 0 then "ready:config-info"
+        elif ($fields|all(.[]; image_matches(.))) then "ready:instances"
+        else "wrong-digest" end
+      end
   '
 }
 assert_fabricd_converged(){
-  local expected_digest="${fimage##*@}" instances='' state='' started now poll=0 instances_rc=1
+  local expected_digest="${fimage##*@}" instances='' state='' source='' started now poll=0 instances_rc=1
   started="$(date +%s)"
   while :; do
     poll=$((poll + 1));state=''
@@ -217,10 +238,13 @@ assert_fabricd_converged(){
     instances_rc=$?
     if [ "$instances_rc" -eq 0 ]; then state="$(fabricd_instance_state "$instances" "$expected_digest" 2>/dev/null)"; fi
     set -e
+    source='';case "$state" in
+      ready:*) source="${state#ready:}";state=ready;;
+    esac
     case "$state" in
       ready)
         if fabricd_health_ok; then
-          record "fabricd_convergence=ready poll:$poll app:$FABRICD_APP running:1 failed:0 digest:$expected_digest health:200_ok"
+          record "fabricd_convergence=ready poll:$poll app:$FABRICD_APP running:1 failed:0 digest:$expected_digest source:$source health:200_ok"
           return 0
         fi
         ;;
