@@ -12,9 +12,19 @@ case "$cmd" in
     if [ "$scenario" = drift ] && [ "$n" -ge 3 ]; then version='version-drift'; fi
     printf '[{"created_on":"2026-09-08T00:00:00Z","versions":[{"version_id":"%s"}]}]\n' "$version";;
   'containers info '* )
+    printf '%s\n' 'unknown option: --json (Wrangler 4.105.0 containers info is not JSON-capable)' >&2
+    exit 64;;
+  'containers list --json')
     actual="$digest"
     [ "$scenario" = wrong-digest ] && actual='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    printf '{"name":"%s","image":"registry.example/corelink@%s"}\n' "$app_name" "$actual";;
+    case "$scenario" in
+      missing-container)
+        printf '{"containers":[{"id":"other-app","name":"other","image":"registry.example/other@%s"}]}\n' "$actual";;
+      duplicate-container)
+        printf '{"containers":[{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"},{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$app_name" "$actual" "$app_name" "$actual";;
+      *)
+        printf '{"containers":[{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$app_name" "$actual";;
+    esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
   'secret put FABRIC_OBSERVABILITY_KEY')
