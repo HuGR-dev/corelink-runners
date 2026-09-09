@@ -83,6 +83,18 @@ if rg -n '\bnpx\b' "$harness" >/dev/null; then
   exit 1
 fi
 
+# Reproduce the provider CLI failure that motivated this path: pinned
+# Wrangler 4.105.0 rejects the legacy machine-readable `info` flag.
+unsupported_state="$tmp/unsupported-info"
+set +e
+MOCK_STATE="$unsupported_state" MOCK_SCENARIO=unsupported-info MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good \
+  "$wrangler" containers info app-old --json >/dev/null 2>"$tmp/unsupported-info.stderr"
+unsupported_rc=$?
+set -e
+test "$unsupported_rc" = 64
+rg -q 'unknown option: --json' "$tmp/unsupported-info.stderr"
+printf '%s\n' 'unsupported-info-flag=refused'
+
 run_case() {
   local name="$1" scenario="$2" expected="$3" stability="${4:-0}"; make_fixture "$name"
   export MOCK_STATE="$state" MOCK_SCENARIO="$scenario" MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION='version-good' MOCK_TENANT='tenant-test'
@@ -124,6 +136,8 @@ run_case verify-fail verify-fail fail
 test -f "$tmp/state-verify-fail.secret-put"
 run_case failed-refreeze fail-refreeze fail
 test -f "$tmp/state-failed-refreeze.secret-put"
+run_case missing-container missing-container fail
+run_case duplicate-container duplicate-container fail
 
 make_fixture lock
 mkdir "$oob/.fabricd-observability-key-bootstrap.lock"
