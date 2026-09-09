@@ -4,5 +4,5 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' '4.103.0'
   exit 0
 fi
-printf 'dispatch=spawn cwd=%s\n' "$PWD" >> "${DIRECT_DISPATCH_LOG:?}"
+printf 'dispatch=spawn cwd=%s args=%s\n' "$PWD" "$*" >> "${DIRECT_DISPATCH_LOG:?}"
 exec "${DIRECT_MOCK_WRANGLER:?}" "$@"
