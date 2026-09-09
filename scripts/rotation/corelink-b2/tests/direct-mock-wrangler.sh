@@ -25,6 +25,8 @@ fi
 if [ "$1" = secret ] && [ "$2" = list ]; then
   if [ "${DIRECT_MOCK_SECRET_LIST:-present}" = missing ]; then
     printf '%s\n' '[]'
+  elif [ "${DIRECT_MOCK_SECRET_LIST:-present}" = partial ]; then
+    printf '%s\n' '[{"name":"CLOUDFLARE_SPAWN_AUTH_TOKEN","type":"secret_text"}]'
   else
     printf '%s\n' '[{"name":"CLOUDFLARE_SPAWN_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_EXEC_AUTH_TOKEN","type":"secret_text"},{"name":"CLOUDFLARE_LIFECYCLE_AUTH_TOKEN","type":"secret_text"}]'
   fi
