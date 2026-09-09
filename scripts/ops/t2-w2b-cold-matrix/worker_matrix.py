@@ -31,7 +31,6 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 STABLE_VERSION = "1418af47-d71a-488f-89a6-cbb9173402bd"
 SPAWN_NAME = "corelink-spawn-worker"
-FABRIC_APP_ID = "a038ca96-87cb-42e9-81c1-1641eece3b0e"
 CYCLES = 10
 SLEEP_AFTER_SECONDS = 300
 SCHEMA = "corelink/b2-worker-matrix/v1"
@@ -41,7 +40,8 @@ MAX_FLEET_BODY_BYTES = 1 << 20
 VERSION_PROPAGATION_TIMEOUT_SECONDS = 120
 VERSION_STABILITY_INTERVAL_SECONDS = 120
 MAX_COLD_WITNESS_OUTPUT_BYTES = 1 << 20
-EXPECTED_FABRICD_DIGEST = "sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565"
+CURRENT_FABRICD_DIGEST = "sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210"
+SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 DEFAULT_LOCK_FILE = Path.home() / ".corelink" / "locks" / "t2-w2b-worker-matrix.lock"
 
 
@@ -55,6 +55,18 @@ class Stop(RuntimeError):
 
 def fail(message: str) -> None:
     raise Stop(message)
+
+
+def fabricd_digest(value: str | None, *, required: bool = True) -> str | None:
+    """Normalize the one digest pin shared by coordinator and companion."""
+    if value is None or not value.strip():
+        if required:
+            fail("an explicit current Fabricd digest is required")
+        return None
+    normalized = value.strip().lower()
+    if not SHA256_DIGEST_RE.fullmatch(normalized):
+        fail("Fabricd digest must be an immutable sha256 reference")
+    return normalized
 
 
 def now() -> str:
@@ -621,6 +633,7 @@ def _child_contract(
     fabric_origin: str,
     source_repo: str,
     *,
+    expected_digest: str,
     fabric_app_id: str | None = None,
     sleep_after_seconds: int | None = None,
     source_sha_value: str | None = None,
@@ -639,6 +652,8 @@ def _child_contract(
         fail("cold witness failure artifact contract is unsupported")
     if fabric_app_id is not None and contract.get("app_id") != fabric_app_id:
         fail("cold witness failure artifact app binding is unsupported")
+    if contract.get("expected_digest") != expected_digest:
+        fail("cold witness artifact digest binding is unsupported")
     if sleep_after_seconds is not None and contract.get("sleep_after_seconds") != sleep_after_seconds:
         fail("cold witness failure artifact sleep window is unsupported")
     preflight = result.get("preflight")
@@ -660,6 +675,7 @@ def _partial_child_evidence(result: dict[str, Any], request: dict[str, Any], exp
         result,
         fabric_origin,
         source_repo,
+        expected_digest=expected_digest,
         fabric_app_id=request.get("fabric_app_id"),
         sleep_after_seconds=request.get("sleep_after_seconds"),
         source_sha_value=request.get("source_sha"),
@@ -762,9 +778,8 @@ def cold_witness(command: list[str] | None, request: dict[str, Any], source_repo
         fail("cold witness command is required for execution")
     if any(not isinstance(part, str) or not part for part in command):
         fail("cold witness command is malformed")
-    expected_digest = request.get("expected_digest", EXPECTED_FABRICD_DIGEST)
-    if not isinstance(expected_digest, str):
-        fail("cold witness expected digest is malformed")
+    expected_digest = request.get("expected_digest")
+    expected_digest = fabricd_digest(expected_digest)
     fabric_origin = validate_fabric_origin(request.get("fabric_origin"))
     temporary_fd, temporary_name = tempfile.mkstemp(prefix=".b2-cold-witness-", suffix=".json")
     os.close(temporary_fd)
@@ -779,6 +794,7 @@ def cold_witness(command: list[str] | None, request: dict[str, Any], source_repo
         "--worker-id", str(request["expected_version_id"]),
         "--source-repo", source_repo,
         "--fabric-url", fabric_origin,
+        "--digest", expected_digest,
     ]
     if "fabric_app_id" in request:
         child_args.extend(["--app-id", str(request["fabric_app_id"])])
@@ -830,6 +846,7 @@ def cold_witness(command: list[str] | None, request: dict[str, Any], source_repo
         result,
         fabric_origin,
         source_repo,
+        expected_digest=expected_digest,
         fabric_app_id=request.get("fabric_app_id"),
         sleep_after_seconds=request.get("sleep_after_seconds"),
         source_sha_value=request.get("source_sha"),
@@ -952,6 +969,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fleet-key-file", type=Path)
     parser.add_argument("--source-sha", help="required immutable git SHA for the candidate source")
     parser.add_argument("--fabric-app-id", default=os.environ.get("FABRIC_APP_ID"), help="required current fabricd application ID")
+    parser.add_argument(
+        "--fabricd-digest",
+        "--expected-fabricd-digest",
+        dest="fabricd_digest",
+        default=os.environ.get("EXPECTED_FABRICD_DIGEST"),
+        help="immutable Fabricd image digest shared with the companion",
+    )
     parser.add_argument("--lock-file", type=Path, default=Path(os.environ.get("B2_WORKER_MATRIX_LOCK_FILE", str(DEFAULT_LOCK_FILE))))
     parser.add_argument("--matrix-run-id", help="stable non-secret ID used to join companion evidence")
     parser.add_argument("--source-repo", required=False, help="checkout passed to the companion sleep/wake harness")
@@ -970,6 +994,9 @@ def main(argv: list[str] | None = None) -> int:
         help="acknowledge the bounded live matrix",
     )
     args = parser.parse_args(argv)
+    if args.execute and not args.fabricd_digest:
+        fail("live mode requires an explicit --fabricd-digest (or EXPECTED_FABRICD_DIGEST)")
+    expected_fabricd_digest = fabricd_digest(args.fabricd_digest or CURRENT_FABRICD_DIGEST)
     matrix_run_id = args.matrix_run_id or ("b2-worker-" + uuid.uuid4().hex)
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", matrix_run_id):
         fail("matrix run ID is malformed")
@@ -988,6 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
             "sleep_after_seconds": SLEEP_AFTER_SECONDS,
             "stability_interval_seconds": VERSION_STABILITY_INTERVAL_SECONDS,
             "fabric_app_id": args.fabric_app_id,
+            "expected_fabricd_digest": expected_fabricd_digest,
             "rollback_target_version_id": STABLE_VERSION,
             "mutating_operations": ["spawn_worker_deploy", "spawn_worker_rollback"],
             "raw_logs_retained": False,
@@ -1059,7 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
         # ten independent cold witnesses.
         candidate_phase = cold_witness(
             args.cold_witness_command,
-            {"matrix_run_id": matrix_run_id, "phase": "candidate", "expected_version_id": candidate_id, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
+            {"matrix_run_id": matrix_run_id, "phase": "candidate", "expected_version_id": candidate_id, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "expected_digest": expected_fabricd_digest, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
             args.source_repo,
         )
         for attempt in candidate_phase["attempts"]:
@@ -1077,7 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
         # performs ten distinct cold witnesses.
         rollback_phase = cold_witness(
             args.cold_witness_command,
-            {"matrix_run_id": matrix_run_id, "phase": "rollback", "expected_version_id": STABLE_VERSION, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
+            {"matrix_run_id": matrix_run_id, "phase": "rollback", "expected_version_id": STABLE_VERSION, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "expected_digest": expected_fabricd_digest, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
             args.source_repo,
         )
         for attempt in rollback_phase["attempts"]:
@@ -1180,6 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
             "health_method": "GET",
             "fabric_origin": args.fabric_origin,
             "fabric_app_id": args.fabric_app_id,
+            "expected_fabricd_digest": expected_fabricd_digest,
             "sleep_after_seconds": SLEEP_AFTER_SECONDS,
             "health_path": "/health",
             "wake_route": "/health",

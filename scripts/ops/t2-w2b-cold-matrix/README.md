@@ -35,7 +35,8 @@ python3 scripts/ops/t2-w2b-cold-matrix/worker_matrix.py \
   --spawn-dir deploy/cloudflare \
   --fleet-url https://spawn.example/internal/v1/fleet/busy \
   --fabric-origin https://fabric.example \
-  --fabric-app-id a038ca96-87cb-42e9-81c1-1641eece3b0e \
+  --fabric-app-id <recaptured-current-fabricd-app-id> \
+  --fabricd-digest sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210 \
   --source-repo /path/to/clean/corelink-runners \
   --source-sha <exact-clean-checkout-HEAD> \
   --cold-witness-command python3 scripts/ops/t2-w2b-cold-matrix/harness.py
@@ -57,7 +58,8 @@ python3 scripts/ops/t2-w2b-cold-matrix/harness.py --output fabricd-plan.json
 For a read-only capability preflight or execution, provide the Cloudflare API
 credentials through the documented environment variables, the exact current
 Fabricd app ID, the clean source checkout and SHA, and the canonical HTTPS
-origin. Live execution requires `--execute --ack-execute` (aliases `--ack`
+origin. Live execution requires the explicit current `--app-id` and
+`--digest` pins plus `--execute --ack-execute` (aliases `--ack`
 and `--ack-destructive` are accepted). The companion accepts the recovery
 credential names `CLOUDFLARE_CONTAINERS_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID`, with the legacy names retained for compatibility;
