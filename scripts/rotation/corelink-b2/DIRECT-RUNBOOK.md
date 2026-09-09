@@ -11,6 +11,15 @@ both current configs, current provider deployment-version pins and expected
 image digests. It reads the fleet key and the `corelink-canary-tenant-pat` only
 from mode-0600 files under `~/.corelink/rotation-b2-20260908`.
 
+Generated rotation values are written as nonempty, trim-normalized,
+single-line files before any `secret put`; this prevents the trailing-newline
+form accepted by `mksecret` from disagreeing with the provider's exact
+`controlAuthed` comparison. After the Fabricd secret writes, the run deletes
+only the pinned application UUID, proves that `info` fails and `list` no longer
+contains that UUID, then recreates the pinned digest with strict immediate
+rollout. This is required because a same-digest deploy can retain the old
+container and therefore retain its old `key_id`.
+
 The procedure has a fixed sequence: prove the exact baseline and empty fleet;
 freeze Spawn then Fabricd using existing `FABRIC_ADMISSION_PAUSED` and
 `--keep-vars`; generate mode-0600 independent primary and recovery pairs;
