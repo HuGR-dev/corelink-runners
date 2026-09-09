@@ -4,13 +4,13 @@ set -euo pipefail
 umask 077
 readonly ACK1='ACK-DIRECT-CORELINK-ROTATION-LIVE-20260908' ACK2='ACK-FORWARD-ONLY-RECOVERY-PAIR-LIVE-20260908'
 PACKAGE_ROOT="$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)"; readonly PACKAGE_ROOT
-MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 REFREEZE_TIMEOUT_SECS=30 FABRICD_CONVERGENCE_TIMEOUT_SECS=300 FABRICD_CONVERGENCE_INTERVAL_SECS=5 FABRICD_COMMAND_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
+MODE=plan ATTEMPT=primary ROOT='' COMMIT='' SPAWN_VERSION='' FABRICD_VERSION='' SPAWN_APP='' FABRICD_APP='' CANARY_IMAGE='' OLD_TOKEN_FILE='' LIVE_ACK='' RECOVERY_ACK='' MOCK_WRANGLER='' CURL_BIN=curl VERIFY_BIN='' STABILITY_SECS=120 DELETE_TIMEOUT_SECS=30 REFREEZE_TIMEOUT_SECS=60 FABRICD_CONVERGENCE_TIMEOUT_SECS=300 FABRICD_CONVERGENCE_INTERVAL_SECS=5 FABRICD_COMMAND_TIMEOUT_SECS=30 BOOTSTRAP_SPLIT_AUTH=0
 readonly SPAWN_WRANGLER_VERSION='4.103.0' FABRICD_WRANGLER_VERSION='4.105.0'
 OOB_DIR="$HOME/.corelink/rotation-b2-20260908"; EVIDENCE_DIR=''; EVIDENCE_DIR_EXPLICIT=0; FLEET_KEY_FILE="$OOB_DIR/fleet-busy-read-key"; CANARY_PAT_FILE="$OOB_DIR/corelink-canary-tenant-pat"
 SPAWN_URL='https://corelink-spawn-worker.gmhelmold.workers.dev'; FABRICD_URL='https://corelink-fabricd.gmhelmold.workers.dev'
 die(){ local reason="$*" safe_reason;safe_reason="$(printf '%s' "$reason"|tr '\r\n' ' '|LC_ALL=C tr -c 'A-Za-z0-9._:/= -' '_')";if [ -n "${EVIDENCE_DIR:-}" ]&&[ -f "${EVIDENCE_DIR}/events.log" ]&&[ ! -L "${EVIDENCE_DIR}/events.log" ];then printf 'refusal=%s\n' "$safe_reason">>"$EVIDENCE_DIR/events.log"||true;fi;printf 'REFUSED: %s\n' "$reason" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do case "$1" in
---mode) MODE="${2:?}";shift 2;;--attempt) ATTEMPT="${2:?}";shift 2;;--live-ack) LIVE_ACK="${2:?}";shift 2;;--recovery-ack) RECOVERY_ACK="${2:?}";shift 2;;--integration-root) ROOT="${2:?}";shift 2;;--expected-commit) COMMIT="${2:?}";shift 2;;--spawn-version) SPAWN_VERSION="${2:?}";shift 2;;--fabricd-version) FABRICD_VERSION="${2:?}";shift 2;;--spawn-app-id) SPAWN_APP="${2:?}";shift 2;;--fabricd-app-id) FABRICD_APP="${2:?}";shift 2;;--canary-image) CANARY_IMAGE="${2:?}";shift 2;;--oob-dir) OOB_DIR="${2:?}";shift 2;;--evidence-dir) EVIDENCE_DIR="${2:?}";EVIDENCE_DIR_EXPLICIT=1;shift 2;;--fleet-key-file) FLEET_KEY_FILE="${2:?}";shift 2;;--canary-pat-file) CANARY_PAT_FILE="${2:?}";shift 2;;--old-token-file) OLD_TOKEN_FILE="${2:?}";shift 2;;--mock-wrangler) MOCK_WRANGLER="${2:?}";shift 2;;--curl-bin) CURL_BIN="${2:?}";shift 2;;--verify-bin) VERIFY_BIN="${2:?}";shift 2;;--stability-secs) STABILITY_SECS="${2:?}";shift 2;;--delete-timeout-seconds) DELETE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-timeout-seconds) FABRICD_CONVERGENCE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-interval-seconds) FABRICD_CONVERGENCE_INTERVAL_SECS="${2:?}";shift 2;;--fabricd-command-timeout-seconds) FABRICD_COMMAND_TIMEOUT_SECS="${2:?}";shift 2;;--bootstrap-split-auth) BOOTSTRAP_SPLIT_AUTH=1;shift;;*) die "unknown argument $1";;esac;done
+--mode) MODE="${2:?}";shift 2;;--attempt) ATTEMPT="${2:?}";shift 2;;--live-ack) LIVE_ACK="${2:?}";shift 2;;--recovery-ack) RECOVERY_ACK="${2:?}";shift 2;;--integration-root) ROOT="${2:?}";shift 2;;--expected-commit) COMMIT="${2:?}";shift 2;;--spawn-version) SPAWN_VERSION="${2:?}";shift 2;;--fabricd-version) FABRICD_VERSION="${2:?}";shift 2;;--spawn-app-id) SPAWN_APP="${2:?}";shift 2;;--fabricd-app-id) FABRICD_APP="${2:?}";shift 2;;--canary-image) CANARY_IMAGE="${2:?}";shift 2;;--oob-dir) OOB_DIR="${2:?}";shift 2;;--evidence-dir) EVIDENCE_DIR="${2:?}";EVIDENCE_DIR_EXPLICIT=1;shift 2;;--fleet-key-file) FLEET_KEY_FILE="${2:?}";shift 2;;--canary-pat-file) CANARY_PAT_FILE="${2:?}";shift 2;;--old-token-file) OLD_TOKEN_FILE="${2:?}";shift 2;;--mock-wrangler) MOCK_WRANGLER="${2:?}";shift 2;;--curl-bin) CURL_BIN="${2:?}";shift 2;;--verify-bin) VERIFY_BIN="${2:?}";shift 2;;--stability-secs) STABILITY_SECS="${2:?}";shift 2;;--delete-timeout-seconds) DELETE_TIMEOUT_SECS="${2:?}";shift 2;;--refreeze-timeout-seconds) REFREEZE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-timeout-seconds) FABRICD_CONVERGENCE_TIMEOUT_SECS="${2:?}";shift 2;;--fabricd-convergence-interval-seconds) FABRICD_CONVERGENCE_INTERVAL_SECS="${2:?}";shift 2;;--fabricd-command-timeout-seconds) FABRICD_COMMAND_TIMEOUT_SECS="${2:?}";shift 2;;--bootstrap-split-auth) BOOTSTRAP_SPLIT_AUTH=1;shift;;*) die "unknown argument $1";;esac;done
 [ "$EVIDENCE_DIR_EXPLICIT" = 1 ] || EVIDENCE_DIR="$OOB_DIR/evidence-direct"
 case "$MODE:$ATTEMPT" in plan:*|mock:primary|mock:recovery|live:primary|live:recovery);;*)die 'invalid mode/attempt';;esac
 if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no command is run, no secret is generated.' 'Live path: lock, baseline, freeze, forward cutover, proof, canary, refreeze.';exit 0;fi
@@ -18,6 +18,7 @@ if [ "$MODE" = plan ]; then printf '%s\n' 'PLAN ONLY: no file is read, no comman
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock requires mock wrangler'
 [ "$STABILITY_SECS" -ge 0 ] 2>/dev/null || die 'stability seconds must be a nonnegative integer'
 [ "$DELETE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'delete timeout seconds must be a positive integer'
+[ "$REFREEZE_TIMEOUT_SECS" -gt 0 ] 2>/dev/null || die 'refreeze timeout seconds must be a positive integer'
 [[ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || die 'fabricd convergence timeout seconds must be a positive integer'
 [ "$FABRICD_CONVERGENCE_TIMEOUT_SECS" -le 300 ] 2>/dev/null || die 'fabricd convergence timeout seconds must be at most 300'
 [[ "$FABRICD_CONVERGENCE_INTERVAL_SECS" =~ ^[1-9][0-9]*$ ]] || die 'fabricd convergence interval seconds must be a positive integer'
@@ -109,14 +110,26 @@ assert_control_secret_bindings(){ local label="$1" config="$2" list;list="$(secr
   local missing;missing="$(printf '%s' "$list"|jq -r '["CLOUDFLARE_SPAWN_AUTH_TOKEN","CLOUDFLARE_EXEC_AUTH_TOKEN","CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"] as $required | ($required - ([ .[] | select((.name|type)=="string" and (.type=="secret_text" or .type=="secret")) | .name ])) | join(",")')";if [ -n "$missing" ];then die "required control bindings missing: $missing";fi;record "${label}_control_bindings=spawn,exec,lifecycle_names_types_only";}
 preflight_control_bindings(){ local config="$1" list missing label;case "$config" in "$SPAWN_CONFIG") label=spawn;;"$FABRICD_CONFIG") label=fabricd;;*) die 'unsupported preflight binding config';;esac;list="$(secret_list "$config")"||die "secret list preflight failed: $label";missing="$(printf '%s' "$list"|jq -r '["CLOUDFLARE_SPAWN_AUTH_TOKEN","CLOUDFLARE_EXEC_AUTH_TOKEN","CLOUDFLARE_LIFECYCLE_AUTH_TOKEN"] as $required | (if type=="array" then ($required - ([ .[] | select((.name|type)=="string" and (.type=="secret_text" or .type=="secret")) | .name ])) else $required end) | join(",")')";if [ -n "$missing" ];then record "preflight_${label}_control_bindings=missing:$missing";[ "$BOOTSTRAP_SPLIT_AUTH" = 1 ]||die "missing control bindings for $label: $missing (rerun with --bootstrap-split-auth)";record "bootstrap_split_auth=explicit";else record "preflight_${label}_control_bindings=present";fi;}
 SPAWN_CONFIG='' FABRICD_CONFIG='' LOCK='' LOCKED=0 REFREEZE_REQUIRED=0 FINAL_FROZEN=0
-refreeze(){
-  local started now remaining
+refreeze_phase(){
+  local phase="$1" config="$2" elapsed rc started
+  shift 2
   started="$(date +%s)"
-  run_wrangle_with_timeout "$FABRICD_CONFIG" "$REFREEZE_TIMEOUT_SECS" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate >/dev/null||return
-  now="$(date +%s)"
-  remaining=$((REFREEZE_TIMEOUT_SECS - (now - started)))
-  [ "$remaining" -gt 0 ]||return 124
-  run_wrangle_with_timeout "$SPAWN_CONFIG" "$remaining" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 >/dev/null||return
+  if CORELINK_REFREEZE_PHASE="$phase" run_wrangle_with_timeout "$config" "$REFREEZE_TIMEOUT_SECS" "$@" >/dev/null;then
+    rc=0
+  else
+    rc=$?
+  fi
+  elapsed=$(( $(date +%s) - started ))
+  if [ "$rc" -eq 0 ];then
+    record "refreeze_phase=$phase result:success rc:0 elapsed:${elapsed}s timeout:${REFREEZE_TIMEOUT_SECS}s"
+  else
+    record "refreeze_phase=$phase result:failure rc:$rc elapsed:${elapsed}s timeout:${REFREEZE_TIMEOUT_SECS}s"
+  fi
+  return "$rc"
+}
+refreeze(){
+  refreeze_phase fabricd "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate||return $?
+  refreeze_phase spawn "$SPAWN_CONFIG" deploy --config "$SPAWN_CONFIG" --keep-vars --var FABRIC_ADMISSION_PAUSED:1||return $?
   record 'freeze=fabricd_then_spawn'
 }
 cleanup(){ local rc=$?;if [ "$LOCKED" = 1 ]&&[ "$REFREEZE_REQUIRED" = 1 ]&&[ "$FINAL_FROZEN" != 1 ];then if refreeze >/dev/null 2>&1;then record 'exit_refreeze=attempted result:success';else record 'exit_refreeze=attempted result:failure';fi;fi;[ -z "$LOCK" ]||rmdir "$LOCK" 2>/dev/null||true;exit "$rc";};trap cleanup EXIT
