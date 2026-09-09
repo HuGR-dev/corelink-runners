@@ -29,7 +29,6 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-STABLE_VERSION = "1418af47-d71a-488f-89a6-cbb9173402bd"
 SPAWN_NAME = "corelink-spawn-worker"
 CYCLES = 10
 SLEEP_AFTER_SECONDS = 300
@@ -42,6 +41,9 @@ VERSION_STABILITY_INTERVAL_SECONDS = 120
 MAX_COLD_WITNESS_OUTPUT_BYTES = 1 << 20
 CURRENT_FABRICD_DIGEST = "sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210"
 SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 DEFAULT_LOCK_FILE = Path.home() / ".corelink" / "locks" / "t2-w2b-worker-matrix.lock"
 
 
@@ -67,6 +69,20 @@ def fabricd_digest(value: str | None, *, required: bool = True) -> str | None:
     if not SHA256_DIGEST_RE.fullmatch(normalized):
         fail("Fabricd digest must be an immutable sha256 reference")
     return normalized
+
+
+def stable_version_id(value: Any) -> str:
+    """Validate the authoritative current stable Worker version identity."""
+    if not isinstance(value, str) or not UUID_RE.fullmatch(value):
+        fail("an explicit current stable Worker version ID must be a canonical UUID")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise Stop("an explicit current stable Worker version ID must be a canonical UUID") from exc
+    canonical = str(parsed)
+    if value != canonical:
+        fail("an explicit current stable Worker version ID must be a canonical UUID")
+    return canonical
 
 
 def now() -> str:
@@ -417,14 +433,14 @@ class Wrangler:
             self.spawn_dir,
         )
 
-    def rollback_stable(self) -> int:
+    def rollback_stable(self, stable_version: str) -> int:
         return self._mutate(
             [
                 "npx",
                 "--no-install",
                 "wrangler",
                 "rollback",
-                STABLE_VERSION,
+                stable_version,
                 "--name",
                 SPAWN_NAME,
                 "--yes",
@@ -545,14 +561,14 @@ def monitor_active_version(
     return observations
 
 
-def guarded_rollback(wrangler: Wrangler, candidate_id: str | None) -> None:
+def guarded_rollback(wrangler: Wrangler, candidate_id: str | None, stable_version: str) -> None:
     """Rollback only when the observed active version is ours or already stable."""
     current, _ = active_version(wrangler.deployments())
-    if current == STABLE_VERSION:
+    if current == stable_version:
         return
     if candidate_id is None or current != candidate_id:
         fail("external Worker writer detected; final rollback refused")
-    if wrangler.rollback_stable() != 0:
+    if wrangler.rollback_stable(stable_version) != 0:
         fail("Worker rollback returned nonzero")
 
 
@@ -967,6 +983,10 @@ def main(argv: list[str] | None = None) -> int:
         help="exact HTTPS origin for the companion read-only /health probe (no path)",
     )
     parser.add_argument("--fleet-key-file", type=Path)
+    parser.add_argument(
+        "--stable-version-id",
+        help="authoritative current stable Worker version UUID used for preflight and rollback",
+    )
     parser.add_argument("--source-sha", help="required immutable git SHA for the candidate source")
     parser.add_argument("--fabric-app-id", default=os.environ.get("FABRIC_APP_ID"), help="required current fabricd application ID")
     parser.add_argument(
@@ -994,6 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
         help="acknowledge the bounded live matrix",
     )
     args = parser.parse_args(argv)
+    stable_version = stable_version_id(args.stable_version_id)
     if args.execute and not args.fabricd_digest:
         fail("live mode requires an explicit --fabricd-digest (or EXPECTED_FABRICD_DIGEST)")
     expected_fabricd_digest = fabricd_digest(args.fabricd_digest or CURRENT_FABRICD_DIGEST)
@@ -1009,14 +1030,14 @@ def main(argv: list[str] | None = None) -> int:
         "kind": "probe-plan",
         "observed_at": now(),
         "cycles": CYCLES,
-        "stable_version": STABLE_VERSION,
+        "stable_version": stable_version,
         "contract": {
             "cycles_required": CYCLES,
             "sleep_after_seconds": SLEEP_AFTER_SECONDS,
             "stability_interval_seconds": VERSION_STABILITY_INTERVAL_SECONDS,
             "fabric_app_id": args.fabric_app_id,
             "expected_fabricd_digest": expected_fabricd_digest,
-            "rollback_target_version_id": STABLE_VERSION,
+            "rollback_target_version_id": stable_version,
             "mutating_operations": ["spawn_worker_deploy", "spawn_worker_rollback"],
             "raw_logs_retained": False,
         },
@@ -1066,16 +1087,16 @@ def main(argv: list[str] | None = None) -> int:
         selected_source_sha = source_sha(args.spawn_dir, args.source_sha)
         companion_source_sha = clean_checkout_sha(Path(args.source_repo), "companion source")
         preflight_checks = wrangler.preflight()
-        prior = worker_witness(wrangler, expected=STABLE_VERSION)
+        prior = worker_witness(wrangler, expected=stable_version)
         candidate_fleet = fleet_idle(args.fleet_url, args.fleet_key_file)
         # Keep the second stability sample immediately adjacent to the
         # candidate mutation. No fleet/API operation is allowed after it.
-        version_monitor = monitor_active_version(wrangler, STABLE_VERSION)
+        version_monitor = monitor_active_version(wrangler, stable_version)
         mutation_started = True
         if wrangler.candidate_deploy() != 0:
             fail("candidate Worker deploy returned nonzero")
         candidate = poll(
-            lambda: worker_witness(wrangler, distinct=STABLE_VERSION),
+            lambda: worker_witness(wrangler, distinct=stable_version),
             VERSION_PROPAGATION_TIMEOUT_SECONDS,
             "candidate Worker witness timed out",
         )
@@ -1094,9 +1115,9 @@ def main(argv: list[str] | None = None) -> int:
             candidate_attempts.append({"cycle": attempt["attempt"], "matrix_run_id": matrix_run_id, "attempt_id": attempt["attempt_id"], "started_at": attempt["started_at"], "source_sha": selected_source_sha, "expected_version_id": candidate_id, "witness": attempt})
 
         rollback_fleet = fleet_idle(args.fleet_url, args.fleet_key_file)
-        guarded_rollback(wrangler, candidate_id)
+        guarded_rollback(wrangler, candidate_id, stable_version)
         rollback = poll(
-            lambda: worker_witness(wrangler, expected=STABLE_VERSION),
+            lambda: worker_witness(wrangler, expected=stable_version),
             VERSION_PROPAGATION_TIMEOUT_SECONDS,
             "stable Worker rollback witness timed out",
         )
@@ -1105,11 +1126,11 @@ def main(argv: list[str] | None = None) -> int:
         # performs ten distinct cold witnesses.
         rollback_phase = cold_witness(
             args.cold_witness_command,
-            {"matrix_run_id": matrix_run_id, "phase": "rollback", "expected_version_id": STABLE_VERSION, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "expected_digest": expected_fabricd_digest, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
+            {"matrix_run_id": matrix_run_id, "phase": "rollback", "expected_version_id": stable_version, "fabric_origin": args.fabric_origin, "fabric_app_id": args.fabric_app_id, "expected_digest": expected_fabricd_digest, "sleep_after_seconds": SLEEP_AFTER_SECONDS, "source_sha": companion_source_sha},
             args.source_repo,
         )
         for attempt in rollback_phase["attempts"]:
-            rollback_attempts.append({"cycle": attempt["attempt"], "matrix_run_id": matrix_run_id, "attempt_id": attempt["attempt_id"], "started_at": attempt["started_at"], "source_sha": selected_source_sha, "expected_version_id": STABLE_VERSION, "witness": attempt})
+            rollback_attempts.append({"cycle": attempt["attempt"], "matrix_run_id": matrix_run_id, "attempt_id": attempt["attempt_id"], "started_at": attempt["started_at"], "source_sha": selected_source_sha, "expected_version_id": stable_version, "witness": attempt})
         if len(rollback_attempts) != len(candidate_attempts):
             fail("candidate and rollback cold witness counts differ")
         # Pair the two ten-attempt phase artifacts by ordinal cycle.
@@ -1123,7 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
                     "started_at": candidate_attempt["started_at"],
                     "observed_at": now(),
                     "source_sha": selected_source_sha,
-                    "rollback_target_version_id": STABLE_VERSION,
+                    "rollback_target_version_id": stable_version,
                     "prior": prior,
                     "fleet": candidate_fleet,
                     "rollback_fleet": rollback_fleet,
@@ -1149,13 +1170,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if not stable_proven:
                     current, _ = active_version(wrangler.deployments())
-                    if current != STABLE_VERSION:
+                    if current != stable_version:
                         if "candidate_id" not in locals() or current != candidate_id:
                             external_writer_detected = True
                             fail("external Worker writer detected; final rollback refused")
-                        guarded_rollback(wrangler, candidate_id)
+                        guarded_rollback(wrangler, candidate_id, stable_version)
                 final = poll(
-                    lambda: worker_witness(wrangler, expected=STABLE_VERSION),
+                    lambda: worker_witness(wrangler, expected=stable_version),
                     VERSION_PROPAGATION_TIMEOUT_SECONDS,
                     "final stable Worker witness timed out",
                 )
@@ -1200,10 +1221,10 @@ def main(argv: list[str] | None = None) -> int:
         "preflight": preflight_checks,
         "source_sha": locals().get("selected_source_sha"),
         "companion_source_sha": locals().get("companion_source_sha"),
-        "stable_version": STABLE_VERSION,
+        "stable_version": stable_version,
         "contract": {
             "cycles_required": CYCLES,
-            "rollback_target_version_id": STABLE_VERSION,
+            "rollback_target_version_id": stable_version,
             "stability_interval_seconds": VERSION_STABILITY_INTERVAL_SECONDS,
             "health_method": "GET",
             "fabric_origin": args.fabric_origin,

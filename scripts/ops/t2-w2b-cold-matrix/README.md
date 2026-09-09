@@ -14,7 +14,8 @@ exactly one `GET /health`, a running singleton with the pinned image digest,
 and a strictly increasing lifecycle update timestamp. The companion sleep
 window is fixed at exactly 300 seconds. The coordinator requires a clean,
 explicit source SHA, the current Fabricd application ID, a complete idle fleet
-snapshot, a local operator lock, and two stable active Worker samples across
+snapshot, a local operator lock, the authoritative current stable Worker
+version ID, and two stable active Worker samples across
 the enforced 120-second pre-mutation stability interval. A Worker external
 writer causes a fail-closed refusal and prevents an unsafe rollback.
 
@@ -35,6 +36,7 @@ python3 scripts/ops/t2-w2b-cold-matrix/worker_matrix.py \
   --spawn-dir deploy/cloudflare \
   --fleet-url https://spawn.example/internal/v1/fleet/busy \
   --fabric-origin https://fabric.example \
+  --stable-version-id <recaptured-current-stable-worker-version-uuid> \
   --fabric-app-id <recaptured-current-fabricd-app-id> \
   --fabricd-digest sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210 \
   --source-repo /path/to/clean/corelink-runners \
@@ -46,6 +48,11 @@ Add `--execute --ack-destructive --fleet-key-file /path/to/0600/fleet.key`
 only for the bounded live matrix. The coordinator runs the documented local
 Worker CI/deploy equivalent once before the candidate mutation and reuses
 those results across the ten cycles; it does not rerun the suite per cycle.
+The stable version ID must be freshly recaptured from the authoritative
+Worker deployment listing for the same run. The coordinator validates its
+canonical UUID form, records it in owner-only evidence, checks it before
+mutation and throughout the stability monitor, and uses that exact ID for the
+rollback. A missing, malformed, stale, or drifting ID fails closed.
 
 ## Fabricd companion
 
