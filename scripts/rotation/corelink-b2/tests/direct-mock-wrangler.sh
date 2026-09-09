@@ -60,6 +60,10 @@ fi
 if [ "$1" = containers ] && [ "$2" = instances ]; then
   n=0; [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || [ ! -f "$DIRECT_MOCK_INSTANCE_COUNTER" ] || n="$(<"$DIRECT_MOCK_INSTANCE_COUNTER")"
   n=$((n + 1)); [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || printf '%s' "$n" > "$DIRECT_MOCK_INSTANCE_COUNTER"
+  if [ -n "${DIRECT_MOCK_INSTANCE_DELAY:-}" ]; then
+    [ -z "${DIRECT_MOCK_INSTANCE_PID_FILE:-}" ] || printf '%s\n' "$$" > "$DIRECT_MOCK_INSTANCE_PID_FILE"
+    sleep "$DIRECT_MOCK_INSTANCE_DELAY"
+  fi
   state=running; digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   case "${DIRECT_MOCK_CONVERGENCE_MODE:-ready}" in
     delayed) [ "$n" -lt "${DIRECT_MOCK_CONVERGENCE_AFTER:-2}" ] && state=starting ;;
