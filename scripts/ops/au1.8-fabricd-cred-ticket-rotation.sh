@@ -94,6 +94,43 @@ provider_stability_pair_ok() {
   [[ -n "$first" && -n "$second" && "$first" == "$second" ]]
 }
 
+# The provider's version inventory is the authority for non-secret Worker
+# bindings.  Keep only the one binding under test on disk; never retain the
+# complete `versions view` response because it may contain unrelated values.
+capture_fabricd_admission_pause() {
+  local label="$1" version_id="$2" out err rc jq_rc
+  out="$TMP_DIR/${label}-fabricd-admission-paused.json"
+  err="$LOG_DIR/$(date -u +%s%N)-${label}-fabricd-admission-paused.stderr"
+  : > "$out"; chmod 600 "$out"
+  : > "$err"; chmod 600 "$err"
+  set +e
+  run_wrangle versions view "$version_id" --name "$WORKER_NAME" --json 2>"$err" |
+    jq -S '[.. | objects | select((.name? | type) == "string" and .name == "FABRIC_ADMISSION_PAUSED") |
+      {name, type:(.type // ""), value:((.text // .value // "") | tostring)}]' >"$out"
+  local -a pipe_status=("${PIPESTATUS[@]}")
+  rc="${pipe_status[0]}"; jq_rc="${pipe_status[1]}"
+  set -e
+  scrub_file "$err"
+  log_event "$label-fabricd-admission-paused rc=$rc jq_rc=$jq_rc"
+  [[ "$rc" == 0 && "$jq_rc" == 0 ]] || return 1
+  printf '%s\n' "$out"
+}
+
+assert_fabricd_admission_paused() {
+  local label="$1" version_id="$2" snapshot
+  snapshot="$(capture_fabricd_admission_pause "$label" "$version_id")" || return 1
+  if ! jq -e '
+    length == 1 and
+    .[0].name == "FABRIC_ADMISSION_PAUSED" and
+    .[0].type == "plain_text" and
+    .[0].value == "1"
+  ' "$snapshot" >/dev/null; then
+    log_event "$label-fabricd-admission-paused=RED"
+    return 1
+  fi
+  log_event "$label-fabricd-admission-paused=GREEN"
+}
+
 file_owner_mode_ok() {
   local file="$1" mode owner
   [[ -f "$file" && ! -L "$file" && -r "$file" && -s "$file" ]] || return 1
@@ -322,6 +359,7 @@ provider_snapshot() {
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(jq -er 'first(.. | objects | to_entries[] | select((.key | ascii_downcase | test("version(_id)?$")) and ((.value | type) == "string")) | .value)' "$info")" || return 1
   digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
+  assert_fabricd_admission_paused "$label" "$worker" || return 1
   printf '%s\t%s\t%s\n' "$worker" "$container" "$digest"
 }
 

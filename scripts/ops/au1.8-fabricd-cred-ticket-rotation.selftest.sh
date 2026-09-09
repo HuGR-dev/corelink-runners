@@ -141,6 +141,44 @@ $header_fn" "$mock" "$key"; then
   rm -f -- "$mock" "$key"
 }
 
+admission_pause_case() {
+  local expected="$1" payload="$2" capture_fn assert_fn mock rc
+  capture_fn="$(sed -n '/^capture_fabricd_admission_pause() {/,/^}$/p' "$harness")"
+  assert_fn="$(sed -n '/^assert_fabricd_admission_paused() {/,/^}$/p' "$harness")"
+  mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-admission-mock.XXXXXX")"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
+  chmod 700 "$mock"
+  set +e
+  # shellcheck disable=SC2016
+  env -u label -u version_id bash -u -c '
+    set -Eeuo pipefail
+    capture_fn="$1"
+    assert_fn="$2"
+    mock="$3"
+    payload="$4"
+    eval "$capture_fn"
+    eval "$assert_fn"
+    TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-admission-case.XXXXXX")"
+    LOG_DIR="$TMP_DIR/log"
+    mkdir -p "$LOG_DIR"
+    scrub_file() { :; }
+    log_event() { :; }
+    run_wrangle() { MOCK_BINDINGS_JSON="$payload" "$mock" "$@"; }
+    WORKER_NAME=corelink-fabricd
+    assert_fabricd_admission_paused sample version-a
+    rm -rf -- "$TMP_DIR"
+  ' -- "$capture_fn" "$assert_fn" "$mock" "$payload"
+  rc=$?
+  set -e
+  rm -f -- "$mock"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
 validate
 
 printf 'untracked\n' > "$repo/untracked"
@@ -215,6 +253,14 @@ if [[ "$(rg -c -- '--containers-rollout=immediate' "$harness")" -lt 2 ]]; then
 fi
 if ! unset_local_regression; then
   echo "FAIL: unset local names must not break mocked AU1.8 helper paths" >&2
+  exit 1
+fi
+if ! admission_pause_case pass '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}' ||
+   ! admission_pause_case fail '{"bindings":[]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"},{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"0"}]}' ||
+   ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"secret_text","text":"1"}]}' ; then
+  echo "FAIL: Fabricd admission pause must be exactly one authoritative plain-text binding set to 1" >&2
   exit 1
 fi
 
