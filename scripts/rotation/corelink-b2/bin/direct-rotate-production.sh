@@ -230,6 +230,15 @@ fabricd_health_ok(){
   [ "$health_status" = 200 ]&&[ "$health_body" = ok ]
 }
 assert_fabricd_health(){ fabricd_health_ok||die 'fabricd health transport/TLS or status/schema proof';record 'fabricd_health=200_ok_after_recreate';}
+wake_fabricd(){
+  local status rc
+  if status="$($CURL_BIN --silent --show-error --connect-timeout 10 --max-time 30 --output /dev/null --write-out '%{http_code}' "$FABRICD_URL/v1/health")"; then
+    record "fabricd_health_wake=status:$status"
+  else
+    rc=$?
+    record "fabricd_health_wake=transport_failure rc:$rc"
+  fi
+}
 fabricd_instance_state(){
   local instances="$1" expected_digest="$2"
   printf '%s' "$instances"|jq -er --arg d "$expected_digest" '
@@ -302,7 +311,7 @@ assert_fabricd_converged(){
   done
 }
 pre_recreate_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$pre_recreate_version";record "fabricd_pre_recreate=app:$FABRICD_APP version:$pre_recreate_version digest:${fimage##*@} frozen=1"
-old_fabricd_app="$FABRICD_APP";delete_fabricd_and_confirm_absence;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate>/dev/null;FABRICD_APP="$(resolve_fabricd_app_id)";post_fabricd_info="$(fabricd_info)";assert_fabricd_identity_digest "$post_fabricd_info";post_fabricd_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$post_fabricd_version";assert_fabricd_converged;record "fabricd_recreated=old_app:$old_fabricd_app app:$FABRICD_APP version:$post_fabricd_version digest:${fimage##*@} frozen=1"
+old_fabricd_app="$FABRICD_APP";delete_fabricd_and_confirm_absence;run_wrangle "$FABRICD_CONFIG" deploy --config "$FABRICD_CONFIG" --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate>/dev/null;FABRICD_APP="$(resolve_fabricd_app_id)";post_fabricd_info="$(fabricd_info)";assert_fabricd_identity_digest "$post_fabricd_info";post_fabricd_version="$(active_version "$(run_wrangle "$FABRICD_CONFIG" deployments list --name corelink-fabricd --json)")";assert_fabricd_frozen "$post_fabricd_version";wake_fabricd;assert_fabricd_converged;record "fabricd_recreated=old_app:$old_fabricd_app app:$FABRICD_APP version:$post_fabricd_version digest:${fimage##*@} frozen=1"
 assert_control_secret_bindings post_recreate_fabricd "$FABRICD_CONFIG";assert_control_secret_bindings post_recreate_spawn "$SPAWN_CONFIG"
 keys="$($CURL_BIN --fail --silent --show-error "$FABRICD_URL/v1/attestation/key")";key_id_after="$(printf '%s' "$keys"|jq -er 'if (.keys|type=="array" and length==1 and .[0].expires_ms==null and (.[0].key_id|type=="string" and length>0)) then .keys[0].key_id else error("invalid post-rotation key shape") end')"||die 'not exact one selected key';[ "$key_id_before" != "$key_id_after" ]||die 'attestation key did not change';record "attestation_key=changed_from:${key_id_before}_to:${key_id_after}_single_active"
 probe_control_domains(){
