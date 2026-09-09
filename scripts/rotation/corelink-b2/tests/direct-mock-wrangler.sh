@@ -18,6 +18,9 @@ if [ "$1" = secret ] && [ "$2" = put ]; then
   fi
   rm -f "$secret_file"
   printf '%s\n' 'secret_put_valid_single_line' >> "${DIRECT_MOCK_LOG}"
+  if [ "${DIRECT_MOCK_FAIL:-}" = mutate_after_secret ] && [ "$(grep -c 'secret_put_valid_single_line' "${DIRECT_MOCK_LOG}")" = 1 ]; then
+    printf '%s\n' 'mutated-after-first-put' > "${DIRECT_MOCK_MUTATE_FILE:?}"
+  fi
 fi
 if [ "$1" = containers ] && [ "$2" = list ]; then
   if [ -e "${DIRECT_MOCK_LOG}.fabricd-deleted" ]; then
@@ -36,7 +39,16 @@ if [ "$1" = containers ] && [ "$2" = info ]; then
   printf '%s\n' 'registry.example/spawn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'registry.example/fabric@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fi
 if [ "$1" = containers ] && [ "$2" = delete ]; then
-  : > "${DIRECT_MOCK_LOG}.fabricd-deleted"
+  if [ "${DIRECT_MOCK_DELETE_MODE:-}" = timeout-absent ]; then
+    : > "${DIRECT_MOCK_LOG}.fabricd-deleted"
+    sleep "${DIRECT_MOCK_DELETE_DELAY:-2}"
+  elif [ "${DIRECT_MOCK_DELETE_MODE:-}" = timeout-unconfirmed ]; then
+    sleep "${DIRECT_MOCK_DELETE_DELAY:-2}"
+  elif [ "${DIRECT_MOCK_DELETE_MODE:-}" = unconfirmed ]; then
+    :
+  else
+    : > "${DIRECT_MOCK_LOG}.fabricd-deleted"
+  fi
   printf '%s\n' 'fabricd_delete' >> "${DIRECT_MOCK_LOG}"
 fi
 if [ "$1" = deploy ] && [[ "$*" == *'cloudflare-fabricd'* ]]; then
