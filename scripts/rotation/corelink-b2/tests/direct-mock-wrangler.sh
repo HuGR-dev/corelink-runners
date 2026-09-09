@@ -74,6 +74,7 @@ if [ "$1" = containers ] && [ "$2" = info ]; then
   printf '%s\n' 'registry.example/spawn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'registry.example/fabric@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fi
 if [ "$1" = containers ] && [ "$2" = instances ]; then
+  [ -z "${DIRECT_MOCK_WAKE_FILE:-}" ] || printf '%s\n' 'fabricd_instances' >> "${DIRECT_MOCK_LOG:?}"
   n=0; [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || [ ! -f "$DIRECT_MOCK_INSTANCE_COUNTER" ] || n="$(<"$DIRECT_MOCK_INSTANCE_COUNTER")"
   n=$((n + 1)); [ -z "${DIRECT_MOCK_INSTANCE_COUNTER:-}" ] || printf '%s' "$n" > "$DIRECT_MOCK_INSTANCE_COUNTER"
   if [ -n "${DIRECT_MOCK_INSTANCE_DELAY:-}" ]; then
@@ -81,6 +82,8 @@ if [ "$1" = containers ] && [ "$2" = instances ]; then
     sleep "$DIRECT_MOCK_INSTANCE_DELAY"
   fi
   state=running; digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  [ -z "${DIRECT_MOCK_WAKE_FILE:-}" ] || [ -f "$DIRECT_MOCK_WAKE_FILE" ] || state=stopped
+  [ -z "${DIRECT_MOCK_WAKE_FILE:-}" ] || printf 'fabricd_instance_state=%s\n' "$state" >> "${DIRECT_MOCK_LOG:?}"
   case "${DIRECT_MOCK_CONVERGENCE_MODE:-ready}" in
     delayed) [ "$n" -lt "${DIRECT_MOCK_CONVERGENCE_AFTER:-2}" ] && state=starting ;;
     never) state=starting ;;
