@@ -62,7 +62,32 @@ fi
 if [[ "$url" == *'/v1/status/'* ]]; then
   counter="${DIRECT_MOCK_LOG}.lifecycle-counter";n=0;[ -f "$counter" ]&&n="$(<"$counter")";n=$((n + 1));printf '%s' "$n" >"$counter";[ "$n" -eq 1 ]&&printf 404||printf 401;exit 0
 fi
-if [[ "$url" == *'/v1/leases/'*'/close' ]]; then printf '{"lease_id":"lease_mock_12345678","released":true,"capture_incomplete":false}\n'; exit 0; fi
+close_response(){
+  local capture_incomplete="$1"
+  cat <<EOF
+{"lease_id":"lease_mock_12345678","released":true,"capture_incomplete":$capture_incomplete,"metrics":{"tokens":{"input":12000,"output":3400,"cache_read":50000,"cache_write":8000,"total":73400},"wall_ms":45000,"active_ms":31000,"tool_calls":17,"tool_breakdown":[{"tool":"Edit","count":9},{"tool":"Bash","count":8}],"model_turns":6,"cost_usd_micros":4200000},"check_result":{"memo_key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tree_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","def_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","toolchain_digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","exit":1,"artifacts":[{"path":"target/release/app","digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},{"path":"dist/report.json","digest":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],"stdout_ref":"cas:sha256:1111111111111111111111111111111111111111111111111111111111111111","stderr_ref":"cas:sha256:2222222222222222222222222222222222222222222222222222222222222222","duration_ms":1234,"runner_ref":"runner:corelink-builder-01","produced_at":1700000000000},"attestation":{"tree":"cas:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","def":"cas:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","runner":"runner:corelink-builder-01","model":"anthropic:claude-opus-4-8","principal":["tenant:acme","agent:claude-01"],"sig":"c2lnbmF0dXJlLWJ5dGVzLWJhc2U2NC1wbGFjZWhvbGRlcg=="},"result_binding_sig":"cmVzdWx0LWJpbmRpbmctc2lnLXYxLWJhc2U2NA==","result_binding_sig_v2":"cmVzdWx0LWJpbmRpbmctc2lnLXYyLWJhc2U2NA==","fabric_key_id":"2d16e9ef2102df2a"}
+EOF
+}
+if [[ "$url" == *'/v1/leases/'*'/close' ]]; then
+  case "${DIRECT_MOCK_FAIL:-}" in
+    capture_incomplete) close_response true; printf '%s\n' 'close_response=capture_incomplete' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    malformed_close) printf '{"lease_id":"lease_mock_12345678","released":true}\n'; printf '%s\n' 'close_response=malformed' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    close_ambiguous_held|close_ambiguous_released|close_ambiguous_retry) printf '%s\n' 'close_response=transport_ambiguous' >> "${DIRECT_MOCK_LOG:?}"; exit 7;;
+    *) close_response false; printf '%s\n' 'close_response=canonical' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+  esac
+fi
+if [[ "$url" == *'/v1/leases/lease_mock_12345678' ]]; then
+  counter="${DIRECT_MOCK_LEASE_COUNTER:-${DIRECT_MOCK_LOG}.lease-counter}"
+  n=0; [ ! -f "$counter" ] || n="$(<"$counter")"; n=$((n + 1)); printf '%s' "$n" > "$counter"
+  state=released
+  case "${DIRECT_MOCK_FAIL:-}" in
+    close_ambiguous_held) state=held;;
+    close_ambiguous_retry) [ "$n" -lt 3 ] && state=held;;
+  esac
+  printf '%s\n' "lease_get_state=$state poll:$n" >> "${DIRECT_MOCK_LOG:?}"
+  printf '{"lease_id":"lease_mock_12345678","state":"%s"}\n' "$state"
+  exit 0
+fi
 if [[ "$url" == *'/v1/leases' ]]; then
   [ "${DIRECT_MOCK_FAIL:-}" != canary ] || exit 1
   printf '{"lease":{"lease_id":"lease_mock_12345678"}}\n'; exit 0
