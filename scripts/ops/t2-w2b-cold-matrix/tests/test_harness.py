@@ -279,6 +279,15 @@ class HarnessTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires --ack-execute", result.stderr)
 
+    def test_execute_requires_explicit_digest_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([
+                sys.executable, str(HARNESS_SCRIPT), "--execute", "--ack-execute",
+                "--output", str(Path(directory) / "digest-test.json"),
+            ], capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires an explicit --digest", result.stderr)
+
     def test_cloudflare_container_paths_and_cursor_shape(self):
         provider = ApiFixtureProvider([
             {"success": True, "result": [{"id": "app-1", "name": "corelink-fabricd-fabricdcontainer", "image": EXPECTED_DIGEST}], "result_info": {}},
