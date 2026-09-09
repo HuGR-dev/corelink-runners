@@ -39,10 +39,12 @@ if [[ "$EXECUTE" != 1 || "$ACK" != 1 ]]; then
 fi
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }; }
-for cmd in curl git jq node npx openssl rg sed stat tr mktemp; do require_cmd "$cmd"; done
+for cmd in curl git jq node openssl rg sed stat tr mktemp; do require_cmd "$cmd"; done
 
 REPO_ROOT="${AU18_REPO_ROOT:-$(cd -- "$(dirname -- "$0")/../.." && pwd)}"
+REPO_ROOT="$(cd -- "$REPO_ROOT" && pwd -P)"
 CONFIG="$REPO_ROOT/deploy/cloudflare-fabricd/wrangler.jsonc"
+readonly WRANGLER_EXPECTED_VERSION='4.105.0'
 WORKER_NAME="corelink-fabricd"
 CONTAINER_APP_NAME="corelink-fabricd-fabricdcontainer"
 BASE_URL="${AU18_BASE_URL:-https://corelink-fabricd.gmhelmold.workers.dev}"
@@ -131,6 +133,7 @@ if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
   exit 0
 fi
 
+[[ -f "$CONFIG" && ! -L "$CONFIG" ]] || { echo "missing or symlinked wrangler config" >&2; exit 1; }
 EXPECTED_IMAGE_DIGEST="$(sed -n 's/^[[:space:]]*"image":[[:space:]]*"[^@]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$CONFIG" | head -n 1)"
 CONFIG_INTROSPECT_URL="$(sed -n 's/^[[:space:]]*"CORELINK_INTROSPECT_URL"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1)"
 INTROSPECT_URL="${AU18_INTROSPECT_URL:-$CONFIG_INTROSPECT_URL}"
@@ -138,7 +141,6 @@ INTROSPECT_URL="${AU18_INTROSPECT_URL:-$CONFIG_INTROSPECT_URL}"
 [[ "$INTROSPECT_URL" == https://corelink-api.humangr.com/internal/v1/auth/introspect ]] || {
   echo "refusing: introspect URL must be the configured corelink-api.humangr.com endpoint" >&2; exit 1;
 }
-[[ -f "$CONFIG" && ! -L "$CONFIG" ]] || { echo "missing or symlinked wrangler config" >&2; exit 1; }
 # The temporary tenant binding must not already be tracked in this tip.
 if rg -n '^[[:space:]]*"FABRIC_TEST_MINT_TENANTS"[[:space:]]*:' "$CONFIG" >/dev/null; then
   echo "refusing: tenant test var is already active in tracked config" >&2
@@ -155,7 +157,29 @@ EVENT_LOG="$LOG_DIR/events.log"
 : > "$EVENT_LOG"
 chmod 600 "$EVENT_LOG"
 
-WRANGLER=(npx wrangler --config "$CONFIG")
+WRANGLER_DIR="${CONFIG%/*}"
+WRANGLER_BIN="$WRANGLER_DIR/node_modules/.bin/wrangler"
+[[ -x "$WRANGLER_BIN" ]] || { echo "missing local Wrangler binary: $WRANGLER_BIN" >&2; exit 1; }
+WRANGLER_VERSION="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" --version)" || {
+  echo "local Wrangler version probe failed: $WRANGLER_BIN" >&2
+  exit 1
+}
+[[ "$WRANGLER_VERSION" == "$WRANGLER_EXPECTED_VERSION" ]] || {
+  echo "local Wrangler version mismatch: expected $WRANGLER_EXPECTED_VERSION, got $WRANGLER_VERSION" >&2
+  exit 1
+}
+run_wrangle() {
+  local token
+  token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')" || {
+    echo "wrangler OAuth unavailable" >&2
+    return 1
+  }
+  [[ "$token" =~ ^[A-Za-z0-9._~+/=-]{16,}$ ]] || {
+    echo "invalid wrangler OAuth token" >&2
+    return 1
+  }
+  (cd "$WRANGLER_DIR" && CLOUDFLARE_API_TOKEN="$token" "$WRANGLER_BIN" --config "$CONFIG" "$@")
+}
 APP_ID="${AU18_APP_ID:-}"
 HEADER_FILE=""
 INTROSPECT_HEADER_FILE=""
@@ -221,7 +245,7 @@ capture_json() {
 
 resolve_app_id() {
   local out="$TMP_DIR/container-list.json"
-  capture_json containers-list "$out" "${WRANGLER[@]}" containers list --json || return 1
+  capture_json containers-list "$out" run_wrangle containers list --json || return 1
   jq -er --arg app_name "$CONTAINER_APP_NAME" '[.. | objects | select(.name? == $app_name and ((.id? | type) == "string")) | .id] | unique | if length == 1 then .[0] else error("exact fabricd application name is absent or ambiguous") end' "$out"
 }
 
@@ -231,7 +255,7 @@ else
   # An operator-supplied id is only accepted after a read-only identity check;
   # never delete an arbitrary container merely because its id was supplied.
   supplied_info="$TMP_DIR/supplied-container-info.json"
-  capture_json supplied-container-info "$supplied_info" "${WRANGLER[@]}" containers info "$APP_ID" || {
+  capture_json supplied-container-info "$supplied_info" run_wrangle containers info "$APP_ID" || {
     echo "AU18_APP_ID is not readable" >&2; exit 1;
   }
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$supplied_info" >/dev/null || {
@@ -257,7 +281,7 @@ fi
 
 assert_test_key_absent() {
   local out="$TMP_DIR/secret-list.json"
-  capture_json secret-list "$out" "${WRANGLER[@]}" secret list --name "$WORKER_NAME" || return 1
+  capture_json secret-list "$out" run_wrangle secret list --name "$WORKER_NAME" || return 1
   jq -e '[.. | strings] | any(. == "FABRIC_TEST_MINT_KEY") | not' "$out" >/dev/null
 }
 assert_test_key_absent || { echo "FABRIC_TEST_MINT_KEY must be absent before this temporary probe" >&2; exit 1; }
@@ -270,8 +294,8 @@ capture_state() {
   health="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "$HEALTH_URL" 2>"$TMP_DIR/$label-health.err")" || health=000
   scrub_file "$TMP_DIR/$label-health.err"
   [[ "$health" == 200 ]] || { log_event "$label health=$health"; return 1; }
-  capture_json "$label-deployments" "$deploys" "${WRANGLER[@]}" deployments list --name "$WORKER_NAME" --json || return 1
-  capture_json "$label-container-info" "$info" "${WRANGLER[@]}" containers info "$APP_ID" || return 1
+  capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
+  capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || {
     log_event "$label application-name-mismatch"; return 1;
   }
@@ -292,8 +316,8 @@ provider_snapshot() {
   local deploys="$TMP_DIR/$label-deployments.json"
   local info="$TMP_DIR/$label-container.json"
   local worker container digest
-  capture_json "$label-deployments" "$deploys" "${WRANGLER[@]}" deployments list --name "$WORKER_NAME" --json || return 1
-  capture_json "$label-container-info" "$info" "${WRANGLER[@]}" containers info "$APP_ID" || return 1
+  capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
+  capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(jq -er 'first(.. | objects | to_entries[] | select((.key | ascii_downcase | test("version(_id)?$")) and ((.value | type) == "string")) | .value)' "$info")" || return 1
@@ -339,7 +363,7 @@ capture_remote_bindings() {
   err="$LOG_DIR/$(date -u +%s%N)-${label}-versions.stderr"
   : > "$out"; chmod 600 "$out"; : > "$err"; chmod 600 "$err"
   set +e
-  "${WRANGLER[@]}" versions view "$version_id" --name "$worker_name" --json 2>"$err" |
+  run_wrangle versions view "$version_id" --name "$worker_name" --json 2>"$err" |
     jq -S --arg temp "FABRIC_TEST_MINT_TENANTS" '
       [ .. | objects | select((.name? | type) == "string" and (.type? | type) == "string") |
         select(.type | test("^(plain_text|secret_text|json|kv_namespace|durable_object_namespace|service|wasm_module|plain_text_blob)$")) |
@@ -381,8 +405,8 @@ delete_and_confirm() {
   local old_id="$APP_ID" i info_status list_status list="$TMP_DIR/delete-list.json" info="$TMP_DIR/delete-info.json"
   app_is_absent() {
     set +e
-    "${WRANGLER[@]}" containers info "$old_id" >"$info" 2>"$TMP_DIR/delete-info.err"; info_status=$?
-    "${WRANGLER[@]}" containers list --json >"$list" 2>"$TMP_DIR/delete-list.err"; list_status=$?
+    run_wrangle containers info "$old_id" >"$info" 2>"$TMP_DIR/delete-info.err"; info_status=$?
+    run_wrangle containers list --json >"$list" 2>"$TMP_DIR/delete-list.err"; list_status=$?
     set -e
     scrub_file "$TMP_DIR/delete-info.err"; scrub_file "$TMP_DIR/delete-list.err"
     [[ "$info_status" != 0 && "$list_status" == 0 ]] &&
@@ -396,7 +420,7 @@ delete_and_confirm() {
     return 0
   fi
   for i in 1 2; do
-    if ! run_quiet container-delete "${WRANGLER[@]}" containers delete "$old_id"; then
+    if ! run_quiet container-delete run_wrangle containers delete "$old_id"; then
       if app_is_absent; then
         log_event "container-absence-confirmed-after-delete-error attempt=$i"
         return 0
@@ -422,12 +446,12 @@ recreate() {
     # Containers application absent. Immediate rollout recreates the exact
     # configured application from the immutable digest and waits for provider
     # readiness; capture_state below verifies that digest after every rollout.
-    run_quiet deploy-arm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:$TENANT" --containers-rollout=immediate || return 1
+    run_quiet deploy-arm run_wrangle deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:$TENANT" --containers-rollout=immediate || return 1
   else
     # Keep every unknown remote binding and explicitly blank only the temporary
     # tenant allowlist. Strict mode rejects accidental config drift.
     assert_remote_bindings pre-deploy-disarm "$CURRENT_WORKER_VERSION" armed || return 1
-    run_quiet deploy-disarm "${WRANGLER[@]}" deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:" --containers-rollout=immediate || return 1
+    run_quiet deploy-disarm run_wrangle deploy --keep-vars --strict --var "FABRIC_TEST_MINT_TENANTS:" --containers-rollout=immediate || return 1
   fi
   for i in $(seq 1 20); do
     if new_id="$(resolve_app_id 2>/dev/null)"; then APP_ID="$new_id"; return 0; fi
@@ -442,7 +466,7 @@ put_secret() {
   err="$LOG_DIR/$(date -u +%s%N)-secret-put.stderr"
   : > "$err"; chmod 600 "$err"
   set +e
-  "${WRANGLER[@]}" secret put "$name" --name "$WORKER_NAME" < "$file" >/dev/null 2>"$err"
+  run_wrangle secret put "$name" --name "$WORKER_NAME" < "$file" >/dev/null 2>"$err"
   local rc=$?
   set -e
   scrub_file "$err"
@@ -450,7 +474,7 @@ put_secret() {
   return "$rc"
 }
 
-delete_test_key() { run_quiet secret-delete-test-mint-key "${WRANGLER[@]}" secret delete FABRIC_TEST_MINT_KEY --name "$WORKER_NAME"; }
+delete_test_key() { run_quiet secret-delete-test-mint-key run_wrangle secret delete FABRIC_TEST_MINT_KEY --name "$WORKER_NAME"; }
 
 make_header_file() {
   local out="$TMP_DIR/test-mint-header"
@@ -525,7 +549,7 @@ quiescence_gate() {
   # The spawn Worker version is checked from provider state, not inferred from
   # a local config file. Both pause bindings must be remotely set to "1".
   local spawn_version spawn_bindings
-  spawn_version="$(capture_json spawn-deployments "$TMP_DIR/spawn-deployments.json" "${WRANGLER[@]}" deployments list --name corelink-spawn-worker --json >/dev/null; jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/spawn-deployments.json")" || return 1
+  spawn_version="$(capture_json spawn-deployments "$TMP_DIR/spawn-deployments.json" run_wrangle deployments list --name corelink-spawn-worker --json >/dev/null; jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/spawn-deployments.json")" || return 1
   spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || return 1
   jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || return 1
   QUIESCENCE_STATE="green"
