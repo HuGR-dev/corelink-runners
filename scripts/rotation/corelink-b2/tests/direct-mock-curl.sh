@@ -69,11 +69,14 @@ close_response(){
 EOF
 }
 if [[ "$url" == *'/v1/leases/'*'/close' ]]; then
+  close_counter="${DIRECT_MOCK_CLOSE_COUNTER:-${DIRECT_MOCK_LOG}.close-counter}"
+  n=0; [ ! -f "$close_counter" ] || n="$(<"$close_counter")"; n=$((n + 1)); printf '%s' "$n" > "$close_counter"
   case "${DIRECT_MOCK_FAIL:-}" in
-    capture_incomplete) close_response true; printf '%s\n' 'close_response=capture_incomplete' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
-    malformed_close) printf '{"lease_id":"lease_mock_12345678","released":true}\n'; printf '%s\n' 'close_response=malformed' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
-    close_ambiguous_held|close_ambiguous_released|close_ambiguous_retry) printf '%s\n' 'close_response=transport_ambiguous' >> "${DIRECT_MOCK_LOG:?}"; exit 7;;
-    *) close_response false; printf '%s\n' 'close_response=canonical' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    capture_incomplete) close_response true; printf '200\n'; printf '%s\n' 'close_response=capture_incomplete' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    malformed_close) printf '{"lease_id":"lease_mock_12345678","released":true}\n200\n'; printf '%s\n' 'close_response=malformed' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    malformed_missing_check_result) close_response false | jq -c 'del(.check_result)'; printf '200\n'; printf '%s\n' 'close_response=malformed_missing_check_result' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
+    close_ambiguous_held|close_ambiguous_released|close_ambiguous_expired|close_ambiguous_crashed|close_ambiguous_retry) printf '%s\n' 'close_response=transport_ambiguous' >> "${DIRECT_MOCK_LOG:?}"; exit 7;;
+    *) close_response false; printf '200\n'; printf '%s\n' 'close_response=canonical' >> "${DIRECT_MOCK_LOG:?}"; exit 0;;
   esac
 fi
 if [[ "$url" == *'/v1/leases/lease_mock_12345678' ]]; then
@@ -82,14 +85,16 @@ if [[ "$url" == *'/v1/leases/lease_mock_12345678' ]]; then
   state=released
   case "${DIRECT_MOCK_FAIL:-}" in
     close_ambiguous_held) state=held;;
+    close_ambiguous_expired) state=expired;;
+    close_ambiguous_crashed) state=crashed;;
     close_ambiguous_retry) [ "$n" -lt 3 ] && state=held;;
   esac
   printf '%s\n' "lease_get_state=$state poll:$n" >> "${DIRECT_MOCK_LOG:?}"
-  printf '{"lease_id":"lease_mock_12345678","state":"%s"}\n' "$state"
+  printf '{"lease_id":"lease_mock_12345678","state":"%s"}\n200\n' "$state"
   exit 0
 fi
 if [[ "$url" == *'/v1/leases' ]]; then
   [ "${DIRECT_MOCK_FAIL:-}" != canary ] || exit 1
-  printf '{"lease":{"lease_id":"lease_mock_12345678"}}\n'; exit 0
+  printf '{"lease":{"lease_id":"lease_mock_12345678"}}\n200\n'; exit 0
 fi
 exit 1
