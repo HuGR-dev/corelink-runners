@@ -17,7 +17,7 @@ case "$cmd" in
   'containers list --json')
     actual="$digest"
     [ "$scenario" = wrong-digest ] && actual='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-    container_id='app-old'
+    container_id="${MOCK_CURRENT_APP_ID:-app-old}"
     [ -f "$state.deleted" ] && container_id="${MOCK_NEW_APP_ID:-app-new}"
     case "$scenario" in
       missing-container)
@@ -29,9 +29,11 @@ case "$cmd" in
     esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
-  'secret put FABRIC_INTROSPECT_KEY')
+  'secret list --name')
+    printf '[{"name":"FABRIC_INTROSPECT_KEY","version":"legacy-v1"},{"name":"FABRIC_INTROSPECT_AUTH_KEY","version":"auth-v1"}]\n';;
+  'secret put FABRIC_INTROSPECT_AUTH_KEY')
     [ "$scenario" = partial-first ] && { printf '%s\n' 'first secret put failed' >&2; exit 1; }
-    secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/=]+$' || exit 1; : > "$state.secret-put-introspect"; printf '%s\n' 'introspection secret accepted' >&2;;
+    secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/= -]+$' || exit 1; n=0; [ -f "$state.secret-put-introspect-count" ] && n="$(cat "$state.secret-put-introspect-count")"; n=$((n+1)); printf '%s\n' "$n" > "$state.secret-put-introspect-count"; : > "$state.secret-put-introspect"; printf '%s\n' 'introspection secret accepted' >&2;;
   'secret put FABRIC_OBSERVABILITY_KEY')
     [ "$scenario" = partial-second ] && { printf '%s\n' 'second secret put failed' >&2; exit 1; }
     secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/=]+$' || exit 1; : > "$state.secret-put"; : > "$state.secret-put-observability"; printf '%s\n' 'secret accepted' >&2;;

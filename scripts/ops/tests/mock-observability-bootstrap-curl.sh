@@ -39,7 +39,7 @@ case "$url" in
     if [ -n "$header_file" ] && [ -f "$header_file" ]; then
       old_key="$(sed -n 's/^X-Corelink-Internal-Auth: //p' "$header_file")"
     fi
-    if [[ "$scenario" == recover-* ]]; then
+    if [[ "$scenario" == recover-* || "$scenario" == repair-* ]]; then
       [ -f "$MOCK_STATE.introspect-calls" ] && introspect_calls="$(cat "$MOCK_STATE.introspect-calls")"
       introspect_calls=$((introspect_calls + 1))
       printf '%s\n' "$introspect_calls" > "$MOCK_STATE.introspect-calls"
@@ -49,11 +49,12 @@ case "$url" in
       recover-401:introspect-key:1|recover-401:*:1|auth-401:introspect-key:*) status=401; body='{"error":"unauthorized"}' ;;
       recover-5xx:*) status=503; body='{"error":"temporarily unavailable"}' ;;
       recover-transport:*) exit 7 ;;
+      repair-403:*:1) status=403; body='{"error":"forbidden"}' ;;
       *) body="{\"valid\":true,\"tenant_id\":\"${MOCK_TENANT:?}\",\"max_concurrency\":1}" ;;
     esac
     ;;
   */internal/v1/status)
-    if [ "$scenario" = verify-fail ] || [ "$scenario" = fail-refreeze ]; then exit 22; fi
+    if [ "$scenario" = verify-fail ] || [ "$scenario" = fail-refreeze ] || { [ "$scenario" = repair-post-fail ] && [ -f "$MOCK_STATE.deleted" ]; }; then exit 22; fi
     body='{"version":"0.1.0","uptime_ms":42,"ledger_cross_instance_safe":false,"num_shards":1,"counters":{}}'
     ;;
   */health)
