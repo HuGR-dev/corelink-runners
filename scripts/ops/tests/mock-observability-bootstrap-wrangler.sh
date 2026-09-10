@@ -17,13 +17,15 @@ case "$cmd" in
   'containers list --json')
     actual="$digest"
     [ "$scenario" = wrong-digest ] && actual='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    container_id='app-old'
+    [ -f "$state.deleted" ] && container_id="${MOCK_NEW_APP_ID:-app-new}"
     case "$scenario" in
       missing-container)
         printf '{"containers":[{"id":"other-app","name":"other","image":"registry.example/other@%s"}]}\n' "$actual";;
       duplicate-container)
         printf '{"containers":[{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"},{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$app_name" "$actual" "$app_name" "$actual";;
       *)
-        printf '{"containers":[{"id":"app-old","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$app_name" "$actual";;
+        printf '{"containers":[{"id":"%s","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$container_id" "$app_name" "$actual";;
     esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
