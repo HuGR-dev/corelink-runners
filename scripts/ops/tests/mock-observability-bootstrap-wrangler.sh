@@ -29,7 +29,7 @@ case "$cmd" in
     esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
-  'secret list --name')
+  'secret list --format')
     printf '[{"name":"FABRIC_INTROSPECT_KEY","version":"legacy-v1"},{"name":"FABRIC_INTROSPECT_AUTH_KEY","version":"auth-v1"}]\n';;
   'secret put FABRIC_INTROSPECT_AUTH_KEY')
     [ "$scenario" = partial-first ] && { printf '%s\n' 'first secret put failed' >&2; exit 1; }
