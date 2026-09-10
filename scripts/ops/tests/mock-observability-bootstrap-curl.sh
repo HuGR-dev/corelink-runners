@@ -23,7 +23,15 @@ done
 body=''; status=200
 case "$url" in
   *fleet/busy)
-    [ "$scenario" = busy ] && body='{"busy":1,"unverifiable":0}' || body='{"busy":0,"unverifiable":0}'
+    fleet_calls=0
+    if [ -f "$MOCK_STATE.fleet-calls" ]; then fleet_calls="$(cat "$MOCK_STATE.fleet-calls")"; fi
+    fleet_calls=$((fleet_calls + 1))
+    printf '%s\n' "$fleet_calls" > "$MOCK_STATE.fleet-calls"
+    if [ "$scenario" = busy ] || { [ "$scenario" = busy-after-stability ] && [ "$fleet_calls" -ge 2 ]; }; then
+      body='{"busy":1,"unverifiable":0}'
+    else
+      body='{"busy":0,"unverifiable":0}'
+    fi
     ;;
   *auth/introspect)
     old_key=''
