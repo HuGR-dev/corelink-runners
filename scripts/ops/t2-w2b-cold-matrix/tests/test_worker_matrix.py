@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -44,6 +45,27 @@ class WorkerMatrixTests(unittest.TestCase):
 
     def tearDown(self):
         matrix.monitor_active_version = self._real_monitor
+
+    def test_fabricd_pins_match_canonical_deploy_config(self):
+        config_path = Path(SOURCE_REPO) / "deploy/cloudflare-fabricd/wrangler.jsonc"
+        config = config_path.read_text(encoding="utf-8")
+        provenance = re.search(
+            r"image-provenance:\s*digest=(sha256:[0-9a-f]{64})\s+build-sha=([0-9a-f]{40})",
+            config,
+        )
+        image = re.search(r'"image"\s*:\s*"[^"@]+@(?P<digest>sha256:[0-9a-f]{64})"', config)
+        self.assertIsNotNone(provenance)
+        self.assertIsNotNone(image)
+        assert provenance is not None
+        assert image is not None
+        digest, build_sha = provenance.groups()
+        self.assertEqual(digest, image.group("digest"))
+        self.assertEqual(matrix.CURRENT_FABRICD_DIGEST, digest)
+        self.assertEqual(sleepwake.EXPECTED_DIGEST, digest)
+        self.assertEqual(sleepwake.EXPECTED_BUILD_SHA, build_sha)
+        metadata = json.loads((HARNESS_DIR / "provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["digest"], digest)
+        self.assertEqual(metadata["build_sha"], build_sha)
 
     def test_stability_monitor_records_two_ordered_timestamps_and_default_is_120(self):
         class Stable:
