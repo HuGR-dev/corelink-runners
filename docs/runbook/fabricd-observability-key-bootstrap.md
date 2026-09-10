@@ -53,3 +53,30 @@ deployment drift, bad key metadata, wrong digest, status verification failure,
 failed refreeze, and a held local lock. A live command must provide `--execute --ack
 ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908` plus the required
 pins and OOB file paths documented by the script's `--help`/argument names.
+
+## Forward repair for the historical introspection binding
+
+The historical recovery emitted a RED artifact that records
+`FABRIC_INTROSPECT_KEY`. That name was a recovery-script defect: fabricd reads
+`FABRIC_INTROSPECT_AUTH_KEY`. Do not edit, relabel, or reuse that RED artifact
+for ordinary recovery. It is accepted only as legacy authorization for the
+explicit `--repair-introspect-auth` flow, together with its still-armed
+owner-only guard. The repair accepts only the fixed historical source
+`37565619dae31a61f67a095daa0cd15b06386237`, version
+`c38233a3-4ede-4803-8e1c-1a3b5ad4d667`, and app
+`a030ba5d-9a44-409e-b5f1-a2e6cfa50ea7`.
+
+It requires a separate exact acknowledgement and a separately supplied current
+version, application ID, and immutable digest. Before its only forward mutation
+it verifies clean source, the frozen and unique current app, an idle fleet,
+metadata-only presence of both binding names, observability status, health, and
+the expected 401/403 witness for the new key. It puts the new value only to
+`FABRIC_INTROSPECT_AUTH_KEY`, deletes the pinned current application once, and
+recreates it with `--keep-vars --strict --containers-rollout=immediate`.
+
+If a post-recreate proof fails, the owner-only progress/failure artifacts retain
+the historical guard. Use `--resume-introspect-auth-repair` with its separate
+acknowledgement only after a recorded completed recreate; it verifies final
+state and never repeats either secret put or recreate. The guard transitions to
+the repair completion marker only after every final proof passes. Neither mode
+reads a secret value from the provider.
