@@ -37,12 +37,12 @@ from urllib.request import Request, urlopen
 
 APP_NAME = "corelink-fabricd-fabricdcontainer"
 WORKER_NAME = "corelink-spawn-worker"
-EXPECTED_DIGEST = "sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210"
+EXPECTED_DIGEST = "sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5"
 # Exact provenance pin for the digest. Hashes have no ordering; an exact
 # digest-to-build binding is the local equivalent of checking ancestry from
 # the #515 fix.
 FIX_515_SHA = "313185850eeddc66bb4833598e4acc1e97ad128d"
-EXPECTED_BUILD_SHA = "eec8afbf481461586ac3a7087f4fcd8c411542c7"
+EXPECTED_BUILD_SHA = "01560b697c87b92bf1572ceec175d5350034aebb"
 SLEEP_AFTER_SECONDS = 300
 ATTEMPTS = 10
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}$", re.IGNORECASE)
