@@ -6,6 +6,7 @@ here="$(cd -- "$(dirname -- "$0")" && pwd)"
 harness="$here/../fabricd-observability-key-bootstrap.sh"
 wrangler="$here/mock-observability-bootstrap-wrangler.sh"
 curl_mock="$here/mock-observability-bootstrap-curl.sh"
+recovery_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RECOVER-INTROSPECT-LIVE-20260909'
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-bootstrap-test.XXXXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 chmod 700 "$tmp"
@@ -105,6 +106,26 @@ run_case() {
   printf '%s\n' "$name=$expected"
 }
 
+run_recovery_case() {
+  local name="$1" scenario="$2" expected="$3" layout="${4:-valid}"; make_fixture "$name"
+  new_introspect="$oob/new-introspect"
+  case "$layout" in
+    valid|same-as-old|same-as-observability)
+      if [ "$layout" = same-as-old ]; then new_introspect="$oob/introspect"; fi
+      if [ "$layout" = same-as-observability ]; then new_introspect="$oob/fabric-observability-key-bootstrap.b64"; fi
+      printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$new_introspect"; chmod 600 "$new_introspect";;
+    missing) : ;;
+    unsafe) printf '%s\n' new-introspect-key > "$new_introspect"; chmod 640 "$new_introspect";;
+    *) printf 'unknown recovery fixture layout: %s\n' "$layout" >&2; exit 1;;
+  esac
+  export MOCK_STATE="$state" MOCK_SCENARIO="$scenario" MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
+  set +e
+  "$harness" --mode mock --recover-introspect --ack "$recovery_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --introspect-key-file "$oob/introspect" --new-introspect-key-file "$new_introspect" --introspect-pat-file "$oob/pat" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0 >/dev/null 2>"$tmp/$name.stderr"
+  rc=$?; set -e
+  if { [ "$expected" = pass ] && [ "$rc" = 0 ]; } || { [ "$expected" = fail ] && [ "$rc" != 0 ]; }; then :; else printf 'unexpected recovery result for %s (rc=%s)\n' "$name" "$rc" >&2; exit 1; fi
+  printf '%s\n' "$name=$expected"
+}
+
 run_case success success pass
 grep -q '"status": "PASS"' "$tmp/root-success/evidence/result.json"
 test -f "$tmp/oob-success/fabric-observability-key-bootstrap.b64"
@@ -138,6 +159,42 @@ run_case failed-refreeze fail-refreeze fail
 test -f "$tmp/state-failed-refreeze.secret-put"
 run_case missing-container missing-container fail
 run_case duplicate-container duplicate-container fail
+
+run_case auth-403 auth-403 fail
+run_recovery_case recovery-403 recover-403 pass
+grep -q '"operation_mode": "introspect-recovery"' "$tmp/root-recovery-403/evidence/result.json"
+recovery_events="$(jq -r '.logs.events' "$tmp/root-recovery-403/evidence/result.json")"
+rg -q 'old_introspection=auth_rejected_http:403' "$recovery_events"
+rg -q 'introspection_status=valid pat_schema=valid' "$recovery_events"
+test -f "$tmp/state-recovery-403.secret-put-introspect"
+test -f "$tmp/state-recovery-403.secret-put-observability"
+test -f "$tmp/oob-recovery-403/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
+run_recovery_case recovery-401 recover-401 pass
+run_recovery_case recovery-5xx recover-5xx fail
+run_recovery_case recovery-transport recover-transport fail
+run_recovery_case recovery-missing-key recover-403 fail missing
+test ! -f "$tmp/state-recovery-missing-key.secret-put-introspect"
+run_recovery_case recovery-unsafe-key recover-403 fail unsafe
+test ! -f "$tmp/state-recovery-unsafe-key.secret-put-introspect"
+run_recovery_case recovery-first-secret-failure partial-first fail
+test ! -f "$tmp/state-recovery-first-secret-failure.secret-put-introspect"
+run_recovery_case recovery-second-secret-failure partial-second fail
+test -f "$tmp/state-recovery-second-secret-failure.secret-put-introspect"
+test ! -f "$tmp/state-recovery-second-secret-failure.secret-put-observability"
+run_recovery_case recovery-same-old recover-403 fail same-as-old
+run_recovery_case recovery-same-observability recover-403 fail same-as-observability
+
+make_fixture recovery-rerun
+rerun_new="$oob/new-introspect"; printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$rerun_new"; chmod 600 "$rerun_new"
+export MOCK_STATE="$state" MOCK_SCENARIO=recover-403 MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
+recovery_args=(--mode mock --recover-introspect --ack "$recovery_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --introspect-key-file "$oob/introspect" --new-introspect-key-file "$rerun_new" --introspect-pat-file "$oob/pat" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0)
+"$harness" "${recovery_args[@]}" >/dev/null 2>"$tmp/recovery-rerun-first.stderr"
+set +e
+"$harness" "${recovery_args[@]}" >/dev/null 2>"$tmp/recovery-rerun-second.stderr"
+rerun_rc=$?; set -e
+test "$rerun_rc" != 0
+rg -q 'recovery already started; refusing rerun' "$tmp/recovery-rerun-second.stderr"
+printf '%s\n' 'recovery-rerun=fail-closed'
 
 make_fixture lock
 mkdir "$oob/.fabricd-observability-key-bootstrap.lock"

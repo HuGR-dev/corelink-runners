@@ -27,8 +27,12 @@ case "$cmd" in
     esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
+  'secret put FABRIC_INTROSPECT_KEY')
+    [ "$scenario" = partial-first ] && { printf '%s\n' 'first secret put failed' >&2; exit 1; }
+    secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/=]+$' || exit 1; : > "$state.secret-put-introspect"; printf '%s\n' 'introspection secret accepted' >&2;;
   'secret put FABRIC_OBSERVABILITY_KEY')
-    secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/=]+$' || exit 1; : > "$state.secret-put"; printf '%s\n' 'secret accepted' >&2;;
+    [ "$scenario" = partial-second ] && { printf '%s\n' 'second secret put failed' >&2; exit 1; }
+    secret="$(cat)"; printf '%s' "$secret" | grep -Eq '^[A-Za-z0-9+/=]+$' || exit 1; : > "$state.secret-put"; : > "$state.secret-put-observability"; printf '%s\n' 'secret accepted' >&2;;
   'containers delete '* )
     : > "$state.deleted"; printf '%s\n' 'container deleted' >&2;;
   deploy\ *)
