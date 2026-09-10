@@ -122,6 +122,7 @@ async function ghSign(secret: string, body: string): Promise<string> {
 }
 
 const SECRET = "whsec-queued";
+const REPO_NEXT_SECRET = "whsec-repo-next";
 const MINT_KEY = "mint-internal-key";
 
 // A queued workflow_job webhook, SIGNED with `signSecret` (default = the real
@@ -300,12 +301,66 @@ describe("/webhook queued — authentication gate (real HMAC)", () => {
     const env = baseEnv({
       GITHUB_WEBHOOK_SECRET: "app-secret-preserved",
       GITHUB_WEBHOOK_REPO_SECRET: SECRET,
+      GITHUB_WEBHOOK_REPO_SECRET_NEXT: REPO_NEXT_SECRET,
       RUNNER_JOB_PATS: kv as never,
     });
     const ctx = makeCtx();
     const resp = await queuedWebhook(env, ctx, { jobId: "902", repo: "acme/api", signSecret: SECRET });
     expect(resp.status).toBe(202);
     await drain(ctx);
+
+    const nextCtx = makeCtx();
+    const nextResp = await queuedWebhook(env, nextCtx, { jobId: "903", repo: "acme/api", signSecret: REPO_NEXT_SECRET });
+    expect(nextResp.status).toBe(202);
+    await drain(nextCtx);
+  });
+
+  it("rejects an invalid signature while both repository rotation values are present", async () => {
+    const kv = fakeKv();
+    const env = baseEnv({
+      GITHUB_WEBHOOK_SECRET: "app-secret-preserved",
+      GITHUB_WEBHOOK_REPO_SECRET: SECRET,
+      GITHUB_WEBHOOK_REPO_SECRET_NEXT: REPO_NEXT_SECRET,
+      RUNNER_JOB_PATS: kv as never,
+    });
+    const ctx = makeCtx();
+    const resp = await queuedWebhook(env, ctx, { jobId: "904", repo: "acme/api", signSecret: "wrong-repo-secret" });
+    expect(resp.status).toBe(401);
+    await drain(ctx);
+    expect(fetchCalls).toHaveLength(0);
+    expect(containers).toHaveLength(0);
+    expect(kv.store.has("spawn:904")).toBe(false);
+  });
+
+  it("does not arm from NEXT alone and never logs either repository secret", async () => {
+    const logs: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args); });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args); });
+    try {
+      const rotated = baseEnv({
+        GITHUB_WEBHOOK_SECRET: "app-secret-preserved",
+        GITHUB_WEBHOOK_REPO_SECRET: SECRET,
+        GITHUB_WEBHOOK_REPO_SECRET_NEXT: REPO_NEXT_SECRET,
+      });
+      const rotatedCtx = makeCtx();
+      const accepted = await queuedWebhook(rotated, rotatedCtx, { jobId: "906", repo: "acme/api", signSecret: REPO_NEXT_SECRET });
+      expect(accepted.status).toBe(202);
+      await drain(rotatedCtx);
+      const env = baseEnv({
+        GITHUB_WEBHOOK_SECRET: undefined,
+        GITHUB_WEBHOOK_REPO_SECRET: undefined,
+        GITHUB_WEBHOOK_REPO_SECRET_NEXT: REPO_NEXT_SECRET,
+      });
+      const resp = await queuedWebhook(env, makeCtx(), { jobId: "905", repo: "acme/api", signSecret: REPO_NEXT_SECRET });
+      expect(resp.status).toBe(503);
+      const output = JSON.stringify([...logs, ...errors]);
+      expect(output).not.toContain(REPO_NEXT_SECRET);
+      expect(output).not.toContain(SECRET);
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 });
 

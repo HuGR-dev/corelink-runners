@@ -36,6 +36,8 @@ block and are not secrets.
 | `CLOUDFLARE_LIFECYCLE_AUTH_TOKEN` | Inbound status, teardown, egress-cutoff and tenant-suspension control from fabricd. Must byte-match the fabricd lifecycle token. | Missing, mismatched or overlapping domain tokens ⇒ 401. | Rotate matching copies on both Workers; keep distinct from spawn and exec. |
 | `EXEC_SERVER_AUTH_TOKEN` | The check-host exec-server; injected into the check-host container at spawn, presented on `/v1/exec`. | Unset ⇒ a `mode:"check"` spawn **fails closed 503** (O7 hardening). | Only needed once check-host is live-flipped. |
 | `GITHUB_WEBHOOK_SECRET` | HMAC (`X-Hub-Signature-256`) verify on `POST /webhook`. | Absent ⇒ `/webhook` returns `503 "autoscaler not configured"`. | Must equal the GitHub App's configured webhook secret (verify via `/app/hook/config`). |
+| `GITHUB_WEBHOOK_REPO_SECRET` | HMAC for the first-party repository hook's `workflow_job` deliveries. | Absent ⇒ repository-hook deliveries are rejected; the App secret path is unchanged. | Keep configured during rotation; use the temporary `GITHUB_WEBHOOK_REPO_SECRET_NEXT` overlap below. |
+| `GITHUB_WEBHOOK_REPO_SECRET_NEXT` | Temporary HMAC overlap for the repository hook's `workflow_job` deliveries only. | Absent ⇒ only the primary repository secret is accepted. A NEXT-only configuration never arms the repository path. | Delete immediately after promoting NEXT to the primary secret; never use this binding for App installation events. |
 | `GITHUB_MINT_TOKEN` | First-party JIT runner mint (`generate-jitconfig`), `Administration:write` on `HuGR-Labs` repos. | Absent ⇒ `/webhook` 503. | Dogfood path. Customer repos use the App path instead. |
 | `GITHUB_APP_ID` | The App's numeric id — the App-JWT `iss` (`github_app.ts`). | Absent ⇒ App path inert; every mint falls back to `GITHUB_MINT_TOKEN`. | Pairs with the private key below. May be a `var` or a secret. |
 | `GITHUB_APP_PRIVATE_KEY` | Signs the RS256 App JWT → installation-token mint for **customer** repos. **PKCS#8 PEM required.** | Absent ⇒ App path inert (default-safe). A PKCS#1 PEM ⇒ mint **fails closed** (throws at import). | **Hygiene flag — see below.** The root credential for minting on any installed repo. |
@@ -108,6 +110,7 @@ bindings visible without ever recording a value.
 | `GITHUB_TOKEN` | GitHub Actions job token used by repository automation. |
 | `GITHUB_RECONCILER_TOKEN` | Reconciler credential used by the repository automation path. |
 | `GITHUB_WEBHOOK_REPO_SECRET` | Repository webhook HMAC secret used by the reconciler ingress. |
+| `GITHUB_WEBHOOK_REPO_SECRET_NEXT` | Temporary repository webhook HMAC overlap during a forward-only rotation. |
 | `NPM_TOKEN` | Optional npm publish credential in the release workflow. |
 | `PYPI_TOKEN` | Optional PyPI publish credential in the release workflow. |
 | `RESEND_API_KEY` | Canary notification credential; absent makes notifications a no-op. |

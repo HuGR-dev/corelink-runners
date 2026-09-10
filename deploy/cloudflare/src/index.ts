@@ -296,6 +296,11 @@ export interface Env {
   // a first-party repository hook may use this separate secret so rotating or
   // restoring the repo delivery path never changes the App's credential.
   GITHUB_WEBHOOK_REPO_SECRET?: string;
+  // Temporary overlap value for a forward-only repository-hook rotation. This
+  // is accepted only for workflow_job deliveries and only while the primary
+  // repository secret remains configured. The App secret is never rotated by
+  // this overlap.
+  GITHUB_WEBHOOK_REPO_SECRET_NEXT?: string;
   // A GitHub token with repo Administration:write — used to mint the JIT runner
   // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
   // This is the STATIC first-party dogfood credential: it only has rights on
@@ -5525,15 +5530,26 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (request.method === "POST" && pathname === "/webhook") {
       const appSecret = env.GITHUB_WEBHOOK_SECRET;
       const repoSecret = env.GITHUB_WEBHOOK_REPO_SECRET;
+      const repoSecretNext = env.GITHUB_WEBHOOK_REPO_SECRET_NEXT;
+      const githubEvent = request.headers.get("x-github-event");
+      // Repository-hook credentials are intentionally scoped to the one
+      // repository event that drives the autoscaler. NEXT is an overlap value,
+      // never a replacement: without the primary repository secret it cannot
+      // arm the route on its own.
+      const repoEvent = githubEvent === "workflow_job";
       if (!appSecret && !repoSecret) {
         return json({ error: "autoscaler not configured" }, 503);
       }
       const rawBytes = await request.arrayBuffer();
       const sig = request.headers.get("x-hub-signature-256") ?? "";
-      const [appValid, repoValid] = await Promise.all([
+      const [appValid, repoPrimaryValid, repoNextValid] = await Promise.all([
         appSecret ? verifyGithubHmacBytes(appSecret, sig, rawBytes) : Promise.resolve(false),
-        repoSecret ? verifyGithubHmacBytes(repoSecret, sig, rawBytes) : Promise.resolve(false),
+        repoSecret && repoEvent ? verifyGithubHmacBytes(repoSecret, sig, rawBytes) : Promise.resolve(false),
+        repoSecret && repoEvent && repoSecretNext
+          ? verifyGithubHmacBytes(repoSecretNext, sig, rawBytes)
+          : Promise.resolve(false),
       ]);
+      const repoValid = repoEvent && (repoPrimaryValid || repoNextValid);
       if (!appValid && !repoValid) {
         // Metrics are an intentional side effect only of an actually configured
         // bad HMAC (not a malformed/missing signature header). Missing
@@ -5547,7 +5563,6 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       } catch {
         return json({ error: "invalid UTF-8 body" }, 400);
       }
-      const githubEvent = request.headers.get("x-github-event");
       // Installation deletion is handled before workflow parsing.  A repository
       // hook secret cannot authorize this branch: only the GitHub App secret has
       // authority to retire an App installation.

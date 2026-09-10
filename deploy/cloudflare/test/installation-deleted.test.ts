@@ -26,8 +26,9 @@ describe("AU5.10 installation.deleted", () => {
     expect(queued.status).toBe("tombstoned");
   });
   it("rejects repository-secret deletion and preserves idempotency/conflict semantics", async () => {
-    const d = makeDO(); const runtime = env(d, kv(), { GITHUB_WEBHOOK_REPO_SECRET: "repo" }); const body = { action: "deleted", installation: { id: 42 } };
+    const d = makeDO(); const runtime = env(d, kv(), { GITHUB_WEBHOOK_REPO_SECRET: "repo", GITHUB_WEBHOOK_REPO_SECRET_NEXT: "repo-next" }); const body = { action: "deleted", installation: { id: 42 } };
     expect((await worker.fetch(await request("repo", body), runtime, ctx() as never)).status).toBe(401);
+    expect((await worker.fetch(await request("repo-next", body, "next"), runtime, ctx() as never)).status).toBe(401);
     expect((await worker.fetch(await request("secret", body, "same"), runtime, ctx() as never)).status).toBe(202);
     expect((await worker.fetch(await request("secret", body, "same"), runtime, ctx() as never)).status).toBe(202);
     expect((await worker.fetch(await request("secret", { action: "deleted", installation: { id: 43 } }, "same"), runtime, ctx() as never)).status).toBe(409);
