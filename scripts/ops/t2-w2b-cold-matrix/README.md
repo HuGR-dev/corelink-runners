@@ -38,7 +38,7 @@ python3 scripts/ops/t2-w2b-cold-matrix/worker_matrix.py \
   --fabric-origin https://fabric.example \
   --stable-version-id <recaptured-current-stable-worker-version-uuid> \
   --fabric-app-id <recaptured-current-fabricd-app-id> \
-  --fabricd-digest sha256:fda312dd86f1a3777f6f2b408af229dbe698e169b91bf2949357d10587f1f210 \
+  --fabricd-digest sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5 \
   --source-repo /path/to/clean/corelink-runners \
   --source-sha <exact-clean-checkout-HEAD> \
   --cold-witness-command python3 scripts/ops/t2-w2b-cold-matrix/harness.py
