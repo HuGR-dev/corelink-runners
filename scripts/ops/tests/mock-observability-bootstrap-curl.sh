@@ -49,7 +49,7 @@ case "$url" in
       recover-401:introspect-key:1|recover-401:*:1|auth-401:introspect-key:*) status=401; body='{"error":"unauthorized"}' ;;
       recover-5xx:*) status=503; body='{"error":"temporarily unavailable"}' ;;
       recover-transport:*) exit 7 ;;
-      repair-403:*:1) status=403; body='{"error":"forbidden"}' ;;
+      repair-*:*:1) status=403; body='{"error":"forbidden"}' ;;
       *) body="{\"valid\":true,\"tenant_id\":\"${MOCK_TENANT:?}\",\"max_concurrency\":1}" ;;
     esac
     ;;
