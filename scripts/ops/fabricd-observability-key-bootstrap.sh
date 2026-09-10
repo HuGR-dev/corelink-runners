@@ -20,6 +20,9 @@ STABILITY_SECS=120 MOCK_WRANGLER='' CURL_BIN=curl TMP_DIR='' LOCK_DIR=''
 WRANGLER_DIR='' WRANGLER_BIN=''
 MUTATION_STARTED=0 FINAL_FROZEN=0 RECOVERY_GUARD=''
 PROBE_STATUS=''
+RECOVERY_PHASE='preflight'
+RECOVERY_INTROSPECT_SECRET_PUT=false RECOVERY_OBSERVABILITY_SECRET_PUT=false
+REFREEZE_RESULT='not-attempted'
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
 usage() { sed -n '1,12p' "$0"; printf '\nPlan is inert. Execute requires --execute, exact --ack, and all provider pins.\n' >&2; }
@@ -107,9 +110,10 @@ resolve_wrangler
 LOCK_DIR="$OOB_DIR/.fabricd-observability-key-bootstrap.lock"; mkdir "$LOCK_DIR" 2>/dev/null || die 'another bootstrap holds the local lock'; chmod 700 "$LOCK_DIR"; log_event 'lock=acquired'
 
 cleanup() {
-  local rc=$?; trap - EXIT
+  local rc=$? failure_tmp=''; trap - EXIT
   if [ "$MUTATION_STARTED" = 1 ] && [ "$FINAL_FROZEN" != 1 ]; then
-    if run_safe refreeze run_wrangler deploy --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate; then log_event 'refreeze=GREEN admission_paused=1'; else log_event 'refreeze=RED escalation_required'; rc=1; fi
+    REFREEZE_RESULT='red'
+    if run_safe refreeze run_wrangler deploy --keep-vars --strict --var FABRIC_ADMISSION_PAUSED:1 --containers-rollout=immediate; then REFREEZE_RESULT='green'; log_event 'refreeze=GREEN admission_paused=1'; else log_event 'refreeze=RED escalation_required'; rc=1; fi
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
   if [ "$rc" = 0 ]; then
@@ -121,7 +125,24 @@ cleanup() {
     fi
     recovery_mode=normal; [ "$RECOVER_INTROSPECT" = 1 ] && recovery_mode=introspect-recovery
     jq -n --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" --arg app "$APP_ID" --arg key_path "$KEY_FILE" --arg introspect_key_path "$NEW_INTROSPECT_KEY_FILE" --arg events "$stable_events" --arg mode "$recovery_mode" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap",status:"PASS",operation_mode:$mode,source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$app},secret:{name:"FABRIC_OBSERVABILITY_KEY",value:"excluded",local_path:$key_path,mode:"0600"},introspection_recovery:(if $mode == "introspect-recovery" then {name:"FABRIC_INTROSPECT_KEY",value:"excluded",local_path:$introspect_key_path,mode:"0600"} else null end),gates:{quiescence:"GREEN",admission_paused:true,status_endpoint:"200_valid_json",refreeze:"GREEN"},logs:{events:$events,secrets:"excluded",mode:"0600"}}' > "$EVIDENCE_FILE" && chmod 644 "$EVIDENCE_FILE" || rc=1
-  else log_event 'outcome=FAILED'; fi
+  else
+    log_event 'outcome=FAILED'
+    if [ "$RECOVER_INTROSPECT" = 1 ] && [ "$MUTATION_STARTED" = 1 ]; then
+      if failure_tmp="$(mktemp "$OOB_DIR/.fabricd-observability-key-bootstrap-introspect-recovery-failure.XXXXXXXX")"; then
+        chmod 600 "$failure_tmp"
+        jq -n \
+          --arg commit "$COMMIT" \
+          --arg version "$VERSION" \
+          --arg digest "$DIGEST" \
+          --arg app "$APP_ID" \
+          --arg phase "$RECOVERY_PHASE" \
+          --arg refreeze "$REFREEZE_RESULT" \
+          --argjson introspect_put "$RECOVERY_INTROSPECT_SECRET_PUT" \
+          --argjson observability_put "$RECOVERY_OBSERVABILITY_SECRET_PUT" \
+          '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-recovery-failure",status:"RED",operation_mode:"introspect-recovery",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$app},phase:$phase,secrets:{FABRIC_INTROSPECT_KEY_put_completed:$introspect_put,FABRIC_OBSERVABILITY_KEY_put_completed:$observability_put},gates:{refreeze_result:$refreeze},outcome:"RED",rerun_guard:"armed",secret_values:"excluded",secret_hashes:"excluded"}' > "$failure_tmp" && chmod 600 "$failure_tmp" && mv -f -- "$failure_tmp" "$OOB_DIR/fabricd-observability-key-bootstrap-introspect-recovery-failure.json" || rc=1
+      else rc=1; fi
+    fi
+  fi
   find "$TMP_DIR" -type f -exec rm -f -- {} + 2>/dev/null || true; rmdir "$EVIDENCE_DIR" "$TMP_DIR" 2>/dev/null || true; exit "$rc"
 }
 trap cleanup EXIT
@@ -235,19 +256,27 @@ if [ "$STABILITY_SECS" -gt 0 ]; then sleep "$STABILITY_SECS"; fi
 stability_sample_2_at="$(date -u +%FT%H:%M:%SZ)"; stability_2="$(snapshot stability-sample-2)" || die 'provider stability sample 2 failed'; log_event "stability_sample_2_at=$stability_sample_2_at value=$stability_2"
 [ "$stability_1" = "$baseline" ] && [ "$stability_2" = "$baseline" ] && [ "$stability_1" = "$stability_2" ] || die 'provider version or digest changed during stability window'
 log_event "provider_stable=GREEN version=$baseline_version digest=$baseline_digest seconds=$STABILITY_SECS"
+RECOVERY_PHASE='pre-mutation-fleet'
+assert_fleet_quiet pre_mutation || die 'fleet became busy after stability window'
 
 if [ "$RECOVER_INTROSPECT" = 1 ]; then
   printf '%s\n' 'in-progress' > "$RECOVERY_GUARD.tmp"; chmod 600 "$RECOVERY_GUARD.tmp"
   mv -f -- "$RECOVERY_GUARD.tmp" "$RECOVERY_GUARD" || die 'cannot arm recovery rerun guard'
+  RECOVERY_PHASE='mutation-guard-armed'
   log_event 'recovery_phase=mutation_guard_armed'
 fi
 MUTATION_STARTED=1
 if [ "$RECOVER_INTROSPECT" = 1 ]; then
+  RECOVERY_PHASE='introspect-secret-put'
   run_safe introspect-secret-put run_wrangler secret put FABRIC_INTROSPECT_KEY --name "$WORKER_NAME" < "$NEW_INTROSPECT_KEY_FILE" || die 'introspection secret put failed'
+  RECOVERY_INTROSPECT_SECRET_PUT=true
+  RECOVERY_PHASE='observability-secret-put'
   run_safe observability-secret-put run_wrangler secret put FABRIC_OBSERVABILITY_KEY --name "$WORKER_NAME" < "$KEY_FILE" || die 'observability secret put failed'
+  RECOVERY_OBSERVABILITY_SECRET_PUT=true
 else
   run_safe secret-put run_wrangler secret put FABRIC_OBSERVABILITY_KEY --name "$WORKER_NAME" < "$KEY_FILE" || die 'secret put failed'
 fi
+RECOVERY_PHASE='container-recreate'
 run_safe container-delete run_wrangler containers delete "$APP_ID" || die 'fabricd container delete failed'
 run_safe immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'immediate fabricd recreate failed'
 post="$(snapshot post-recreate)" || die 'post-recreate provider capture failed'; post_version="${post%%$'\t'*}"; post_digest="${post#*$'\t'}"; [ "$post_digest" = "$DIGEST" ] || die 'recreated fabricd image digest changed'; assert_frozen "$post_version" || die 'admission freeze was not preserved after recreate'
@@ -255,6 +284,7 @@ status_header="$TMP_DIR/status.header"; printf 'X-Corelink-Internal-Auth: ' > "$
 status_json="$TMP_DIR/status.json"; : > "$status_json"; chmod 600 "$status_json"; "$CURL_BIN" --fail --silent --show-error --connect-timeout 10 --max-time 30 --header "@$status_header" "$STATUS_URL" > "$status_json" 2>"$EVIDENCE_DIR/status.stderr" || die 'status verification failed'; scrub "$EVIDENCE_DIR/status.stderr"
 jq -e '(.version | strings | length > 0) and ((.uptime_ms | tonumber) >= 0) and (.ledger_cross_instance_safe | type == "boolean") and ((.num_shards | tonumber) >= 1)' "$status_json" >/dev/null || die 'status schema verification failed'; log_event "recovery_phase=final_proof observability_status=valid version=$post_version"
 if [ "$RECOVER_INTROSPECT" = 1 ]; then
+  RECOVERY_PHASE='final-proof'
   new_introspect_body="$TMP_DIR/new-introspect.json"
   PROBE_STATUS=''
   probe_introspection introspect-final "$new_introspect_header" "$new_introspect_body" "$TMP_DIR/new-introspect.status" || die 'new introspection transport failed'

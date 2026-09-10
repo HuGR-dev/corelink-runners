@@ -143,6 +143,8 @@ test "$line_key" -lt "$line_one" && test "$line_one" -lt "$line_two" && test "$l
 
 run_case drift drift fail
 test ! -f "$tmp/state-drift.secret-put"
+run_case busy-after-stability busy-after-stability fail
+test ! -f "$tmp/state-busy-after-stability.secret-put"
 
 make_fixture bad-file
 printf '%s\n' provided-key > "$oob/bad-key"; chmod 640 "$oob/bad-key"
@@ -178,9 +180,27 @@ run_recovery_case recovery-unsafe-key recover-403 fail unsafe
 test ! -f "$tmp/state-recovery-unsafe-key.secret-put-introspect"
 run_recovery_case recovery-first-secret-failure partial-first fail
 test ! -f "$tmp/state-recovery-first-secret-failure.secret-put-introspect"
+failure_artifact="$tmp/oob-recovery-first-secret-failure/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+test -f "$failure_artifact"
+test "$(stat -f '%Lp' "$failure_artifact")" = 600
+test "$(jq -r '.status' "$failure_artifact")" = RED
+test "$(jq -r '.phase' "$failure_artifact")" = introspect-secret-put
+test "$(jq -r '.secrets.FABRIC_INTROSPECT_KEY_put_completed' "$failure_artifact")" = false
+test "$(jq -r '.secrets.FABRIC_OBSERVABILITY_KEY_put_completed' "$failure_artifact")" = false
+test "$(jq -r '.gates.refreeze_result' "$failure_artifact")" = green
+test -f "$tmp/oob-recovery-first-secret-failure/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 run_recovery_case recovery-second-secret-failure partial-second fail
 test -f "$tmp/state-recovery-second-secret-failure.secret-put-introspect"
 test ! -f "$tmp/state-recovery-second-secret-failure.secret-put-observability"
+failure_artifact="$tmp/oob-recovery-second-secret-failure/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+test -f "$failure_artifact"
+test "$(stat -f '%Lp' "$failure_artifact")" = 600
+test "$(jq -r '.status' "$failure_artifact")" = RED
+test "$(jq -r '.phase' "$failure_artifact")" = observability-secret-put
+test "$(jq -r '.secrets.FABRIC_INTROSPECT_KEY_put_completed' "$failure_artifact")" = true
+test "$(jq -r '.secrets.FABRIC_OBSERVABILITY_KEY_put_completed' "$failure_artifact")" = false
+test "$(jq -r '.gates.refreeze_result' "$failure_artifact")" = green
+test -f "$tmp/oob-recovery-second-secret-failure/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 run_recovery_case recovery-same-old recover-403 fail same-as-old
 run_recovery_case recovery-same-observability recover-403 fail same-as-observability
 
