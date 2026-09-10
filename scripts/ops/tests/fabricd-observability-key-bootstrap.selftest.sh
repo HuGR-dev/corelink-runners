@@ -7,9 +7,32 @@ harness="$here/../fabricd-observability-key-bootstrap.sh"
 wrangler="$here/mock-observability-bootstrap-wrangler.sh"
 curl_mock="$here/mock-observability-bootstrap-curl.sh"
 recovery_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RECOVER-INTROSPECT-LIVE-20260909'
+normal_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908'
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-bootstrap-test.XXXXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
 chmod 700 "$tmp"
+
+set +e
+"$harness" --mode execute --recover-introspect --ack "$recovery_ack" --stability-seconds 120 >/dev/null 2>"$tmp/recovery-ack-valid.stderr"
+recovery_ack_valid_rc=$?
+"$harness" --mode execute --recover-introspect --ack "$normal_ack" --stability-seconds 120 >/dev/null 2>"$tmp/recovery-ack-wrong.stderr"
+recovery_ack_wrong_rc=$?
+"$harness" --mode execute --ack "$normal_ack" --stability-seconds 120 >/dev/null 2>"$tmp/normal-ack-valid.stderr"
+normal_ack_valid_rc=$?
+"$harness" --mode execute --ack "$recovery_ack" --stability-seconds 120 >/dev/null 2>"$tmp/normal-ack-wrong.stderr"
+normal_ack_wrong_rc=$?
+set -e
+test "$recovery_ack_valid_rc" != 0
+if rg -q 'acknowledgement required' "$tmp/recovery-ack-valid.stderr"; then exit 1; fi
+rg -q 'missing repository/provider pins' "$tmp/recovery-ack-valid.stderr"
+test "$recovery_ack_wrong_rc" != 0
+rg -q 'exact recovery acknowledgement required' "$tmp/recovery-ack-wrong.stderr"
+test "$normal_ack_valid_rc" != 0
+if rg -q 'acknowledgement required' "$tmp/normal-ack-valid.stderr"; then exit 1; fi
+rg -q 'missing repository/provider pins' "$tmp/normal-ack-valid.stderr"
+test "$normal_ack_wrong_rc" != 0
+rg -q 'exact live acknowledgement required' "$tmp/normal-ack-wrong.stderr"
+printf '%s\n' 'ack-validation=PASS'
 
 for bad_window in 0 1 119 121; do
   if "$harness" --mode execute --ack ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908 --stability-seconds "$bad_window" >/dev/null 2>"$tmp/execute-window-$bad_window.stderr"; then exit 1; fi

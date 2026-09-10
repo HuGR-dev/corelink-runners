@@ -46,8 +46,11 @@ case "$MODE" in
   plan) printf '%s\n' 'PLAN ONLY: no network, file read, key generation, or provider mutation.'; exit 0;;
   execute|mock);; *) die 'mode must be plan, execute, or mock';;
 esac
-[ "$MODE" != execute ] || { [ "$RECOVER_INTROSPECT" = 1 ] && [ "$ACK_ARG" = "$RECOVERY_ACK" ] || [ "$RECOVER_INTROSPECT" = 0 ] && [ "$ACK_ARG" = "$ACK" ]; } || die 'exact live acknowledgement required'
-[ "$RECOVER_INTROSPECT" != 1 ] || [ "$ACK_ARG" = "$RECOVERY_ACK" ] || die 'exact recovery acknowledgement required'
+if [ "$RECOVER_INTROSPECT" = 1 ]; then
+  [ "$ACK_ARG" = "$RECOVERY_ACK" ] || die 'exact recovery acknowledgement required'
+elif [ "$MODE" = execute ]; then
+  [ "$ACK_ARG" = "$ACK" ] || die 'exact live acknowledgement required'
+fi
 [ "$MODE" != mock ] || [ -x "$MOCK_WRANGLER" ] || die 'mock mode requires --mock-wrangler'
 [[ "$STABILITY_SECS" =~ ^[0-9]+$ ]] || die 'stability seconds must be a nonnegative integer'
 if [ "$MODE" = mock ]; then :; elif [ "$STABILITY_SECS" = 120 ]; then :; else die 'live stability window must be exactly 120 seconds'; fi
