@@ -56,6 +56,10 @@ case "$url" in
     if [ "$scenario" = verify-fail ] || [ "$scenario" = fail-refreeze ]; then exit 22; fi
     body='{"version":"0.1.0","uptime_ms":42,"ledger_cross_instance_safe":false,"num_shards":1,"counters":{}}'
     ;;
+  */health)
+    [ "$scenario" = resume-health-fail ] && exit 22
+    body='ok'
+    ;;
   *) printf '%s\n' 'unexpected mock curl URL' >&2; exit 1;;
 esac
 
