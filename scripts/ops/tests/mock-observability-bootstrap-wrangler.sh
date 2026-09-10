@@ -20,6 +20,10 @@ case "$cmd" in
     container_id="${MOCK_CURRENT_APP_ID:-app-old}"
     [ -f "$state.deleted" ] && container_id="${MOCK_NEW_APP_ID:-app-new}"
     case "$scenario" in
+      repair-duplicate-named)
+        printf '{"containers":[{"id":"%s","name":"%s","image":"registry.example/corelink@%s"},{"id":"other-repair-app","name":"%s","image":"registry.example/corelink@%s"}]}\n' "$container_id" "$app_name" "$actual" "$app_name" "$actual";;
+      repair-zero-named)
+        if [ ! -f "$state.deploy" ]; then printf '{"containers":[{"id":"other-app","name":"other","image":"registry.example/other@%s"}]}\n' "$actual"; else printf '{"containers":[{"id":"%s","name":"%s","image":"registry.example/corelink@%s"}]}\n' "${MOCK_NEW_APP_ID:-app-new}" "$app_name" "$actual"; fi;;
       missing-container)
         printf '{"containers":[{"id":"other-app","name":"other","image":"registry.example/other@%s"}]}\n' "$actual";;
       duplicate-container)
@@ -29,7 +33,7 @@ case "$cmd" in
     esac;;
   'versions view '* )
     printf '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"1"}]}\n';;
-  'secret list --format')
+  'secret list --name')
     printf '[{"name":"FABRIC_INTROSPECT_KEY","version":"legacy-v1"},{"name":"FABRIC_INTROSPECT_AUTH_KEY","version":"auth-v1"}]\n';;
   'secret put FABRIC_INTROSPECT_AUTH_KEY')
     [ "$scenario" = partial-first ] && { printf '%s\n' 'first secret put failed' >&2; exit 1; }
