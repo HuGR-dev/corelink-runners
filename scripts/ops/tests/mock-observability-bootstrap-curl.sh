@@ -45,6 +45,7 @@ case "$url" in
       printf '%s\n' "$introspect_calls" > "$MOCK_STATE.introspect-calls"
     fi
     case "$scenario:$old_key:$introspect_calls" in
+      repair-zero-named:*) body="{\"valid\":true,\"tenant_id\":\"${MOCK_TENANT:?}\",\"max_concurrency\":1}" ;;
       recover-403:introspect-key:1|recover-403:*:1|auth-403:introspect-key:*) status=403; body='{"error":"forbidden"}' ;;
       recover-401:introspect-key:1|recover-401:*:1|auth-401:introspect-key:*) status=401; body='{"error":"unauthorized"}' ;;
       recover-5xx:*) status=503; body='{"error":"temporarily unavailable"}' ;;
@@ -54,7 +55,7 @@ case "$url" in
     esac
     ;;
   */internal/v1/status)
-    if [ "$scenario" = verify-fail ] || [ "$scenario" = fail-refreeze ] || { [ "$scenario" = repair-post-fail ] && [ -f "$MOCK_STATE.deleted" ]; }; then exit 22; fi
+    if [ "$scenario" = verify-fail ] || [ "$scenario" = fail-refreeze ] || { [ "$scenario" = repair-post-fail ] && [ -f "$MOCK_STATE.deleted" ]; } || { [ "$scenario" = repair-zero-named ] && [ ! -f "$MOCK_STATE.deploy" ]; }; then exit 22; fi
     body='{"version":"0.1.0","uptime_ms":42,"ledger_cross_instance_safe":false,"num_shards":1,"counters":{}}'
     ;;
   */health)

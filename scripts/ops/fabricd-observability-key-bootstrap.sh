@@ -339,7 +339,7 @@ verify_health() {
 
 assert_repair_secret_metadata() {
   local metadata
-  metadata="$(capture repair-secret-metadata run_wrangler secret list --format json)" || return 1
+  metadata="$(capture repair-secret-metadata run_wrangler secret list --name "$WORKER_NAME" --format json)" || return 1
   REPAIR_SECRET_METADATA="$(jq -ce '[.. | objects | select(.name? == "FABRIC_INTROSPECT_KEY" or .name? == "FABRIC_INTROSPECT_AUTH_KEY") | {name,version:(.version // .version_id // .id // "metadata-present")}] | if length != 2 or ([.[].name] | sort) != ["FABRIC_INTROSPECT_AUTH_KEY","FABRIC_INTROSPECT_KEY"] then error("required legacy and correct introspection secret metadata is absent or ambiguous") else . end' "$metadata")" || return 1
   log_event 'repair_secret_metadata=GREEN wrong_binding_present=true correct_binding_present=true values=not-read'
 }
@@ -397,6 +397,10 @@ repair_preflight() {
     current_version="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$current")" || die 'repair absent-container deployment version missing'
     [ "$current_version" = "$VERSION" ] || die 'repair absent-container deployment version drift'
     log_event "$label provider_container=absent expected_digest=$DIGEST"
+    assert_frozen "$current_version" || die 'repair absent-container admission is not frozen'
+    assert_fleet_quiet "$label-fleet" || die 'repair absent-container fleet quiescence request failed'
+    log_event "$label container_dependent_probes=deferred_until_deploy"
+    return 0
   fi
   assert_frozen "$current_version" || die 'repair fabric admission is not frozen'
   assert_fleet_quiet "$label-fleet" || die 'repair fleet quiescence request failed'
@@ -411,11 +415,19 @@ repair_preflight() {
   esac
 }
 
+assert_single_repair_target() {
+  local label="$1" expected_app="$2" containers named
+  containers="$(capture "$label-containers" run_wrangler containers list --json)" || die 'repair target container capture failed'
+  named="$(jq -er --arg n "$APP_NAME" '[.. | objects | select(.name? == $n)] | if length == 1 then .[0].id else error("target-name container is absent or ambiguous") end' "$containers")" || die 'repair target-name container is absent or ambiguous'
+  [ "$named" = "$expected_app" ] || die 'repair target-name container does not match supplied current app'
+}
+
 repair_introspect_auth_main() {
   local current_app post post_app
   assert_historical_repair_authorization
   [ "$APP_ID" != "$HISTORICAL_RECOVERY_APP_ID" ] || die 'current repair app id must differ from the historical app id'
   assert_repair_secret_metadata || die 'repair provider secret metadata verification failed'
+  assert_single_repair_target repair-preflight "$APP_ID"
   repair_preflight repair-preflight "$APP_ID" rejected
   current_app="$APP_ID"
   write_repair_progress preflight "$current_app" '' || die 'cannot write repair progress artifact'
@@ -465,7 +477,15 @@ resume_introspect_auth_repair_main() {
   auth_expectation=rejected; [ "$progress_put" = true ] && auth_expectation=accepted
   containers="$(capture repair-resume-preflight-containers run_wrangler containers list --json)" || die 'repair resume container discrimination failed'
   old_count="$(jq -er --arg id "$progress_pre" --arg n "$APP_NAME" '[.. | objects | select(.id? == $id and .name? == $n)] | length' "$containers")"; named_count="$(jq -er --arg n "$APP_NAME" '[.. | objects | select(.name? == $n)] | length' "$containers")"
-  if [ "$named_count" = 0 ]; then repair_preflight repair-resume-preflight '' "$auth_expectation"; else repair_preflight repair-resume-preflight "$APP_ID" "$auth_expectation"; fi
+  [ "$named_count" -le 1 ] || die 'repair resume target-name containers are duplicate or ambiguous'
+  if [ "$named_count" = 0 ]; then
+    # The delete may have completed before its response was durable. There is
+    # no container to authenticate through, so prove only worker-level state
+    # and the frozen deployment binding before the bounded deploy replay.
+    repair_preflight repair-resume-preflight '' "$auth_expectation"
+  else
+    repair_preflight repair-resume-preflight "$APP_ID" "$auth_expectation"
+  fi
   if [ "$REPAIR_SECRET_PUT" != true ]; then
     [ "$REPAIR_SECRET_PUT_INTENT" = true ] && [ "$REPAIR_SECRET_PUT_ATTEMPTS" -lt 2 ] || die 'repair secret put is ambiguous and its idempotent replay cap is exhausted'
     REPAIR_PHASE='secret-put'; REPAIR_SECRET_PUT_ATTEMPTS=$((REPAIR_SECRET_PUT_ATTEMPTS + 1)); REPAIR_SECRET_PUT_INTENT=true
