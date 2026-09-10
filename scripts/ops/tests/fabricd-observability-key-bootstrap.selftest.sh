@@ -7,6 +7,7 @@ harness="$here/../fabricd-observability-key-bootstrap.sh"
 wrangler="$here/mock-observability-bootstrap-wrangler.sh"
 curl_mock="$here/mock-observability-bootstrap-curl.sh"
 recovery_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RECOVER-INTROSPECT-LIVE-20260909'
+resume_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RESUME-INTROSPECT-LIVE-20260909'
 normal_ack='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-LIVE-20260908'
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/corelink-obs-bootstrap-test.XXXXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
@@ -238,6 +239,44 @@ rerun_rc=$?; set -e
 test "$rerun_rc" != 0
 rg -q 'recovery already started; refusing rerun' "$tmp/recovery-rerun-second.stderr"
 printf '%s\n' 'recovery-rerun=fail-closed'
+
+make_fixture resume-success
+printf '%s\n' bm9uLXJvdGF0ZWQtb2JzZXJ2YWJpbGl0eS1rZXk= > "$oob/observability-key"; chmod 600 "$oob/observability-key"
+printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$oob/new-introspect"; chmod 600 "$oob/new-introspect"
+: > "$state.deleted"
+jq -n --arg commit "$commit" --arg digest "$MOCK_DIGEST" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-recovery-failure",status:"RED",operation_mode:"introspect-recovery",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:"version-good",expected_image_digest:$digest,app_id:"app-old"},phase:"container-recreate",secrets:{FABRIC_INTROSPECT_KEY_put_completed:true,FABRIC_OBSERVABILITY_KEY_put_completed:true},gates:{refreeze_result:"green"},outcome:"RED",rerun_guard:"armed",secret_values:"excluded",secret_hashes:"excluded"}' > "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+printf '%s\n' in-progress > "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+chmod 600 "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json" "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+export MOCK_STATE="$state" MOCK_SCENARIO=resume-success MOCK_NEW_APP_ID=app-new MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
+"$harness" --mode mock --resume-recovery --ack "$resume_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --new-introspect-key-file "$oob/new-introspect" --introspect-pat-file "$oob/pat" --key-file "$oob/observability-key" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --health-url https://status.test/health --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0 >/dev/null 2>"$tmp/resume-success.stderr"
+grep -q '"status": "PASS"' "$tmp/root-resume-success/evidence/result.json"
+test "$(jq -r '.resumed' "$tmp/root-resume-success/evidence/result.json")" = true
+test "$(jq -r '.provider.app_id' "$tmp/root-resume-success/evidence/result.json")" = app-new
+test "$(jq -r '.lineage.old_app_id' "$tmp/root-resume-success/evidence/result.json")" = app-old
+test "$(jq -r '.lineage.new_app_id' "$tmp/root-resume-success/evidence/result.json")" = app-new
+test ! -e "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+test -f "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
+test ! -f "$state.secret-put-introspect"
+test ! -f "$state.secret-put-observability"
+test ! -f "$state.deploy"
+printf '%s\n' 'resume-success=pass'
+
+make_fixture resume-same-id
+printf '%s\n' bm9uLXJvdGF0ZWQtb2JzZXJ2YWJpbGl0eS1rZXk= > "$oob/observability-key"; chmod 600 "$oob/observability-key"
+printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$oob/new-introspect"; chmod 600 "$oob/new-introspect"
+jq -n --arg digest "$MOCK_DIGEST" '{status:"RED",operation_mode:"introspect-recovery",provider:{expected_image_digest:$digest,app_id:"app-old"},phase:"container-recreate",secrets:{FABRIC_INTROSPECT_KEY_put_completed:true,FABRIC_OBSERVABILITY_KEY_put_completed:true},gates:{refreeze_result:"green"},outcome:"RED",rerun_guard:"armed"}' > "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+printf '%s\n' in-progress > "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+chmod 600 "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json" "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+export MOCK_STATE="$state" MOCK_SCENARIO=resume-same-id MOCK_NEW_APP_ID=app-new MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
+set +e
+"$harness" --mode mock --resume-recovery --ack "$resume_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --new-introspect-key-file "$oob/new-introspect" --introspect-pat-file "$oob/pat" --key-file "$oob/observability-key" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --health-url https://status.test/health --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0 >/dev/null 2>"$tmp/resume-same-id.stderr"
+resume_same_id_rc=$?
+set -e
+test "$resume_same_id_rc" != 0
+rg -q 'deleted fabricd application id' "$tmp/resume-same-id.stderr"
+test -f "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+test ! -e "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
+printf '%s\n' 'resume-same-id=fail-closed'
 
 make_fixture lock
 mkdir "$oob/.fabricd-observability-key-bootstrap.lock"
