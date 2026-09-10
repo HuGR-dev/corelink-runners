@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # CoreLink-only bootstrap for a missing local FABRIC_OBSERVABILITY_KEY.
 # Default is inert. Execute requires explicit pins and the exact acknowledgement.
+# Resume requires --recovery-source-sha for the historical RED artifact commit.
 set -Eeuo pipefail
 set +x
 umask 077
@@ -11,7 +12,7 @@ readonly RESUME_ACK='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RESUME-INTROSPE
 readonly WORKER_NAME='corelink-fabricd' APP_NAME='corelink-fabricd-fabricdcontainer'
 readonly CONFIG_REL='deploy/cloudflare-fabricd/wrangler.jsonc'
 readonly WRANGLER_EXPECTED_VERSION='4.105.0'
-MODE=plan ACK_ARG='' ROOT='' COMMIT='' VERSION='' APP_ID='' DIGEST='' RECOVER_INTROSPECT=0 RESUME_RECOVERY=0 KEY_FILE_PROVIDED=0
+MODE=plan ACK_ARG='' ROOT='' COMMIT='' RECOVERY_SOURCE_SHA='' VERSION='' APP_ID='' DIGEST='' RECOVER_INTROSPECT=0 RESUME_RECOVERY=0 KEY_FILE_PROVIDED=0
 OOB_DIR="${CORELINK_OOB_DIR:-$HOME/.corelink/rotation-b2-20260908}" KEY_FILE=''
 FLEET_KEY_FILE='' INTROSPECT_KEY_FILE='' NEW_INTROSPECT_KEY_FILE='' PAT_FILE='' TENANT_ID='' EVIDENCE_FILE=''
 STATUS_URL='https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status'
@@ -33,7 +34,7 @@ usage() { sed -n '1,12p' "$0"; printf '\nPlan is inert. Execute requires --execu
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) MODE="${2:?}"; shift 2;; --execute) MODE=execute; shift;; --ack) ACK_ARG="${2:?}"; shift 2;;
-    --repo-root) ROOT="${2:?}"; shift 2;; --expected-commit) COMMIT="${2:?}"; shift 2;;
+    --repo-root) ROOT="${2:?}"; shift 2;; --expected-commit) COMMIT="${2:?}"; shift 2;; --recovery-source-sha) RECOVERY_SOURCE_SHA="${2:?}"; shift 2;;
     --expected-version) VERSION="${2:?}"; shift 2;; --fabricd-app-id) APP_ID="${2:?}"; shift 2;;
     --expected-image-digest) DIGEST="${2:?}"; shift 2;; --oob-dir) OOB_DIR="${2:?}"; shift 2;;
     --key-file) KEY_FILE="${2:?}"; KEY_FILE_PROVIDED=1; shift 2;; --fleet-key-file) FLEET_KEY_FILE="${2:?}"; shift 2;;
@@ -110,6 +111,11 @@ config="$ROOT/$CONFIG_REL"
 [ -f "$config" ] && [ ! -L "$config" ] || die 'canonical fabricd config missing or symlinked'
 git -C "$ROOT" rev-parse --verify "$COMMIT^{commit}" >/dev/null || die 'expected commit unavailable'
 [ "$(git -C "$ROOT" rev-parse HEAD)" = "$COMMIT" ] || die 'repository HEAD does not match expected commit'
+if [ "$RESUME_RECOVERY" = 1 ]; then
+  [[ "$RECOVERY_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || die 'resume requires --recovery-source-sha as a full SHA-1'
+  git -C "$ROOT" rev-parse --verify "$RECOVERY_SOURCE_SHA^{commit}" >/dev/null || die 'recovery source commit unavailable'
+  git -C "$ROOT" merge-base --is-ancestor "$RECOVERY_SOURCE_SHA" "$COMMIT" || die 'recovery source commit is not an ancestor of expected commit'
+fi
 [ -z "$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all)" ] || die 'repository worktree is not clean'
 grep -Fq "$DIGEST" "$config" || die 'expected immutable digest absent from canonical config'
 resolve_wrangler() {
@@ -272,11 +278,11 @@ resume_recovery_main() {
   [ ! -e "$RECOVERY_COMPLETE" ] && [ ! -L "$RECOVERY_COMPLETE" ] || die 'resume completion marker already exists'
   [ "$(tr -d '\r\n' < "$RECOVERY_GUARD")" = 'in-progress' ] || die 'resume recovery guard is not armed'
   safe_file "$artifact" || die 'resume requires owner-only 0600 durable RED artifact'
-  jq -e --arg app "$APP_ID" --arg digest "$DIGEST" --arg commit "$COMMIT" --arg version "$VERSION" '
+  jq -e --arg app "$APP_ID" --arg digest "$DIGEST" --arg source_sha "$RECOVERY_SOURCE_SHA" --arg version "$VERSION" '
     .schema_version == "evidence/v1" and
     .artifact_id == "fabricd-observability-key-bootstrap-introspect-recovery-failure" and
     .status == "RED" and .operation_mode == "introspect-recovery" and
-    .source.repository == "corelink-runners" and .source.commit_sha == $commit and
+    .source.repository == "corelink-runners" and .source.commit_sha == $source_sha and
     .phase == "container-recreate" and
     .secrets.FABRIC_INTROSPECT_KEY_put_completed == true and
     .secrets.FABRIC_OBSERVABILITY_KEY_put_completed == true and
