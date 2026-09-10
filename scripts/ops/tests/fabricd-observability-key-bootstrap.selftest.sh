@@ -150,6 +150,34 @@ run_recovery_case() {
   printf '%s\n' "$name=$expected"
 }
 
+run_resume_artifact_mismatch() {
+  local name="$1" field="$2" artifact_filter
+  make_fixture "$name"
+  printf '%s\n' bm9uLXJvdGF0ZWQtb2JzZXJ2YWJpbGl0eS1rZXk= > "$oob/observability-key"; chmod 600 "$oob/observability-key"
+  printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$oob/new-introspect"; chmod 600 "$oob/new-introspect"
+  case "$field" in
+    schema_version) artifact_filter='.schema_version = "wrong"';;
+    artifact_id) artifact_filter='.artifact_id = "wrong"';;
+    source.repository) artifact_filter='.source.repository = "wrong"';;
+    source.commit_sha) artifact_filter='.source.commit_sha = "0000000000000000000000000000000000000000"';;
+    provider.worker) artifact_filter='.provider.worker = "wrong"';;
+    provider.expected_version) artifact_filter='.provider.expected_version = "wrong"';;
+    *) printf 'unknown artifact mismatch: %s\n' "$field" >&2; exit 1;;
+  esac
+  jq -n --arg commit "$commit" --arg digest "$MOCK_DIGEST" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-recovery-failure",status:"RED",operation_mode:"introspect-recovery",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:"version-good",expected_image_digest:$digest,app_id:"app-old"},phase:"container-recreate",secrets:{FABRIC_INTROSPECT_KEY_put_completed:true,FABRIC_OBSERVABILITY_KEY_put_completed:true},gates:{refreeze_result:"green"},outcome:"RED",rerun_guard:"armed"}' | jq "$artifact_filter" > "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+  printf '%s\n' in-progress > "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+  chmod 600 "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json" "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+  export MOCK_STATE="$state" MOCK_SCENARIO=resume-mismatch MOCK_NEW_APP_ID=app-new MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
+  set +e
+  "$harness" --mode mock --resume-recovery --ack "$resume_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --new-introspect-key-file "$oob/new-introspect" --introspect-pat-file "$oob/pat" --key-file "$oob/observability-key" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --health-url https://status.test/health --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://api.test/internal/v1/auth/introspect --stability-seconds 0 >/dev/null 2>"$tmp/resume-$name.stderr"
+  mismatch_rc=$?
+  set -e
+  test "$mismatch_rc" != 0
+  test -f "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
+  test ! -e "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
+  printf '%s\n' "resume-$name=fail-closed"
+}
+
 run_case success success pass
 grep -q '"status": "PASS"' "$tmp/root-success/evidence/result.json"
 test -f "$tmp/oob-success/fabric-observability-key-bootstrap.b64"
@@ -264,7 +292,7 @@ printf '%s\n' 'resume-success=pass'
 make_fixture resume-same-id
 printf '%s\n' bm9uLXJvdGF0ZWQtb2JzZXJ2YWJpbGl0eS1rZXk= > "$oob/observability-key"; chmod 600 "$oob/observability-key"
 printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$oob/new-introspect"; chmod 600 "$oob/new-introspect"
-jq -n --arg digest "$MOCK_DIGEST" '{status:"RED",operation_mode:"introspect-recovery",provider:{expected_image_digest:$digest,app_id:"app-old"},phase:"container-recreate",secrets:{FABRIC_INTROSPECT_KEY_put_completed:true,FABRIC_OBSERVABILITY_KEY_put_completed:true},gates:{refreeze_result:"green"},outcome:"RED",rerun_guard:"armed"}' > "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
+jq -n --arg commit "$commit" --arg digest "$MOCK_DIGEST" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-recovery-failure",status:"RED",operation_mode:"introspect-recovery",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:"version-good",expected_image_digest:$digest,app_id:"app-old"},phase:"container-recreate",secrets:{FABRIC_INTROSPECT_KEY_put_completed:true,FABRIC_OBSERVABILITY_KEY_put_completed:true},gates:{refreeze_result:"green"},outcome:"RED",rerun_guard:"armed"}' > "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json"
 printf '%s\n' in-progress > "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 chmod 600 "$oob/fabricd-observability-key-bootstrap-introspect-recovery-failure.json" "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 export MOCK_STATE="$state" MOCK_SCENARIO=resume-same-id MOCK_NEW_APP_ID=app-new MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
@@ -277,6 +305,9 @@ rg -q 'deleted fabricd application id' "$tmp/resume-same-id.stderr"
 test -f "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 test ! -e "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
 printf '%s\n' 'resume-same-id=fail-closed'
+for mismatch in schema_version artifact_id source.repository source.commit_sha provider.worker provider.expected_version; do
+  run_resume_artifact_mismatch "$(printf '%s' "$mismatch" | tr . _)" "$mismatch"
+done
 
 make_fixture lock
 mkdir "$oob/.fabricd-observability-key-bootstrap.lock"

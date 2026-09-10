@@ -272,13 +272,17 @@ resume_recovery_main() {
   [ ! -e "$RECOVERY_COMPLETE" ] && [ ! -L "$RECOVERY_COMPLETE" ] || die 'resume completion marker already exists'
   [ "$(tr -d '\r\n' < "$RECOVERY_GUARD")" = 'in-progress' ] || die 'resume recovery guard is not armed'
   safe_file "$artifact" || die 'resume requires owner-only 0600 durable RED artifact'
-  jq -e --arg app "$APP_ID" --arg digest "$DIGEST" '
+  jq -e --arg app "$APP_ID" --arg digest "$DIGEST" --arg commit "$COMMIT" --arg version "$VERSION" '
+    .schema_version == "evidence/v1" and
+    .artifact_id == "fabricd-observability-key-bootstrap-introspect-recovery-failure" and
     .status == "RED" and .operation_mode == "introspect-recovery" and
+    .source.repository == "corelink-runners" and .source.commit_sha == $commit and
     .phase == "container-recreate" and
     .secrets.FABRIC_INTROSPECT_KEY_put_completed == true and
     .secrets.FABRIC_OBSERVABILITY_KEY_put_completed == true and
     .gates.refreeze_result == "green" and .outcome == "RED" and
-    .rerun_guard == "armed" and .provider.app_id == $app and
+    .rerun_guard == "armed" and .provider.worker == "corelink-fabricd" and
+    .provider.expected_version == $version and .provider.app_id == $app and
     .provider.expected_image_digest == $digest
   ' "$artifact" >/dev/null || die 'durable RED artifact does not authorize resume'
 
