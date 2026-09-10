@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # CoreLink-only bootstrap for a missing local FABRIC_OBSERVABILITY_KEY.
 # Default is inert. Execute requires explicit pins and the exact acknowledgement.
-# Resume requires --recovery-source-sha for the historical RED artifact commit.
+# Resume requires --recovery-source-sha, --recovery-expected-version, and
+# --recovery-fabricd-app-id for the historical RED artifact pins.
 set -Eeuo pipefail
 set +x
 umask 077
@@ -12,7 +13,7 @@ readonly RESUME_ACK='ACK-CORELINK-FABRIC-OBSERVABILITY-BOOTSTRAP-RESUME-INTROSPE
 readonly WORKER_NAME='corelink-fabricd' APP_NAME='corelink-fabricd-fabricdcontainer'
 readonly CONFIG_REL='deploy/cloudflare-fabricd/wrangler.jsonc'
 readonly WRANGLER_EXPECTED_VERSION='4.105.0'
-MODE=plan ACK_ARG='' ROOT='' COMMIT='' RECOVERY_SOURCE_SHA='' VERSION='' APP_ID='' DIGEST='' RECOVER_INTROSPECT=0 RESUME_RECOVERY=0 KEY_FILE_PROVIDED=0
+MODE=plan ACK_ARG='' ROOT='' COMMIT='' RECOVERY_SOURCE_SHA='' RECOVERY_VERSION='' RECOVERY_APP_ID='' VERSION='' APP_ID='' DIGEST='' RECOVER_INTROSPECT=0 RESUME_RECOVERY=0 KEY_FILE_PROVIDED=0
 OOB_DIR="${CORELINK_OOB_DIR:-$HOME/.corelink/rotation-b2-20260908}" KEY_FILE=''
 FLEET_KEY_FILE='' INTROSPECT_KEY_FILE='' NEW_INTROSPECT_KEY_FILE='' PAT_FILE='' TENANT_ID='' EVIDENCE_FILE=''
 STATUS_URL='https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status'
@@ -27,6 +28,7 @@ RECOVERY_PHASE='preflight'
 RECOVERY_INTROSPECT_SECRET_PUT=false RECOVERY_OBSERVABILITY_SECRET_PUT=false
 REFREEZE_RESULT='not-attempted'
 FINAL_APP_ID=''
+LINEAGE_OLD_APP_ID=''
 RESUMED_RECOVERY=false
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
@@ -35,6 +37,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) MODE="${2:?}"; shift 2;; --execute) MODE=execute; shift;; --ack) ACK_ARG="${2:?}"; shift 2;;
     --repo-root) ROOT="${2:?}"; shift 2;; --expected-commit) COMMIT="${2:?}"; shift 2;; --recovery-source-sha) RECOVERY_SOURCE_SHA="${2:?}"; shift 2;;
+    --recovery-expected-version) RECOVERY_VERSION="${2:?}"; shift 2;; --recovery-fabricd-app-id) RECOVERY_APP_ID="${2:?}"; shift 2;;
     --expected-version) VERSION="${2:?}"; shift 2;; --fabricd-app-id) APP_ID="${2:?}"; shift 2;;
     --expected-image-digest) DIGEST="${2:?}"; shift 2;; --oob-dir) OOB_DIR="${2:?}"; shift 2;;
     --key-file) KEY_FILE="${2:?}"; KEY_FILE_PROVIDED=1; shift 2;; --fleet-key-file) FLEET_KEY_FILE="${2:?}"; shift 2;;
@@ -70,6 +73,7 @@ if [ "$MODE" = mock ]; then :; elif [ "$STABILITY_SECS" = 120 ]; then :; else di
 [ -d "$ROOT" ] || die 'repository root is not a directory'
 ROOT="$(cd "$ROOT" && pwd -P)"
 FINAL_APP_ID="$APP_ID"
+LINEAGE_OLD_APP_ID="$APP_ID"
 command -v "$CURL_BIN" >/dev/null 2>&1 || die 'curl is unavailable'
 EVIDENCE_FILE="${EVIDENCE_FILE:-$ROOT/docs/plan/evidence/fabricd-observability-key-bootstrap.json}"
 FLEET_KEY_FILE="${FLEET_KEY_FILE:-$OOB_DIR/fleet-busy-read-key}"
@@ -113,6 +117,13 @@ git -C "$ROOT" rev-parse --verify "$COMMIT^{commit}" >/dev/null || die 'expected
 [ "$(git -C "$ROOT" rev-parse HEAD)" = "$COMMIT" ] || die 'repository HEAD does not match expected commit'
 if [ "$RESUME_RECOVERY" = 1 ]; then
   [[ "$RECOVERY_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || die 'resume requires --recovery-source-sha as a full SHA-1'
+  [ -n "$RECOVERY_VERSION" ] || die 'resume requires --recovery-expected-version'
+  [ -n "$RECOVERY_APP_ID" ] || die 'resume requires --recovery-fabricd-app-id'
+  [[ "$VERSION" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] || die 'resume expected version must be a UUID'
+  [[ "$RECOVERY_VERSION" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] || die 'resume recovery version must be a UUID'
+  [[ "$APP_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] || die 'resume fabricd app id must be a UUID'
+  [[ "$RECOVERY_APP_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]] || die 'resume recovery app id must be a UUID'
+  [ "$RECOVERY_APP_ID" != "$APP_ID" ] || die 'resume historical and current app ids must differ'
   git -C "$ROOT" rev-parse --verify "$RECOVERY_SOURCE_SHA^{commit}" >/dev/null || die 'recovery source commit unavailable'
   git -C "$ROOT" merge-base --is-ancestor "$RECOVERY_SOURCE_SHA" "$COMMIT" || die 'recovery source commit is not an ancestor of expected commit'
 fi
@@ -146,7 +157,7 @@ cleanup() {
     fi
     recovery_mode=normal; [ "$RECOVER_INTROSPECT" = 1 ] && recovery_mode=introspect-recovery
     [ "$RESUME_RECOVERY" = 1 ] && recovery_mode=introspect-recovery-resumed
-    jq -n --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" --arg old_app "$APP_ID" --arg new_app "$FINAL_APP_ID" --arg key_path "$KEY_FILE" --arg introspect_key_path "$NEW_INTROSPECT_KEY_FILE" --arg events "$stable_events" --arg mode "$recovery_mode" --argjson resumed "$RESUMED_RECOVERY" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap",status:"PASS",operation_mode:$mode,resumed:$resumed,source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$new_app},lineage:{old_app_id:$old_app,new_app_id:$new_app},secret:{name:"FABRIC_OBSERVABILITY_KEY",value:"excluded",local_path:$key_path,mode:"0600"},introspection_recovery:(if $mode == "normal" then null else {name:"FABRIC_INTROSPECT_KEY",value:"excluded",local_path:$introspect_key_path,mode:"0600"} end),gates:{quiescence:"GREEN",admission_paused:true,status_endpoint:"200_valid_json",refreeze:"GREEN"},logs:{events:$events,secrets:"excluded",mode:"0600"}}' > "$EVIDENCE_FILE" && chmod 644 "$EVIDENCE_FILE" || rc=1
+    jq -n --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" --arg old_app "$LINEAGE_OLD_APP_ID" --arg new_app "$FINAL_APP_ID" --arg key_path "$KEY_FILE" --arg introspect_key_path "$NEW_INTROSPECT_KEY_FILE" --arg events "$stable_events" --arg mode "$recovery_mode" --argjson resumed "$RESUMED_RECOVERY" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap",status:"PASS",operation_mode:$mode,resumed:$resumed,source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$new_app},lineage:{old_app_id:$old_app,new_app_id:$new_app},secret:{name:"FABRIC_OBSERVABILITY_KEY",value:"excluded",local_path:$key_path,mode:"0600"},introspection_recovery:(if $mode == "normal" then null else {name:"FABRIC_INTROSPECT_KEY",value:"excluded",local_path:$introspect_key_path,mode:"0600"} end),gates:{quiescence:"GREEN",admission_paused:true,status_endpoint:"200_valid_json",refreeze:"GREEN"},logs:{events:$events,secrets:"excluded",mode:"0600"}}' > "$EVIDENCE_FILE" && chmod 644 "$EVIDENCE_FILE" || rc=1
     if [ "$rc" = 0 ] && [ "$RESUME_RECOVERY" = 1 ]; then
       mv -f -- "$RECOVERY_GUARD" "$RECOVERY_COMPLETE" || rc=1
     elif [ "$rc" = 0 ] && [ "$RECOVER_INTROSPECT" = 1 ]; then
@@ -278,7 +289,7 @@ resume_recovery_main() {
   [ ! -e "$RECOVERY_COMPLETE" ] && [ ! -L "$RECOVERY_COMPLETE" ] || die 'resume completion marker already exists'
   [ "$(tr -d '\r\n' < "$RECOVERY_GUARD")" = 'in-progress' ] || die 'resume recovery guard is not armed'
   safe_file "$artifact" || die 'resume requires owner-only 0600 durable RED artifact'
-  jq -e --arg app "$APP_ID" --arg digest "$DIGEST" --arg source_sha "$RECOVERY_SOURCE_SHA" --arg version "$VERSION" '
+  jq -e --arg recovery_app "$RECOVERY_APP_ID" --arg digest "$DIGEST" --arg source_sha "$RECOVERY_SOURCE_SHA" --arg recovery_version "$RECOVERY_VERSION" '
     .schema_version == "evidence/v1" and
     .artifact_id == "fabricd-observability-key-bootstrap-introspect-recovery-failure" and
     .status == "RED" and .operation_mode == "introspect-recovery" and
@@ -288,7 +299,7 @@ resume_recovery_main() {
     .secrets.FABRIC_OBSERVABILITY_KEY_put_completed == true and
     .gates.refreeze_result == "green" and .outcome == "RED" and
     .rerun_guard == "armed" and .provider.worker == "corelink-fabricd" and
-    .provider.expected_version == $version and .provider.app_id == $app and
+    .provider.expected_version == $recovery_version and .provider.app_id == $recovery_app and
     .provider.expected_image_digest == $digest
   ' "$artifact" >/dev/null || die 'durable RED artifact does not authorize resume'
 
@@ -296,7 +307,7 @@ resume_recovery_main() {
   current_version="$(printf '%s\n' "$current" | cut -f1)"
   current_digest="$(printf '%s\n' "$current" | cut -f2)"
   current_app_id="$(printf '%s\n' "$current" | cut -f3)"
-  [ "$current_app_id" != "$APP_ID" ] || die 'resume discovered the deleted fabricd application id'
+  [ "$current_app_id" = "$APP_ID" ] || die 'resume current fabricd application id mismatch'
   [ "$current_version" = "$VERSION" ] || die 'resume provider deployment version drift'
   [ "$current_digest" = "$DIGEST" ] || die 'resume provider container digest drift'
   assert_frozen "$current_version" || die 'resume fabric admission is not frozen'
@@ -327,9 +338,10 @@ resume_recovery_main() {
   assert_frozen "$resumed_after_version" || die 'resume final admission freeze verification failed'
   assert_fleet_quiet resume-final || die 'resume final fleet quiescence proof failed'
   FINAL_APP_ID="$current_app_id"
+  LINEAGE_OLD_APP_ID="$RECOVERY_APP_ID"
   RESUMED_RECOVERY=true
   FINAL_FROZEN=1
-  log_event "resume=PASS old_app_id=$APP_ID new_app_id=$FINAL_APP_ID version=$current_version digest=$current_digest health=200"
+  log_event "resume=PASS old_app_id=$RECOVERY_APP_ID new_app_id=$FINAL_APP_ID version=$current_version digest=$current_digest health=200"
 }
 
 if [ "$RESUME_RECOVERY" = 1 ]; then
