@@ -10,6 +10,7 @@ case "$cmd" in
   'deployments list --name')
     n=0; [ -f "$state.deployments" ] && n="$(cat "$state.deployments")"; n=$((n+1)); printf '%s\n' "$n" > "$state.deployments"
     if [ "$scenario" = drift ] && [ "$n" -ge 3 ]; then version='version-drift'; fi
+    [ "$scenario" = final-version-drift ] && version='version-drift'
     printf '[{"created_on":"2026-09-08T00:00:00Z","versions":[{"version_id":"%s"}]}]\n' "$version";;
   'containers info '* )
     printf '%s\n' 'unknown option: --json (Wrangler 4.105.0 containers info is not JSON-capable)' >&2

@@ -19,9 +19,12 @@ readonly HISTORICAL_RECOVERY_DIGEST='sha256:300d5fb008877d5ba9de82b5555572894b1b
 readonly WORKER_NAME='corelink-fabricd' APP_NAME='corelink-fabricd-fabricdcontainer'
 readonly CONFIG_REL='deploy/cloudflare-fabricd/wrangler.jsonc'
 readonly WRANGLER_EXPECTED_VERSION='4.105.0'
+readonly CANONICAL_INTROSPECT_URL='https://corelink-api.humangr.com/internal/v1/auth/introspect'
+readonly LEGACY_REPAIR_PROGRESS_SOURCE_SHA='74a534cd7fc5d2578ffb80f2bcf03f0d147f3d1b'
 MODE=plan ACK_ARG='' ROOT='' COMMIT='' RECOVERY_SOURCE_SHA='' RECOVERY_VERSION='' RECOVERY_APP_ID='' VERSION='' APP_ID='' DIGEST='' RECOVER_INTROSPECT=0 RESUME_RECOVERY=0 REPAIR_INTROSPECT_AUTH=0 RESUME_INTROSPECT_AUTH_REPAIR=0 KEY_FILE_PROVIDED=0
 OOB_DIR="${CORELINK_OOB_DIR:-$HOME/.corelink/rotation-b2-20260908}" KEY_FILE=''
 FLEET_KEY_FILE='' INTROSPECT_KEY_FILE='' NEW_INTROSPECT_KEY_FILE='' PAT_FILE='' TENANT_ID='' EVIDENCE_FILE=''
+ACCESS_CLIENT_ID_FILE='' ACCESS_CLIENT_SECRET_FILE=''
 STATUS_URL='https://corelink-fabricd.gmhelmold.workers.dev/internal/v1/status'
 HEALTH_URL='https://corelink-fabricd.gmhelmold.workers.dev/health'
 FLEET_URL='https://corelink-spawn-worker.gmhelmold.workers.dev/internal/v1/fleet/busy'
@@ -37,7 +40,7 @@ FINAL_APP_ID=''
 LINEAGE_OLD_APP_ID=''
 RESUMED_RECOVERY=false
 REPAIR_PHASE='preflight' REPAIR_SECRET_PUT=false REPAIR_RECREATE=false REPAIR_RESUMED=false REPAIR_SECRET_PUT_INTENT=false REPAIR_SECRET_PUT_ATTEMPTS=0 REPAIR_DELETE_INTENT=false REPAIR_DELETE_COMPLETED=false REPAIR_DELETE_ATTEMPTS=0 REPAIR_RECREATE_INTENT=false REPAIR_DEPLOY_ATTEMPTS=0
-REPAIR_PROGRESS=''
+REPAIR_PROGRESS='' REPAIR_PRE_VERSION='' REPAIR_FINAL_VERSION=''
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 2; }
 usage() { sed -n '1,12p' "$0"; printf '\nPlan is inert. Execute requires --execute, exact --ack, and all provider pins.\n' >&2; }
@@ -53,6 +56,8 @@ while [ "$#" -gt 0 ]; do
     --recover-introspect) RECOVER_INTROSPECT=1; shift;; --resume-recovery) RESUME_RECOVERY=1; shift;;
     --repair-introspect-auth) REPAIR_INTROSPECT_AUTH=1; shift;; --resume-introspect-auth-repair) RESUME_INTROSPECT_AUTH_REPAIR=1; shift;; --introspect-pat-file) PAT_FILE="${2:?}"; shift 2;;
     --tenant-id) TENANT_ID="${2:?}"; shift 2;; --evidence-file) EVIDENCE_FILE="${2:?}"; shift 2;;
+    --access-client-id-file|--cf-access-client-id-file) ACCESS_CLIENT_ID_FILE="${2:?}"; shift 2;;
+    --access-client-secret-file|--cf-access-client-secret-file) ACCESS_CLIENT_SECRET_FILE="${2:?}"; shift 2;;
     --status-url) STATUS_URL="${2:?}"; shift 2;; --fleet-url) FLEET_URL="${2:?}"; shift 2;;
     --introspect-url) INTROSPECT_URL="${2:?}"; shift 2;; --health-url) HEALTH_URL="${2:?}"; shift 2;; --stability-seconds) STABILITY_SECS="${2:?}"; shift 2;;
     --mock-wrangler) MOCK_WRANGLER="${2:?}"; shift 2;; --curl-bin) CURL_BIN="${2:?}"; shift 2;;
@@ -93,6 +98,7 @@ FLEET_KEY_FILE="${FLEET_KEY_FILE:-$OOB_DIR/fleet-busy-read-key}"
 INTROSPECT_KEY_FILE="${INTROSPECT_KEY_FILE:-$OOB_DIR/fabric-introspect-key}"
 PAT_FILE="${PAT_FILE:-$OOB_DIR/corelink-canary-tenant-pat}"
 [ -n "$TENANT_ID" ] || die 'tenant id is required for introspection proof'
+[ "$INTROSPECT_URL" = "$CANONICAL_INTROSPECT_URL" ] || die 'direct introspection URL must be the canonical Cloudflare Access URL'
 if [ "$RECOVER_INTROSPECT" = 1 ] || [ "$RESUME_RECOVERY" = 1 ] || [ "$REPAIR_INTROSPECT_AUTH" = 1 ] || [ "$RESUME_INTROSPECT_AUTH_REPAIR" = 1 ]; then
   [ -n "$NEW_INTROSPECT_KEY_FILE" ] || die 'recovery requires --new-introspect-key-file'
 fi
@@ -102,6 +108,11 @@ file_uid() { case "$(uname -s)" in Darwin) stat -f '%u' "$1";; Linux) stat -c '%
 safe_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(file_mode "$1")" = 700 ] && [ "$(file_uid "$1")" = "$(id -u)" ]; }
 safe_file() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(file_mode "$1")" = 600 ] && [ "$(file_uid "$1")" = "$(id -u)" ] && [ -s "$1" ]; }
 single_line_file() { safe_file "$1" || return 1; [ "$(tr -cd '\r' < "$1" | wc -c | tr -d ' ')" = 0 ] || return 1; [ "$(tr -cd '\n' < "$1" | wc -c | tr -d ' ')" -le 1 ]; }
+[ -z "$ACCESS_CLIENT_ID_FILE" ] && [ -z "$ACCESS_CLIENT_SECRET_FILE" ] || {
+  [ -n "$ACCESS_CLIENT_ID_FILE" ] && [ -n "$ACCESS_CLIENT_SECRET_FILE" ] || die 'Cloudflare Access requires both client id and client secret files'
+  single_line_file "$ACCESS_CLIENT_ID_FILE" || die 'Cloudflare Access client id must be owner-only regular 0600 single-line file'
+  single_line_file "$ACCESS_CLIENT_SECRET_FILE" || die 'Cloudflare Access client secret must be owner-only regular 0600 single-line file'
+}
 mkdir_private() { local d="$1"; if [ -e "$d" ] || [ -L "$d" ]; then safe_dir "$d" || die "directory must be owner-only 0700: $d"; else mkdir -p "$d"; chmod 700 "$d"; safe_dir "$d" || die "cannot secure directory: $d"; fi; }
 mkdir_private "$OOB_DIR"; mkdir_private "$(dirname -- "$EVIDENCE_FILE")"
 path_canonical() { local p="$1" d b; d="$(dirname -- "$p")"; b="$(basename -- "$p")"; d="$(cd "$d" && pwd -P)" || return 1; printf '%s/%s\n' "$d" "$b"; }
@@ -180,7 +191,7 @@ cleanup() {
     else
       log_event 'outcome=FAILED'
       if [ "$MUTATION_STARTED" = 1 ]; then
-        jq -n --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" --arg app "$APP_ID" --arg phase "$REPAIR_PHASE" --arg refreeze "$REFREEZE_RESULT" --argjson secret_put "$REPAIR_SECRET_PUT" --argjson recreate "$REPAIR_RECREATE" --argjson secret_intent "$REPAIR_SECRET_PUT_INTENT" --argjson secret_attempts "$REPAIR_SECRET_PUT_ATTEMPTS" --argjson delete_intent "$REPAIR_DELETE_INTENT" --argjson delete_attempts "$REPAIR_DELETE_ATTEMPTS" --argjson deploy_intent "$REPAIR_RECREATE_INTENT" --argjson deploy_attempts "$REPAIR_DEPLOY_ATTEMPTS" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-auth-repair-failure",status:"RED",operation_mode:"introspect-auth-repair",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$app},repair:{wrong_name:"FABRIC_INTROSPECT_KEY",correct_name:"FABRIC_INTROSPECT_AUTH_KEY",secret_put_completed:$secret_put,recreate_completed:$recreate,attempts:{secret_put:$secret_attempts,delete:$delete_attempts,deploy:$deploy_attempts},intents:{secret_put:$secret_intent,delete:$delete_intent,deploy:$deploy_intent}},phase:$phase,gates:{refreeze_result:$refreeze},outcome:"RED",rerun_guard:"armed",secret_values:"excluded",secret_hashes:"excluded"}' > "$REPAIR_FAILURE.tmp" && chmod 600 "$REPAIR_FAILURE.tmp" && mv -f -- "$REPAIR_FAILURE.tmp" "$REPAIR_FAILURE" || rc=1
+        jq -n --arg commit "$COMMIT" --arg pre_version "$REPAIR_PRE_VERSION" --arg final_version "$REPAIR_FINAL_VERSION" --arg digest "$DIGEST" --arg pre_app "${LINEAGE_OLD_APP_ID:-$APP_ID}" --arg final_app "$FINAL_APP_ID" --arg phase "$REPAIR_PHASE" --arg refreeze "$REFREEZE_RESULT" --argjson secret_put "$REPAIR_SECRET_PUT" --argjson recreate "$REPAIR_RECREATE" --argjson secret_intent "$REPAIR_SECRET_PUT_INTENT" --argjson secret_attempts "$REPAIR_SECRET_PUT_ATTEMPTS" --argjson delete_intent "$REPAIR_DELETE_INTENT" --argjson delete_attempts "$REPAIR_DELETE_ATTEMPTS" --argjson deploy_intent "$REPAIR_RECREATE_INTENT" --argjson deploy_attempts "$REPAIR_DEPLOY_ATTEMPTS" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-auth-repair-failure",status:"RED",operation_mode:"introspect-auth-repair",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$pre_version,expected_image_digest:$digest,app_id:$pre_app},repair:{wrong_name:"FABRIC_INTROSPECT_KEY",correct_name:"FABRIC_INTROSPECT_AUTH_KEY",pre_repair_app_id:$pre_app,pre_repair_version:$pre_version,final_app_id:$final_app,final_version:$final_version,secret_put_completed:$secret_put,recreate_completed:$recreate,attempts:{secret_put:$secret_attempts,delete:$delete_attempts,deploy:$deploy_attempts},intents:{secret_put:$secret_intent,delete:$delete_intent,deploy:$deploy_intent}},phase:$phase,gates:{refreeze_result:$refreeze},outcome:"RED",rerun_guard:"armed",secret_values:"excluded",secret_hashes:"excluded"}' > "$REPAIR_FAILURE.tmp" && chmod 600 "$REPAIR_FAILURE.tmp" && mv -f -- "$REPAIR_FAILURE.tmp" "$REPAIR_FAILURE" || rc=1
       fi
     fi
     find "$TMP_DIR" -type f -exec rm -f -- {} + 2>/dev/null || true; rmdir "$EVIDENCE_DIR" "$TMP_DIR" 2>/dev/null || true; exit "$rc"
@@ -248,7 +259,7 @@ assert_frozen() {
   jq -e '[.. | objects | select(.name? == "FABRIC_ADMISSION_PAUSED") | (.text? // .value? // "")] | length == 1 and .[0] == "1"' "$vars" >/dev/null || { log_event 'admission_paused=RED'; return 1; }; log_event 'admission_paused=GREEN'
 }
 
-fleet_header="$TMP_DIR/fleet.header"; introspect_header="$TMP_DIR/introspect.header"
+fleet_header="$TMP_DIR/fleet.header"; introspect_header="$TMP_DIR/introspect.header"; access_header=''
 single_line_file "$FLEET_KEY_FILE" || die 'fleet key must be owner-only regular 0600 single-line file'
 if [ "$RESUME_RECOVERY" != 1 ] && [ "$REPAIR_INTROSPECT_AUTH" != 1 ] && [ "$RESUME_INTROSPECT_AUTH_REPAIR" != 1 ]; then
   single_line_file "$INTROSPECT_KEY_FILE" || die 'introspect key must be owner-only regular 0600 single-line file'
@@ -261,6 +272,13 @@ fi
 printf 'X-Corelink-Internal-Auth: ' > "$fleet_header"; tr -d '\r\n' < "$FLEET_KEY_FILE" >> "$fleet_header"; printf '\n' >> "$fleet_header"; chmod 600 "$fleet_header"
 if [ "$RESUME_RECOVERY" != 1 ] && [ "$REPAIR_INTROSPECT_AUTH" != 1 ] && [ "$RESUME_INTROSPECT_AUTH_REPAIR" != 1 ]; then
   printf 'X-Corelink-Internal-Auth: ' > "$introspect_header"; tr -d '\r\n' < "$INTROSPECT_KEY_FILE" >> "$introspect_header"; printf '\n' >> "$introspect_header"; chmod 600 "$introspect_header"
+fi
+if [ -n "$ACCESS_CLIENT_ID_FILE" ]; then
+  access_header="$TMP_DIR/cf-access.header"
+  { printf 'CF-Access-Client-Id: '; tr -d '\r\n' < "$ACCESS_CLIENT_ID_FILE"; printf '\n';
+    printf 'CF-Access-Client-Secret: '; tr -d '\r\n' < "$ACCESS_CLIENT_SECRET_FILE"; printf '\n';
+  } > "$access_header"
+  chmod 600 "$access_header"
 fi
 
 if [ "$RESUME_RECOVERY" = 1 ] || [ "$REPAIR_INTROSPECT_AUTH" = 1 ] || [ "$RESUME_INTROSPECT_AUTH_REPAIR" = 1 ]; then
@@ -303,13 +321,14 @@ assert_fleet_quiet() {
   log_event "$label fleet_busy=0 fleet_unverifiable=0"
 }
 probe_introspection() {
-  local label="$1" header="$2" body="$3" status_file="$4" curl_rc
+  local label="$1" header="$2" body="$3" status_file="$4" curl_rc; local -a access_args=()
+  [ -z "$access_header" ] || access_args=(--header "@$access_header")
   : > "$body"
   : > "$status_file"
   chmod 600 "$body" "$status_file"
   set +e
   jq -nc --rawfile token "$PAT_FILE" '{token:($token|sub("\\n$";""))}' |
-    "$CURL_BIN" --silent --show-error --connect-timeout 10 --max-time 30 --header "@$header" --header 'content-type: application/json' --data-binary @- --output "$body" --write-out '%{http_code}' "$INTROSPECT_URL" > "$status_file" 2>"$EVIDENCE_DIR/$label.stderr"
+    "$CURL_BIN" --silent --show-error --connect-timeout 10 --max-time 30 --header "@$header" "${access_args[@]}" --header 'content-type: application/json' --data-binary @- --output "$body" --write-out '%{http_code}' "$CANONICAL_INTROSPECT_URL" > "$status_file" 2>"$EVIDENCE_DIR/$label.stderr"
   curl_rc=$?
   set -e
   scrub "$EVIDENCE_DIR/$label.stderr"
@@ -347,7 +366,7 @@ assert_repair_secret_metadata() {
 write_repair_progress() {
   local phase="$1" pre_app="$2" final_app="$3" tmp
   tmp="$REPAIR_PROGRESS.tmp"
-  jq -n --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" --arg phase "$phase" --arg pre_app "$pre_app" --arg final_app "$final_app" --argjson secret_put "$REPAIR_SECRET_PUT" --argjson recreate "$REPAIR_RECREATE" --argjson secret_put_intent "$REPAIR_SECRET_PUT_INTENT" --argjson secret_put_attempts "$REPAIR_SECRET_PUT_ATTEMPTS" --argjson delete_intent "$REPAIR_DELETE_INTENT" --argjson delete_completed "$REPAIR_DELETE_COMPLETED" --argjson delete_attempts "$REPAIR_DELETE_ATTEMPTS" --argjson recreate_intent "$REPAIR_RECREATE_INTENT" --argjson deploy_attempts "$REPAIR_DEPLOY_ATTEMPTS" --argjson secret_metadata "${REPAIR_SECRET_METADATA:-[]}" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-auth-repair-progress",status:"RED",operation_mode:"introspect-auth-repair",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$version,expected_image_digest:$digest,app_id:$pre_app},historical:{source_commit:"37565619dae31a61f67a095daa0cd15b06386237",version:"c38233a3-4ede-4803-8e1c-1a3b5ad4d667",app_id:"a030ba5d-9a44-409e-b5f1-a2e6cfa50ea7",image_digest:"sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5"},repair:{wrong_name:"FABRIC_INTROSPECT_KEY",correct_name:"FABRIC_INTROSPECT_AUTH_KEY",phase:$phase,pre_repair_app_id:$pre_app,final_app_id:$final_app,secret_put_completed:$secret_put,recreate_completed:$recreate,provider_secret_metadata:$secret_metadata},steps:{secret_put:{intent:$secret_put_intent,completed:$secret_put,attempts:$secret_put_attempts},delete:{intent:$delete_intent,completed:$delete_completed,attempts:$delete_attempts},deploy:{intent:$recreate_intent,completed:$recreate,attempts:$deploy_attempts}},secrets:{wrong_binding_name:"FABRIC_INTROSPECT_KEY",correct_binding_name:"FABRIC_INTROSPECT_AUTH_KEY",values:"excluded",hashes:"excluded"},secret_values:"excluded",secret_hashes:"excluded"}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$REPAIR_PROGRESS"
+  jq -n --arg commit "$COMMIT" --arg pre_version "$REPAIR_PRE_VERSION" --arg final_version "$REPAIR_FINAL_VERSION" --arg digest "$DIGEST" --arg phase "$phase" --arg pre_app "$pre_app" --arg final_app "$final_app" --argjson secret_put "$REPAIR_SECRET_PUT" --argjson recreate "$REPAIR_RECREATE" --argjson secret_put_intent "$REPAIR_SECRET_PUT_INTENT" --argjson secret_put_attempts "$REPAIR_SECRET_PUT_ATTEMPTS" --argjson delete_intent "$REPAIR_DELETE_INTENT" --argjson delete_completed "$REPAIR_DELETE_COMPLETED" --argjson delete_attempts "$REPAIR_DELETE_ATTEMPTS" --argjson recreate_intent "$REPAIR_RECREATE_INTENT" --argjson deploy_attempts "$REPAIR_DEPLOY_ATTEMPTS" --argjson secret_metadata "${REPAIR_SECRET_METADATA:-[]}" '{schema_version:"evidence/v1",artifact_id:"fabricd-observability-key-bootstrap-introspect-auth-repair-progress",status:"RED",operation_mode:"introspect-auth-repair",source:{repository:"corelink-runners",commit_sha:$commit},provider:{worker:"corelink-fabricd",expected_version:$pre_version,expected_image_digest:$digest,app_id:$pre_app},historical:{source_commit:"37565619dae31a61f67a095daa0cd15b06386237",version:"c38233a3-4ede-4803-8e1c-1a3b5ad4d667",app_id:"a030ba5d-9a44-409e-b5f1-a2e6cfa50ea7",image_digest:"sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5"},repair:{wrong_name:"FABRIC_INTROSPECT_KEY",correct_name:"FABRIC_INTROSPECT_AUTH_KEY",phase:$phase,pre_repair_app_id:$pre_app,pre_repair_version:$pre_version,final_app_id:$final_app,final_version:$final_version,secret_put_completed:$secret_put,recreate_completed:$recreate,provider_secret_metadata:$secret_metadata},steps:{secret_put:{intent:$secret_put_intent,completed:$secret_put,attempts:$secret_put_attempts},delete:{intent:$delete_intent,completed:$delete_completed,attempts:$delete_attempts},deploy:{intent:$recreate_intent,completed:$recreate,attempts:$deploy_attempts}},secrets:{wrong_binding_name:"FABRIC_INTROSPECT_KEY",correct_binding_name:"FABRIC_INTROSPECT_AUTH_KEY",values:"excluded",hashes:"excluded"},secret_values:"excluded",secret_hashes:"excluded"}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$REPAIR_PROGRESS"
 }
 
 assert_historical_repair_authorization() {
@@ -365,11 +384,11 @@ assert_historical_repair_authorization() {
 }
 
 repair_final_proof() {
-  local label="$1" expected_app="$2" post post_version post_digest post_app
+  local label="$1" expected_app="$2" expected_version="$3" post post_version post_digest post_app
   post="$(snapshot "$label-provider" "$expected_app" true)" || die 'repair final provider capture failed'
   post_version="$(printf '%s\n' "$post" | cut -f1)"; post_digest="$(printf '%s\n' "$post" | cut -f2)"; post_app="$(printf '%s\n' "$post" | cut -f3)"
   [ "$post_app" = "$expected_app" ] || die 'repair final application id mismatch'
-  [ "$post_version" = "$VERSION" ] && [ "$post_digest" = "$DIGEST" ] || die 'repair final provider tuple drift'
+  [ "$post_version" = "$expected_version" ] && [ "$post_digest" = "$DIGEST" ] || die 'repair final provider tuple drift'
   assert_frozen "$post_version" || die 'repair final admission freeze verification failed'
   assert_fleet_quiet "$label-fleet" || die 'repair final fleet quiescence proof failed'
   PROBE_STATUS=''; probe_introspection "$label-introspection" "$new_introspect_header" "$TMP_DIR/$label-introspection.json" "$TMP_DIR/$label-introspection.status" || die 'repair final introspection transport failed'
@@ -391,11 +410,11 @@ repair_preflight() {
   if [ -n "$expected_app" ]; then
     current="$(snapshot "$label-provider" "$expected_app" false)" || die 'repair provider preflight capture failed'
     current_version="$(printf '%s\n' "$current" | cut -f1)"; current_digest="$(printf '%s\n' "$current" | cut -f2)"; current_app="$(printf '%s\n' "$current" | cut -f3)"
-    [ "$current_app" = "$expected_app" ] && [ "$current_version" = "$VERSION" ] && [ "$current_digest" = "$DIGEST" ] || die 'repair current provider tuple drift'
+    [ "$current_app" = "$expected_app" ] && [ "$current_version" = "$REPAIR_PRE_VERSION" ] && [ "$current_digest" = "$DIGEST" ] || die 'repair current provider tuple drift'
   else
     current="$(capture "$label-deployments" run_wrangler deployments list --name "$WORKER_NAME" --json)" || die 'repair absent-container deployment capture failed'
     current_version="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$current")" || die 'repair absent-container deployment version missing'
-    [ "$current_version" = "$VERSION" ] || die 'repair absent-container deployment version drift'
+    [ "$current_version" = "$REPAIR_PRE_VERSION" ] || die 'repair absent-container deployment version drift'
     log_event "$label provider_container=absent expected_digest=$DIGEST"
     assert_frozen "$current_version" || die 'repair absent-container admission is not frozen'
     assert_fleet_quiet "$label-fleet" || die 'repair absent-container fleet quiescence request failed'
@@ -424,6 +443,7 @@ assert_single_repair_target() {
 
 repair_introspect_auth_main() {
   local current_app post post_app
+  REPAIR_PRE_VERSION="$VERSION"; REPAIR_FINAL_VERSION="$VERSION"
   assert_historical_repair_authorization
   [ "$APP_ID" != "$HISTORICAL_RECOVERY_APP_ID" ] || die 'current repair app id must differ from the historical app id'
   assert_repair_secret_metadata || die 'repair provider secret metadata verification failed'
@@ -441,17 +461,70 @@ repair_introspect_auth_main() {
   write_repair_progress deploy "$current_app" '' || die 'cannot checkpoint repair deploy intent'
   run_safe repair-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair immediate fabricd recreate failed'
   post="$(snapshot repair-post-recreate "$APP_ID" true)" || die 'repair post-recreate provider capture failed'
-  post_app="$(printf '%s\n' "$post" | cut -f3)"; [ "$post_app" != "$APP_ID" ] || die 'repair recreated fabricd application id was reused'
+  post_app="$(printf '%s\n' "$post" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$post" | cut -f1)"; [ "$post_app" != "$APP_ID" ] || die 'repair recreated fabricd application id was reused'
   REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$current_app" "$post_app" || die 'cannot update post-recreate repair progress artifact'
-  REPAIR_PHASE='final-proof'; repair_final_proof repair-final "$post_app"
+  REPAIR_PHASE='final-proof'; repair_final_proof repair-final "$post_app" "$REPAIR_FINAL_VERSION"
   LINEAGE_OLD_APP_ID="$current_app"; log_event "repair=PASS pre_repair_app_id=$current_app final_app_id=$FINAL_APP_ID"
 }
 
 resume_introspect_auth_repair_main() {
-  local progress_pre progress_final progress_put progress_recreate progress_intent progress_attempts progress_delete_attempts progress_deploy_attempts containers old_count named_count discovered auth_expectation
+  local progress_phase progress_pre progress_final progress_pre_version progress_final_version progress_source failure_source progress_put progress_recreate progress_intent progress_attempts progress_delete_attempts progress_deploy_attempts containers old_count named_count discovered auth_expectation
   assert_historical_repair_authorization
   safe_file "$REPAIR_PROGRESS" || die 'repair resume requires owner-only 0600 progress artifact'
   safe_file "$REPAIR_FAILURE" || die 'repair resume requires owner-only 0600 repair failure artifact'
+  [ ! -e "$REPAIR_COMPLETE" ] && [ ! -L "$REPAIR_COMPLETE" ] || die 'repair resume completion marker already exists'
+  progress_phase="$(jq -er '.repair.phase' "$REPAIR_PROGRESS")" || die 'repair resume progress phase is missing'
+  if [ "$progress_phase" = final-proof ]; then
+    # The final-proof checkpoint is a completed mutation journal. Its provider
+    # tuple is intentionally the pre-repair tuple; VERSION/APP_ID are the
+    # current final deployment supplied by the operator. This branch performs
+    # only read-only proofs and never enters the bounded mutation replay below.
+    jq -e --arg commit "$COMMIT" --arg digest "$DIGEST" --arg final_app "$APP_ID" --arg final_version "$VERSION" '
+      .schema_version == "evidence/v1" and .artifact_id == "fabricd-observability-key-bootstrap-introspect-auth-repair-progress" and .status == "RED" and .operation_mode == "introspect-auth-repair" and
+      .source.repository == "corelink-runners" and (.source.commit_sha | type == "string" and test("^[a-f0-9]{40}$")) and .provider.worker == "corelink-fabricd" and .provider.expected_image_digest == $digest and .provider.app_id == .repair.pre_repair_app_id and
+      .historical.source_commit == "37565619dae31a61f67a095daa0cd15b06386237" and .historical.version == "c38233a3-4ede-4803-8e1c-1a3b5ad4d667" and .historical.app_id == "a030ba5d-9a44-409e-b5f1-a2e6cfa50ea7" and .historical.image_digest == "sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5" and
+      .repair.phase == "final-proof" and .repair.wrong_name == "FABRIC_INTROSPECT_KEY" and .repair.correct_name == "FABRIC_INTROSPECT_AUTH_KEY" and .secrets.wrong_binding_name == "FABRIC_INTROSPECT_KEY" and .secrets.correct_binding_name == "FABRIC_INTROSPECT_AUTH_KEY" and .secrets.values == "excluded" and .secrets.hashes == "excluded" and .secret_values == "excluded" and .secret_hashes == "excluded" and
+      (.repair.pre_repair_app_id | type == "string") and (.repair.pre_repair_app_id | length > 0) and (.repair.final_app_id == $final_app) and ($final_app != .repair.pre_repair_app_id) and
+      (.provider.expected_version | type == "string") and ((.repair.pre_repair_version // .provider.expected_version) == .provider.expected_version) and
+      ((.repair.final_version // $final_version) == $final_version) and
+      (.repair.secret_put_completed // .steps.secret_put.completed) == true and (.repair.recreate_completed // .steps.deploy.completed) == true and
+      .steps.secret_put.intent == false and .steps.secret_put.completed == true and .steps.secret_put.attempts == 1 and
+      .steps.delete.intent == false and .steps.delete.completed == true and .steps.delete.attempts == 1 and
+      .steps.deploy.intent == false and .steps.deploy.completed == true and .steps.deploy.attempts == 1
+    ' "$REPAIR_PROGRESS" >/dev/null || die 'final-proof progress artifact does not bind the complete pre/final lineage'
+    progress_pre="$(jq -er '.repair.pre_repair_app_id' "$REPAIR_PROGRESS")"
+    progress_pre_version="$(jq -er '.repair.pre_repair_version // .provider.expected_version' "$REPAIR_PROGRESS")"
+    progress_final="$(jq -er '.repair.final_app_id' "$REPAIR_PROGRESS")"
+    progress_final_version="$(jq -er --arg current "$VERSION" '.repair.final_version // $current' "$REPAIR_PROGRESS")"
+    progress_source="$(jq -er '.source.commit_sha' "$REPAIR_PROGRESS")"; failure_source="$(jq -er '.source.commit_sha' "$REPAIR_FAILURE")"
+    [ "$failure_source" = "$progress_source" ] || die 'final-proof artifact and progress source lineage differs'
+    if [ "$progress_source" != "$COMMIT" ]; then
+      git -C "$ROOT" merge-base --is-ancestor "$progress_source" "$COMMIT" || die 'final-proof source commit is not an ancestor of expected commit'
+    fi
+    if jq -e '((.repair | type) == "object") and (.repair.pre_repair_app_id? != null) and (.repair.final_app_id? != null) and (.repair.pre_repair_version? != null) and (.repair.final_version? != null)' "$REPAIR_FAILURE" >/dev/null; then
+      jq -e --arg digest "$DIGEST" --arg final_app "$APP_ID" --arg final_version "$VERSION" --arg pre_app "$progress_pre" --arg pre_version "$progress_pre_version" '
+        .schema_version == "evidence/v1" and .artifact_id == "fabricd-observability-key-bootstrap-introspect-auth-repair-failure" and .status == "RED" and .operation_mode == "introspect-auth-repair" and
+        .source.repository == "corelink-runners" and (.source.commit_sha | type == "string" and test("^[a-f0-9]{40}$")) and .provider.worker == "corelink-fabricd" and .provider.expected_version == $pre_version and .provider.expected_image_digest == $digest and .provider.app_id == $pre_app and
+        .phase == "final-proof" and .rerun_guard == "armed" and .secret_values == "excluded" and .secret_hashes == "excluded" and
+        .repair.pre_repair_app_id == $pre_app and .repair.final_app_id == $final_app and .repair.pre_repair_version == $pre_version and .repair.final_version == $final_version and
+        .repair.intents.secret_put == false and .repair.intents.delete == false and .repair.intents.deploy == false and .repair.attempts.secret_put == 1 and .repair.attempts.delete == 1 and .repair.attempts.deploy == 1
+      ' "$REPAIR_FAILURE" >/dev/null || die 'final-proof failure artifact does not bind the complete pre/final lineage'
+    else
+      jq -e --arg legacy "$LEGACY_REPAIR_PROGRESS_SOURCE_SHA" '.artifact_id == "fabricd-observability-key-bootstrap-introspect-auth-repair-failure" and .source.commit_sha == $legacy and .phase == "final-proof" and .status == "RED" and .rerun_guard == "armed" and .repair.wrong_name == "FABRIC_INTROSPECT_KEY" and .repair.correct_name == "FABRIC_INTROSPECT_AUTH_KEY" and .repair.attempts.secret_put == 1 and .repair.attempts.delete == 1 and .repair.attempts.deploy == 1 and .repair.intents.secret_put == false and .repair.intents.delete == false and .repair.intents.deploy == false' "$REPAIR_FAILURE" >/dev/null || die 'legacy final-proof failure artifact is outside the permitted compatibility lineage'
+    fi
+    [ "$progress_final" = "$APP_ID" ] && [ "$progress_final_version" = "$VERSION" ] || die 'final-proof current provider tuple does not match recorded final lineage'
+    [ "$progress_pre" != "$HISTORICAL_RECOVERY_APP_ID" ] || die 'final-proof pre-repair app cannot be historical app'
+    assert_repair_secret_metadata || die 'repair final-proof secret metadata verification failed'
+    containers="$(capture repair-final-proof-containers run_wrangler containers list --json)" || die 'repair final-proof container capture failed'
+    old_count="$(jq -er --arg id "$progress_pre" --arg n "$APP_NAME" '[.. | objects | select(.id? == $id and .name? == $n)] | length' "$containers")"
+    named_count="$(jq -er --arg n "$APP_NAME" '[.. | objects | select(.name? == $n)] | length' "$containers")"
+    [ "$old_count" = 0 ] && [ "$named_count" = 1 ] || die 'final-proof container lineage is absent or ambiguous'
+    REPAIR_PRE_VERSION="$progress_pre_version"; REPAIR_FINAL_VERSION="$VERSION"; REPAIR_SECRET_PUT=true; REPAIR_RECREATE=true; REPAIR_RESUMED=true; REPAIR_PHASE='resume-final-proof'
+    LINEAGE_OLD_APP_ID="$progress_pre"
+    repair_final_proof repair-resume "$APP_ID" "$REPAIR_FINAL_VERSION"
+    log_event "repair_resume=PASS pre_repair_app_id=$progress_pre final_app_id=$FINAL_APP_ID mutations_repeated=false"
+    return 0
+  fi
   jq -e --arg commit "$COMMIT" --arg version "$VERSION" --arg digest "$DIGEST" '
     .schema_version == "evidence/v1" and .artifact_id == "fabricd-observability-key-bootstrap-introspect-auth-repair-progress" and .status == "RED" and .operation_mode == "introspect-auth-repair" and
     .source.repository == "corelink-runners" and .source.commit_sha == $commit and .provider.worker == "corelink-fabricd" and .provider.expected_version == $version and .provider.expected_image_digest == $digest and .provider.app_id == .repair.pre_repair_app_id and
@@ -470,9 +543,9 @@ resume_introspect_auth_repair_main() {
     .schema_version == "evidence/v1" and .artifact_id == "fabricd-observability-key-bootstrap-introspect-auth-repair-failure" and .status == "RED" and .operation_mode == "introspect-auth-repair" and
     .source.repository == "corelink-runners" and .source.commit_sha == $commit and .provider.worker == "corelink-fabricd" and .provider.expected_version == $version and .provider.expected_image_digest == $digest and .rerun_guard == "armed" and .secret_values == "excluded" and .secret_hashes == "excluded"
   ' "$REPAIR_FAILURE" >/dev/null || die 'repair resume failure artifact does not bind current tuple'
-  progress_pre="$(jq -er '.repair.pre_repair_app_id' "$REPAIR_PROGRESS")"; progress_final="$(jq -er '.repair.final_app_id' "$REPAIR_PROGRESS")"; progress_put="$(jq -r '.steps.secret_put.completed' "$REPAIR_PROGRESS")"; progress_recreate="$(jq -r '.steps.deploy.completed' "$REPAIR_PROGRESS")"; progress_intent="$(jq -r '.steps.secret_put.intent' "$REPAIR_PROGRESS")"; progress_attempts="$(jq -er '.steps.secret_put.attempts' "$REPAIR_PROGRESS")"; progress_delete_attempts="$(jq -er '.steps.delete.attempts' "$REPAIR_PROGRESS")"; progress_deploy_attempts="$(jq -er '.steps.deploy.attempts' "$REPAIR_PROGRESS")"
+  progress_pre="$(jq -er '.repair.pre_repair_app_id' "$REPAIR_PROGRESS")"; progress_pre_version="$(jq -er '.repair.pre_repair_version // .provider.expected_version' "$REPAIR_PROGRESS")"; progress_final="$(jq -er '.repair.final_app_id' "$REPAIR_PROGRESS")"; progress_put="$(jq -r '.steps.secret_put.completed' "$REPAIR_PROGRESS")"; progress_recreate="$(jq -r '.steps.deploy.completed' "$REPAIR_PROGRESS")"; progress_intent="$(jq -r '.steps.secret_put.intent' "$REPAIR_PROGRESS")"; progress_attempts="$(jq -er '.steps.secret_put.attempts' "$REPAIR_PROGRESS")"; progress_delete_attempts="$(jq -er '.steps.delete.attempts' "$REPAIR_PROGRESS")"; progress_deploy_attempts="$(jq -er '.steps.deploy.attempts' "$REPAIR_PROGRESS")"
   assert_repair_secret_metadata || die 'repair resume provider secret metadata verification failed'
-  REPAIR_SECRET_PUT="$progress_put"; REPAIR_RECREATE="$progress_recreate"; REPAIR_SECRET_PUT_INTENT="$progress_intent"; REPAIR_SECRET_PUT_ATTEMPTS="$progress_attempts"; REPAIR_DELETE_ATTEMPTS="$progress_delete_attempts"; REPAIR_DEPLOY_ATTEMPTS="$progress_deploy_attempts"
+  REPAIR_PRE_VERSION="$progress_pre_version"; REPAIR_FINAL_VERSION="$VERSION"; REPAIR_SECRET_PUT="$progress_put"; REPAIR_RECREATE="$progress_recreate"; REPAIR_SECRET_PUT_INTENT="$progress_intent"; REPAIR_SECRET_PUT_ATTEMPTS="$progress_attempts"; REPAIR_DELETE_ATTEMPTS="$progress_delete_attempts"; REPAIR_DEPLOY_ATTEMPTS="$progress_deploy_attempts"
   [ "$APP_ID" != "$HISTORICAL_RECOVERY_APP_ID" ] || die 'repair resume current app cannot be historical app'
   auth_expectation=rejected; [ "$progress_put" = true ] && auth_expectation=accepted
   containers="$(capture repair-resume-preflight-containers run_wrangler containers list --json)" || die 'repair resume container discrimination failed'
@@ -504,23 +577,23 @@ resume_introspect_auth_repair_main() {
       REPAIR_DELETE_COMPLETED=true; REPAIR_DELETE_INTENT=false
       REPAIR_PHASE='deploy'; REPAIR_RECREATE_INTENT=true; REPAIR_DEPLOY_ATTEMPTS=$((REPAIR_DEPLOY_ATTEMPTS + 1)); [ "$REPAIR_DEPLOY_ATTEMPTS" -le 2 ] || die 'repair deploy replay cap is exhausted'; write_repair_progress deploy "$progress_pre" '' || die 'cannot checkpoint resume deploy intent'
       run_safe repair-resume-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair resume immediate recreate failed'
-      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
+      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
       REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint resume recreate result'
     elif [ "$old_count" = 0 ] && [ "$named_count" = 0 ]; then
       [ "$REPAIR_DEPLOY_ATTEMPTS" -lt 2 ] || die 'repair deploy replay cap is exhausted'
       REPAIR_PHASE='deploy'; REPAIR_RECREATE_INTENT=true; REPAIR_DEPLOY_ATTEMPTS=$((REPAIR_DEPLOY_ATTEMPTS + 1)); write_repair_progress deploy "$progress_pre" '' || die 'cannot checkpoint deploy retry intent'
       MUTATION_STARTED=1; run_safe repair-resume-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair resume immediate recreate failed'
-      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
+      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
       REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint deploy retry result'
     elif [ "$old_count" = 0 ] && [ "$named_count" = 1 ]; then
       progress_final="$(jq -er --arg n "$APP_NAME" '[.. | objects | select(.name? == $n)] | .[0].id' "$containers")"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume container state is ambiguous'
       [ "$APP_ID" = "$progress_final" ] || die 'repair resume must pin the discovered recreated app'
-      discovered="$(snapshot repair-resume-discovered "$progress_final" true)" || die 'repair resume recreated app proof failed'; REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint discovered recreate'
+      discovered="$(snapshot repair-resume-discovered "$progress_final" true)" || die 'repair resume recreated app proof failed'; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint discovered recreate'
     else die 'repair resume container state is absent, duplicate, or ambiguous'; fi
   fi
   [ "$APP_ID" = "$progress_final" ] && [ "$APP_ID" != "$progress_pre" ] || die 'repair resume current app id must equal the recorded post-recreate app id'
   REPAIR_RESUMED=true; REPAIR_PHASE='resume-final-proof'
-  repair_final_proof repair-resume "$APP_ID"
+  repair_final_proof repair-resume "$APP_ID" "$REPAIR_FINAL_VERSION"
   LINEAGE_OLD_APP_ID="$progress_pre"; log_event "repair_resume=PASS pre_repair_app_id=$progress_pre final_app_id=$FINAL_APP_ID mutations_repeated=false"
 }
 

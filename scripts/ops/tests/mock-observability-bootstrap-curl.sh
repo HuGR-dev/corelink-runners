@@ -44,7 +44,11 @@ case "$url" in
       introspect_calls=$((introspect_calls + 1))
       printf '%s\n' "$introspect_calls" > "$MOCK_STATE.introspect-calls"
     fi
+    if [ -n "$header_file" ] && grep -q '^CF-Access-Client-Id:' "$header_file"; then : > "$MOCK_STATE.access-client-id-header"; fi
+    if [ -n "$header_file" ] && grep -q '^CF-Access-Client-Secret:' "$header_file"; then : > "$MOCK_STATE.access-client-secret-header"; fi
     case "$scenario:$old_key:$introspect_calls" in
+      repair-final-proof-no-access:*) status=403; body='{"error":"forbidden"}' ;;
+      repair-final-proof:*) body="{\"valid\":true,\"tenant_id\":\"${MOCK_TENANT:?}\",\"max_concurrency\":1}" ;;
       repair-zero-named:*) body="{\"valid\":true,\"tenant_id\":\"${MOCK_TENANT:?}\",\"max_concurrency\":1}" ;;
       recover-403:introspect-key:1|recover-403:*:1|auth-403:introspect-key:*) status=403; body='{"error":"forbidden"}' ;;
       recover-401:introspect-key:1|recover-401:*:1|auth-401:introspect-key:*) status=401; body='{"error":"unauthorized"}' ;;
