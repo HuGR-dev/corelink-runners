@@ -461,7 +461,7 @@ repair_introspect_auth_main() {
   write_repair_progress deploy "$current_app" '' || die 'cannot checkpoint repair deploy intent'
   run_safe repair-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair immediate fabricd recreate failed'
   post="$(snapshot repair-post-recreate "$APP_ID" true)" || die 'repair post-recreate provider capture failed'
-  post_app="$(printf '%s\n' "$post" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$post" | cut -f1)"; [ "$post_app" != "$APP_ID" ] || die 'repair recreated fabricd application id was reused'
+  post_app="$(printf '%s\n' "$post" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$post" | cut -f1)"; FINAL_APP_ID="$post_app"; [ "$post_app" != "$APP_ID" ] || die 'repair recreated fabricd application id was reused'
   REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$current_app" "$post_app" || die 'cannot update post-recreate repair progress artifact'
   REPAIR_PHASE='final-proof'; repair_final_proof repair-final "$post_app" "$REPAIR_FINAL_VERSION"
   LINEAGE_OLD_APP_ID="$current_app"; log_event "repair=PASS pre_repair_app_id=$current_app final_app_id=$FINAL_APP_ID"
@@ -577,18 +577,18 @@ resume_introspect_auth_repair_main() {
       REPAIR_DELETE_COMPLETED=true; REPAIR_DELETE_INTENT=false
       REPAIR_PHASE='deploy'; REPAIR_RECREATE_INTENT=true; REPAIR_DEPLOY_ATTEMPTS=$((REPAIR_DEPLOY_ATTEMPTS + 1)); [ "$REPAIR_DEPLOY_ATTEMPTS" -le 2 ] || die 'repair deploy replay cap is exhausted'; write_repair_progress deploy "$progress_pre" '' || die 'cannot checkpoint resume deploy intent'
       run_safe repair-resume-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair resume immediate recreate failed'
-      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
+      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; FINAL_APP_ID="$progress_final"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
       REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint resume recreate result'
     elif [ "$old_count" = 0 ] && [ "$named_count" = 0 ]; then
       [ "$REPAIR_DEPLOY_ATTEMPTS" -lt 2 ] || die 'repair deploy replay cap is exhausted'
       REPAIR_PHASE='deploy'; REPAIR_RECREATE_INTENT=true; REPAIR_DEPLOY_ATTEMPTS=$((REPAIR_DEPLOY_ATTEMPTS + 1)); write_repair_progress deploy "$progress_pre" '' || die 'cannot checkpoint deploy retry intent'
       MUTATION_STARTED=1; run_safe repair-resume-immediate-recreate run_wrangler deploy --keep-vars --strict --containers-rollout=immediate || die 'repair resume immediate recreate failed'
-      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
+      discovered="$(snapshot repair-resume-post-recreate "$progress_pre" true)" || die 'repair resume post-recreate discovery failed'; progress_final="$(printf '%s\n' "$discovered" | cut -f3)"; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; FINAL_APP_ID="$progress_final"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume recreated app id was reused'
       REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint deploy retry result'
     elif [ "$old_count" = 0 ] && [ "$named_count" = 1 ]; then
       progress_final="$(jq -er --arg n "$APP_NAME" '[.. | objects | select(.name? == $n)] | .[0].id' "$containers")"; [ "$progress_final" != "$progress_pre" ] || die 'repair resume container state is ambiguous'
       [ "$APP_ID" = "$progress_final" ] || die 'repair resume must pin the discovered recreated app'
-      discovered="$(snapshot repair-resume-discovered "$progress_final" true)" || die 'repair resume recreated app proof failed'; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint discovered recreate'
+      discovered="$(snapshot repair-resume-discovered "$progress_final" true)" || die 'repair resume recreated app proof failed'; REPAIR_FINAL_VERSION="$(printf '%s\n' "$discovered" | cut -f1)"; FINAL_APP_ID="$progress_final"; REPAIR_RECREATE=true; REPAIR_RECREATE_INTENT=false; REPAIR_PHASE='final-proof'; write_repair_progress final-proof "$progress_pre" "$progress_final" || die 'cannot checkpoint discovered recreate'
     else die 'repair resume container state is absent, duplicate, or ambiguous'; fi
   fi
   [ "$APP_ID" = "$progress_final" ] && [ "$APP_ID" != "$progress_pre" ] || die 'repair resume current app id must equal the recorded post-recreate app id'
