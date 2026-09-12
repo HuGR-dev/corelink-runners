@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+dependency="deploy/cloudflare/node_modules/jsonc-parser/lib/umd/main.js"
+if [[ ! -f "$dependency" ]]; then
+  echo "check-repo-tenant-pat-map selftest dependency preflight failed: $dependency is missing" >&2
+  echo 'Install it with: (cd deploy/cloudflare && npm ci --ignore-scripts)' >&2
+  exit 1
+fi
 python3 - <<'PY'
 import json
 import os
