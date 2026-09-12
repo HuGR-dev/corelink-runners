@@ -150,7 +150,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install deps (wrangler)
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # ── Busy-fleet gate — the roll must not start while boxes hold live work ──
       # Runs HERE, as the last step before the deploy, rather than as a separate
