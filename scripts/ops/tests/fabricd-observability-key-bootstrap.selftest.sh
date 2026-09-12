@@ -47,7 +47,7 @@ make_fixture() {
   printf '%s\n' '{"image":"registry.example/corelink@sha256:1111111111111111111111111111111111111111111111111111111111111111"}' > "$root/deploy/cloudflare-fabricd/wrangler.jsonc"
   git -C "$root" init -q; git -C "$root" config user.email bootstrap@example.invalid; git -C "$root" config user.name bootstrap; git -C "$root" add .; git -C "$root" commit -qm baseline; commit="$(git -C "$root" rev-parse HEAD)"
   printf '%s\n' fleet-key > "$oob/fleet"; printf '%s\n' introspect-key > "$oob/introspect"; printf '%s\n' pat > "$oob/pat"; chmod 600 "$oob/fleet" "$oob/introspect" "$oob/pat"
-  export root oob state commit
+  export root oob state commit MOCK_CURRENT_APP_ID=app-old MOCK_NEW_APP_ID=app-new
 }
 
 dispatch_case() {
@@ -317,6 +317,7 @@ rerun_new="$oob/new-introspect"; printf '%s\n' bmV3LWludHJvc3BlY3Qta2V5 > "$reru
 export MOCK_STATE="$state" MOCK_SCENARIO=recover-403 MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION=version-good MOCK_TENANT=tenant-test
 recovery_args=(--mode mock --recover-introspect --ack "$recovery_ack" --mock-wrangler "$wrangler" --curl-bin "$curl_mock" --repo-root "$root" --expected-commit "$commit" --expected-version version-good --fabricd-app-id app-old --expected-image-digest "$MOCK_DIGEST" --oob-dir "$oob" --fleet-key-file "$oob/fleet" --introspect-key-file "$oob/introspect" --new-introspect-key-file "$rerun_new" --introspect-pat-file "$oob/pat" --tenant-id tenant-test --evidence-file "$root/evidence/result.json" --status-url https://status.test/internal/v1/status --fleet-url https://spawn.test/internal/v1/fleet/busy --introspect-url https://corelink-api.humangr.com/internal/v1/auth/introspect --stability-seconds 0)
 "$harness" "${recovery_args[@]}" >/dev/null 2>"$tmp/recovery-rerun-first.stderr"
+test -f "$oob/.fabricd-observability-key-bootstrap-introspect-recovery.complete"
 set +e
 "$harness" "${recovery_args[@]}" >/dev/null 2>"$tmp/recovery-rerun-second.stderr"
 rerun_rc=$?; set -e
