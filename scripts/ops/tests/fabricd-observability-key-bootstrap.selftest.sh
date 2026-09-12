@@ -300,6 +300,7 @@ repair_oob="$tmp/oob-repair-post-failure"; repair_state="$tmp/state-repair-post-
 test -f "$repair_oob/fabricd-observability-key-bootstrap-introspect-auth-repair-progress.json"
 test -f "$repair_oob/fabricd-observability-key-bootstrap-introspect-auth-repair-failure.json"
 test "$(jq -r '.repair.recreate_completed' "$repair_oob/fabricd-observability-key-bootstrap-introspect-auth-repair-progress.json")" = true
+test "$(jq -r '.repair.final_app_id' "$repair_oob/fabricd-observability-key-bootstrap-introspect-auth-repair-failure.json")" = a035e7f9-26d7-4537-9863-568872efc6ba
 test -f "$repair_oob/.fabricd-observability-key-bootstrap-introspect-recovery.in-progress"
 secret_put_before="$(cat "$repair_state.secret-put-introspect-count")"; deploy_before="$(cat "$repair_state.deploy")"
 export MOCK_STATE="$repair_state" MOCK_SCENARIO=repair-403 MOCK_CURRENT_APP_ID='13e744e1-921e-4dfb-8423-7662a804222e' MOCK_NEW_APP_ID='a035e7f9-26d7-4537-9863-568872efc6ba' MOCK_DIGEST='sha256:1111111111111111111111111111111111111111111111111111111111111111' MOCK_VERSION='13e744e1-921e-4dfb-8423-7662a804222e' MOCK_TENANT=tenant-test
