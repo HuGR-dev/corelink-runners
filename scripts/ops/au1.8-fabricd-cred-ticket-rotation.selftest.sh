@@ -478,9 +478,38 @@ rm -rf -- "$usage_log_dir"
 if jq -e '(.busy | type) == "number" and .busy == 0 and (.unverifiable | type) == "number" and .unverifiable == 0' <<< '{"unverifiable":0}' >/dev/null; then
   echo "FAIL: missing fleet busy must fail closed" >&2; exit 1
 fi
-if jq -e '(.per_tenant | type) == "array" and all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<< '{"per_tenant":[{}]}' >/dev/null; then
-  echo "FAIL: missing occupancy must fail closed" >&2; exit 1
+occupancy_filter='(.per_tenant | type) == "array" and (.per_tenant | all(.[]; ((.occupied | type) == "number" and .occupied == 0)))'
+if ! jq -e "$occupancy_filter" <<< '{"per_tenant":[]}' >/dev/null; then
+  echo "FAIL: empty occupancy must pass when the tenant set is empty" >&2; exit 1
 fi
+if ! jq -e "$occupancy_filter" <<< '{"per_tenant":[{"tenant":"tenant-a","occupied":0,"peak":0}]}' >/dev/null; then
+  echo "FAIL: zero occupancy singleton must pass" >&2; exit 1
+fi
+for fixture in \
+  '{"per_tenant":[{"tenant":"tenant-a","occupied":1}]}' \
+  '{"per_tenant":[{"tenant":"tenant-a"}]}' \
+  '{"per_tenant":[{"tenant":"tenant-a","occupied":"0"}]}' \
+  '{"per_tenant":{"tenant-a":{"occupied":0}}}' \
+  '{"per_tenant":[[{"tenant":"tenant-a","occupied":0}]]}'; do
+  if jq -e "$occupancy_filter" <<< "$fixture" >/dev/null; then
+    echo "FAIL: malformed or occupied occupancy must fail closed: $fixture" >&2; exit 1
+  fi
+done
+
+pause_filter='([.[] | select(.name == "AUTOSCALER_REDRIVE_PAUSED" or .name == "AUTOSCALER_INTAKE_PAUSED")] | sort_by(.name)) as $pauses | ($pauses | length) == 2 and ($pauses | map(.name) | unique | length) == 2 and all($pauses[]; (.type == "plain_text" and (.temporary_value | type) == "string" and .temporary_value == "1"))'
+if ! jq -e "$pause_filter" <<< '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"},{"name":"AUTOSCALER_INTAKE_PAUSED","type":"plain_text","temporary_value":"1"}]' >/dev/null; then
+  echo "FAIL: both pause bindings set to string 1 must pass" >&2; exit 1
+fi
+for fixture in \
+  '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"}]' \
+  '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"},{"name":"AUTOSCALER_INTAKE_PAUSED","type":"plain_text","temporary_value":"0"}]' \
+  '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":1},{"name":"AUTOSCALER_INTAKE_PAUSED","type":"plain_text","temporary_value":"1"}]' \
+  '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"},{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"}]' \
+  '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"secret_text","temporary_value":"1"},{"name":"AUTOSCALER_INTAKE_PAUSED","type":"plain_text","temporary_value":"1"}]'; do
+  if jq -e "$pause_filter" <<< "$fixture" >/dev/null; then
+    echo "FAIL: missing or malformed pause binding must fail closed: $fixture" >&2; exit 1
+  fi
+done
 
 printf 'test-mint-key\n' > "$test_mint_key"
 printf 'observability-key\n' > "$observability_key"
