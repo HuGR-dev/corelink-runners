@@ -730,4 +730,78 @@ if ! remote_baseline_case pass '[
   exit 1
 fi
 
+# A recreated container can briefly return 503 while the Worker is becoming
+# ready.  Accept only a bounded transition to 200; a persistent 503 remains
+# a visible RED result with bounded diagnostics.
+health_wait_fn="$(sed -n '/^wait_for_health() {/,/^}$/p' "$harness")"
+health_wait_case() {
+  local expected="$1" sequence="$2" max_secs="$3" tmp rc
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-health-wait.XXXXXX")"
+  set +e
+  SEQUENCE="$sequence" HEALTH_TMP="$tmp" bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    TMP_DIR="$HEALTH_TMP"; HEALTH_URL=https://health.invalid
+    HEALTH_READY_MAX_SECS="$2"; HEALTH_READY_INTERVAL_SECS=1; EVENT_LOG="$TMP_DIR/events"
+    : > "$TMP_DIR/calls"
+    curl() {
+      n=$(($(wc -l < "$TMP_DIR/calls") + 1)); printf "%s\n" "$n" >> "$TMP_DIR/calls"
+      status=$(printf "%s" "$SEQUENCE" | cut -d, -f"$n")
+      [[ -n "$status" ]] || status=503
+      printf "%s" "$status"
+    }
+    scrub_file() { :; }
+    log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
+    wait_for_health recreated
+  ' -- "$health_wait_fn" "$max_secs"
+  rc=$?
+  set -e
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 ]] && rg -q 'health-ready=GREEN http_status=200 .*attempts=2' "$tmp/events"
+  else
+    [[ "$rc" != 0 ]] && rg -q 'health-ready=RED http_status=503 .*attempts=' "$tmp/events"
+  fi
+  rc=$?
+  rm -rf -- "$tmp"
+  return "$rc"
+}
+if ! health_wait_case pass '503,200' 3 || ! health_wait_case fail '503' 1; then
+  echo 'FAIL: health readiness must accept only bounded 503-to-200 startup transitions' >&2
+  exit 1
+fi
+
+# A failed signer proof is RED, but it must never bypass temporary-key removal,
+# disarm/recreate, final capture, or final remote-binding confirmation.
+rollback_fn="$(sed -n '/^rollback_old() {/,/^}$/p' "$harness")"
+rollback_tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-rollback-cleanup.XXXXXX")"
+if ! ROLLBACK_TMP="$rollback_tmp" bash -u -c '
+  set -Eeuo pipefail
+  eval "$1"
+  CURRENT_WORKER_VERSION=worker-final
+  OLD_SECRET_FILE=old-secret-file; TEST_MINT_KEY_FILE=test-mint-key-file
+  MINT_FIXTURE_FAILURE=transport
+  log_event() { printf "%s\n" "$*" >> "$ROLLBACK_TMP/events"; }
+  put_secret() { return 0; }
+  recreate() { printf "recreate-%s\n" "$1" >> "$ROLLBACK_TMP/calls"; return 0; }
+  capture_state() { printf "capture-%s\n" "$1" >> "$ROLLBACK_TMP/calls"; return 0; }
+  mint_fixture() { MINT_FIXTURE_FAILURE=transport; return 1; }
+  hmac_ticket() { printf ignored; }
+  redeem_status() { printf 200; }
+  delete_test_key() { printf "delete-key\n" >> "$ROLLBACK_TMP/calls"; return 0; }
+  assert_test_key_absent() { printf "key-absent\n" >> "$ROLLBACK_TMP/calls"; return 0; }
+  assert_remote_bindings() { printf "remote-%s\n" "$3" >> "$ROLLBACK_TMP/calls"; return 0; }
+  if rollback_old; then exit 1; fi
+  rg -q '^delete-key$' "$ROLLBACK_TMP/calls"
+  rg -q '^recreate-0$' "$ROLLBACK_TMP/calls"
+  rg -q '^capture-rollback-final$' "$ROLLBACK_TMP/calls"
+  rg -q '^key-absent$' "$ROLLBACK_TMP/calls"
+  rg -q '^remote-disarmed$' "$ROLLBACK_TMP/calls"
+  rg -q "rollback-signer-proof=RED leaf=mint-transport" "$ROLLBACK_TMP/events"
+' -- "$rollback_fn"; then
+  rm -rf -- "$rollback_tmp"
+  echo 'FAIL: rollback signer-proof failure must still complete deterministic disarm cleanup' >&2
+  exit 1
+fi
+rm -rf -- "$rollback_tmp"
+
 echo "AU1.8 focused gates: PASS"
