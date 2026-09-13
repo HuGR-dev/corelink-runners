@@ -263,7 +263,7 @@ usage_fetch_case() {
   log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
   printf '%s\n' '#!/usr/bin/env bash' \
     'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
-    'printf '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}\n'\'' > "${MOCK_BODY:?}"' \
+    'printf "%s\\n" '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}'\'' > "${MOCK_BODY:?}"' \
     'printf "%s" "${MOCK_HTTP:?}"; exit "${MOCK_RC:?}"' > "$mock"
   chmod 700 "$mock"
   printf 'usage-secret-value\n' > "$tmp/pat"
@@ -278,7 +278,7 @@ usage_fetch_case() {
       log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
       if usage="$(fetch_usage_response)"; then
         [[ "'"$expected"'" == pass ]] || exit 10
-        [[ "$usage" == *'"active_now":0'* ]] || exit 11
+        printf '%s\n' "$usage" | jq -e ".active_now == 0" >/dev/null || exit 11
         printf passed > "$TMP_DIR/occupancy"
       else
         [[ "'"$expected"'" == fail ]] || exit 12
