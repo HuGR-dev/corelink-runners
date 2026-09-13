@@ -125,9 +125,9 @@ export class NormalIntakeInbox {
     return this.storage.transaction(async tx => {
       const marker: A317ProofRecord = { ...proof, event_id: normalized.event_id, body_sha256: normalized.body_sha256, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" };
       const key = eventKey(normalized.event_id), markerKey = proofKey(normalized.event_id), nonceKey = proofNonceKey(proof.run_id, proof.nonce), slotKey = proofSlotKey(proof.run_id, proof.phase, proof.index);
-      const runKey = proofRunKey(proof.run_id); const run = await tx.get<{ phase?: unknown; build_sha?: unknown; repo?: unknown; labels?: unknown; expires_at_ms?: unknown; count?: unknown }>(runKey);
-      const runValue = { phase: proof.phase, build_sha: proof.build_sha, repo: normalized.repo, labels: normalized.labels, expires_at_ms: proof.expires_at_ms, count: 1 };
-      if (run !== undefined && (run.phase !== proof.phase || run.build_sha !== proof.build_sha || run.repo !== normalized.repo || JSON.stringify(run.labels) !== JSON.stringify(normalized.labels) || run.expires_at_ms !== proof.expires_at_ms || !Number.isSafeInteger(run.count) || (run.count as number) >= 100)) return { status: "conflict" as const };
+      const runKey = proofRunKey(proof.run_id); const run = await tx.get<{ phase?: unknown; build_sha?: unknown; repo?: unknown; installation_id?: unknown; labels?: unknown; expires_at_ms?: unknown; count?: unknown }>(runKey);
+      const runValue = { phase: proof.phase, build_sha: proof.build_sha, repo: normalized.repo, installation_id: normalized.installation_id, labels: normalized.labels, expires_at_ms: proof.expires_at_ms, count: 1 };
+      if (run !== undefined && (run.phase !== proof.phase || run.build_sha !== proof.build_sha || run.repo !== normalized.repo || run.installation_id !== normalized.installation_id || JSON.stringify(run.labels) !== JSON.stringify(normalized.labels) || run.expires_at_ms !== proof.expires_at_ms || !Number.isSafeInteger(run.count) || (run.count as number) >= 100)) return { status: "conflict" as const };
       const prior = await tx.get<unknown>(markerKey); const slot = await tx.get<unknown>(slotKey); const nonce = await tx.get<unknown>(nonceKey);
       if (prior !== undefined || slot !== undefined || nonce !== undefined) {
         const immutable = prior && typeof prior === "object" ? { ...(prior as A317ProofRecord), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" as const } : prior;

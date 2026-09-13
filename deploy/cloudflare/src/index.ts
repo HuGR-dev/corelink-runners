@@ -5468,7 +5468,7 @@ export default {
 // The actual route table, factored out of `fetch` so the top-level guard above
 // can wrap it uniformly. Behavior is byte-identical to before the guard was
 // added — only the outer catch is new.
-interface A317LiveClaim { v: 1; run_id: string; phase: "missing_key" | "wrong_key" | "store_unavailable"; i: number; exp_ms: number; build_sha: string; nonce: string; }
+interface A317LiveClaim { v: 1; run_id: string; phase: "missing_key" | "wrong_key" | "store_unavailable"; i: number; exp_ms: number; build_sha: string; nonce: string; installation_id: string; }
 const A317_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const A317_SHA = /^[0-9a-f]{7,64}$/i;
 function a317Base64Url(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }
@@ -5488,7 +5488,7 @@ async function verifyA317LiveClaim(request: Request, env: Env): Promise<A317Live
   let claim: Partial<A317LiveClaim>;
   try { claim = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(payload)) as Partial<A317LiveClaim>; } catch { return null; }
   const fields = Object.keys(claim).sort().join(",");
-  if (fields !== "build_sha,exp_ms,i,nonce,phase,run_id,v" || claim.v !== 1 || !A317_UUID.test(claim.run_id ?? "")
+  if (fields !== "build_sha,exp_ms,i,installation_id,nonce,phase,run_id,v" || claim.v !== 1 || !A317_UUID.test(claim.run_id ?? "") || !/^[1-9][0-9]{0,18}$/.test(claim.installation_id ?? "")
     || !["missing_key", "wrong_key", "store_unavailable"].includes(claim.phase as string) || !Number.isSafeInteger(claim.i) || claim.i! < 0 || claim.i! > 99
     || !Number.isSafeInteger(claim.exp_ms) || claim.exp_ms! <= Date.now() || claim.exp_ms! > Date.now() + 600_000
     || !A317_SHA.test(claim.build_sha ?? "") || claim.build_sha !== build || !/^[A-Za-z0-9_-]{16,128}$/.test(claim.nonce ?? "")) return null;
@@ -5720,7 +5720,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (a317Claim) {
           const proofRepo = env.A317_LIVE_PROOF_REPO ?? "";
           const proofLabel = "corelink-a317-proof";
-          if (proofRepo !== repo || jobLabels.length !== 1 || jobLabels[0] !== proofLabel
+          if (proofRepo !== repo || a317Claim.installation_id !== installationId || jobLabels.length !== 1 || jobLabels[0] !== proofLabel
             || parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "paused") a317Claim = null;
         }
         if (a317Claim) {
