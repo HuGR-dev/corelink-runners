@@ -372,13 +372,14 @@ classify_mint_failure() {
     (.error // .code // "") as $e |
     if ($e | type) != "string" then "unknown"
     elif $e == "CAS PAT mint failed" then "cas_pat_mint_failed"
+    elif $e == "fabricd upstream timeout" then "worker_upstream_timeout"
     elif ($e | startswith("test-mint requires the cred-ticket signer")) then "mint_not_armed"
     elif $e == "test lease admission refused" then "lease_admission_refused"
     elif $e == "lease ledger unavailable" then "ledger_unavailable"
     elif $e == "lease ledger refused Pending->Held" then "ledger_transition_failed"
     else "unknown" end' <<<"$body" 2>/dev/null || printf '%s' unknown)"
   case "$error_code" in
-    cas_pat_mint_failed|mint_not_armed|lease_admission_refused|ledger_unavailable|ledger_transition_failed) ;;
+    cas_pat_mint_failed|worker_upstream_timeout|mint_not_armed|lease_admission_refused|ledger_unavailable|ledger_transition_failed) ;;
     *) error_code=unknown ;;
   esac
   cf_ray="absent"
