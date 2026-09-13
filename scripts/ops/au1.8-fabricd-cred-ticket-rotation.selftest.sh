@@ -868,7 +868,8 @@ publish_failure_case() {
     [[ ! -e "$puts" && "$NEW_SECRET_TMP" == "" ]]
     [[ -z "$(find "$dir" -name ".au18-new-secret.*" -print -quit)" ]]
     case "$3" in
-      symlink|race) [[ "$(cat "$dir/sentinel")" == sentinel ]] ;;
+      symlink) [[ "$(cat "$dir/sentinel")" == sentinel ]] ;;
+      race) [[ "$(cat "$NEW_SECRET_FILE")" == sentinel ]] ;;
       generator) [[ ! -e "$NEW_SECRET_FILE" && ! -L "$NEW_SECRET_FILE" ]] ;;
     esac
   ' -- "$file_mode_fn" "$publish_fn" "$kind"
@@ -918,11 +919,12 @@ stability_binding_case() {
     set -Eeuo pipefail
     eval "$1"; eval "$2"; eval "$3"
     TMP_DIR="$STABILITY_TMP"; APP_ID=app-a; WORKER_NAME=worker; CONTAINER_APP_NAME=app
+    REMOTE_BASELINE_FILE="$TMP_DIR/baseline.json"; printf "[]" > "$REMOTE_BASELINE_FILE"
     EXPECTED_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     capture_json() {
       case "$1" in
         *deployments) printf "[{\"created_on\":\"2026-01-01T00:00:00Z\",\"versions\":[{\"version_id\":\"worker-v\"}]}]" > "$2" ;;
-        *container-info) printf "{\"name\":\"app\",\"max_instances\":1,\"version\":\"container-v\",\"image\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" > "$2" ;;
+        *container-info) printf "{\"id\":\"app-provider\",\"created_on\":\"2026-01-01T00:00:00Z\",\"name\":\"app\",\"max_instances\":1,\"version\":\"container-v\",\"image\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" > "$2" ;;
       esac
     }
     assert_fabricd_admission_paused() { :; }
@@ -933,7 +935,7 @@ stability_binding_case() {
   rc=$?
   set -e
   if [[ "$expected" == pass ]]; then
-    [[ "$rc" == 0 && "$(cat "$tmp/out")" == $'worker-v\tcontainer-v\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tdisarmed' ]]
+    [[ "$rc" == 0 && "$(cat "$tmp/out")" == $'worker-v\tcontainer-v\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tdisarmed\tapp-provider\t2026-01-01T00:00:00Z' ]]
   else
     [[ "$rc" != 0 ]]
   fi
@@ -949,10 +951,14 @@ fi
 # Behavioral evidence validator: omitted/mismatched tuples and missing disarm
 # cannot qualify a PASS-capable result.
 evidence_fn="$(sed -n '/^evidence_pass_ready() {/,/^}/p' "$harness")"
-if bash -u -c 'set -Eeuo pipefail; eval "$1"; BEFORE_CREATED_ON=x ARMED_CREATED_ON=x ROTATED_CREATED_ON=x FINAL_CREATED_ON=x STABILITY_SAMPLE_1=a STABILITY_SAMPLE_2=b FINAL_DISARM_STATE=green REMOTE_TEMP_VAR_STATE=disarmed evidence_pass_ready' -- "$evidence_fn"; then
+evidence_env='BEFORE_APP_ID=app-a BEFORE_CREATED_ON=created-a ARMED_CREATED_ON=created-b ROTATED_CREATED_ON=created-c FINAL_CREATED_ON=created-d BEFORE_WORKER_VERSION=worker-a ARMED_WORKER_VERSION=worker-b ROTATED_WORKER_VERSION=worker-c FINAL_WORKER_VERSION=worker-d BEFORE_CONTAINER_VERSION=container-a ARMED_CONTAINER_VERSION=container-b ROTATED_CONTAINER_VERSION=container-c FINAL_CONTAINER_VERSION=container-d BEFORE_DIGEST=digest-a ARMED_DIGEST=digest-b ROTATED_DIGEST=digest-c FINAL_DIGEST=digest-d FINAL_DISARM_STATE=green REMOTE_TEMP_VAR_STATE=disarmed'
+if bash -u -c 'set -Eeuo pipefail; eval "$1"; eval "$2"; STABILITY_SAMPLE_1=$'\''worker-a\tcontainer-a\tdigest-a\tdisarmed\tapp-a\tcreated-a'\''; STABILITY_SAMPLE_2=$'\''worker-a\tcontainer-a\tdigest-a\tdisarmed\tapp-b\tcreated-a'\''; evidence_pass_ready' -- "$evidence_fn" "$evidence_env"; then
   echo 'FAIL: mismatched stability tuple must fail evidence validation' >&2; exit 1
 fi
-if bash -u -c 'set -Eeuo pipefail; eval "$1"; BEFORE_CREATED_ON=x ARMED_CREATED_ON=x ROTATED_CREATED_ON=x FINAL_CREATED_ON=x STABILITY_SAMPLE_1=a STABILITY_SAMPLE_2=a FINAL_DISARM_STATE=not-proven REMOTE_TEMP_VAR_STATE=disarmed evidence_pass_ready' -- "$evidence_fn"; then
+if bash -u -c 'set -Eeuo pipefail; eval "$1"; eval "$2"; STABILITY_SAMPLE_1=$'\''worker-a\tcontainer-a\tdigest-a\tdisarmed\tapp-b\tcreated-a'\''; STABILITY_SAMPLE_2=$STABILITY_SAMPLE_1; evidence_pass_ready' -- "$evidence_fn" "$evidence_env"; then
+  echo 'FAIL: stability app metadata must match the baseline tuple' >&2; exit 1
+fi
+if bash -u -c 'set -Eeuo pipefail; eval "$1"; eval "$2"; STABILITY_SAMPLE_1=$'\''worker-a\tcontainer-a\tdigest-a\tdisarmed\tapp-a\tcreated-a'\''; STABILITY_SAMPLE_2=$STABILITY_SAMPLE_1; FINAL_DISARM_STATE=not-proven; evidence_pass_ready' -- "$evidence_fn" "$evidence_env"; then
   echo 'FAIL: absent final disarm must fail evidence validation' >&2; exit 1
 fi
 
