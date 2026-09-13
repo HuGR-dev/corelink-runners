@@ -30,7 +30,7 @@ dispatch_case() {
     missing) : ;;
     wrong|correct)
       # shellcheck disable=SC2016
-      printf '%s\n' '#!/usr/bin/env bash' \
+      printf '%s\n' '#!/bin/bash' \
         'printf "%s|%s\\n" "$PWD" "$*" >> "${DISPATCH_LOG:?}"' \
         "if [ \"\${1:-}\" = --version ]; then printf '%s\\n' '$version'; exit 0; fi" \
         'if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then printf '\''{"token":"dispatch-test-token-1234567890"}\n'\''; exit 0; fi' \
@@ -141,7 +141,7 @@ unset_local_regression() {
   header_fn="$(sed -n '/^make_oob_header_file() {/,/^}$/p' "$harness")"
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-wrangler.XXXXXX")"
   key="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-key.XXXXXX")"
-  printf '%s\n' '#!/usr/bin/env bash' \
+  printf '%s\n' '#!/bin/bash' \
     'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""}]}'\''' > "$mock"
   printf 'mock-observability-key\n' > "$key"
   chmod 700 "$mock"
@@ -184,7 +184,7 @@ admission_pause_case() {
   assert_fn="$(sed -n '/^assert_fabricd_admission_paused() {/,/^}$/p' "$harness")"
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-admission-mock.XXXXXX")"
   # shellcheck disable=SC2016
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
   chmod 700 "$mock"
   set +e
   # shellcheck disable=SC2016
@@ -261,7 +261,7 @@ usage_fetch_case() {
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-curl.XXXXXX")"
   args="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-args.XXXXXX")"
   log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
-  printf '%s\n' '#!/usr/bin/env bash' \
+  printf '%s\n' '#!/bin/bash' \
     'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
     'printf "%s\\n" '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}'\'' > "${MOCK_BODY:?}"' \
     'printf "%s" "${MOCK_HTTP:?}"; exit "${MOCK_RC:?}"' > "$mock"
