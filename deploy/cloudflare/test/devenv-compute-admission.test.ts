@@ -129,6 +129,15 @@ describe("authorized DevEnv compute composition", () => {
     expect(f.instance.start).toHaveBeenCalledTimes(1); expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("refuses a credential grant whose tenant differs from the reserved compute tenant", async () => {
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+    await f.instance.prepareAuthorizedCompute({ token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    const original = grant();
+    const crossTenant: AuthorizedDevenvStart = { ...original, grant: { ...original.grant, tenantId: "33333333-3333-4333-8333-333333333333" } };
+    await expect(f.instance.startAuthorizedDevenv(crossTenant)).rejects.toThrow("DEVENV_AUTHORIZED_START_FAILED");
+    expect(f.instance.start).not.toHaveBeenCalled();
+  });
+
   it("retains a dispatched reservation when provider start fails", async () => {
     const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher); const b = { token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv" as const, workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 };
     await f.instance.prepareAuthorizedCompute(b); vi.mocked(f.instance.start).mockRejectedValueOnce(new Error("provider failed"));
