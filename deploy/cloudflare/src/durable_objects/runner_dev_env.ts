@@ -1,5 +1,6 @@
 import { ComputeBudgetClient } from "../lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "../lib/compute_budget_obligation";
+import { verifyDevenvComputeGrant } from "../lib/compute_grant.js";
 import { Container } from "@cloudflare/containers";
 import {
   DevenvState,
@@ -138,6 +139,7 @@ export class RunnerDevEnvDO extends Container<any> {
       if (binding.workloadKind !== "devenv" || binding.reservationId !== binding.workloadId || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
         throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
       }
+      await verifyDevenvComputeGrant(binding, this.env.FABRIC_COMPUTE_GRANT_PUBLIC_KEYS, Date.now());
       if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_COMPUTE_SESSION_ACTIVE");
       const previous = await this.ctx.storage.get<string>("compute:devenv-session");
       if (previous && previous !== binding.reservationId) await this.computeObligations().abandonUnused(previous);

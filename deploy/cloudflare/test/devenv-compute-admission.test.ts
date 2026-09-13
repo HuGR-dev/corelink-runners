@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({
   Container: class {
     ctx: any; env: any;
@@ -21,13 +21,25 @@ import { cancelledEvidence, terminalConfig, terminalResponse } from "./compute-t
 const NOW = Date.parse("2026-09-05T12:00:00Z");
 const tenantId = "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3";
 const sessionUuid = "11111111-1111-4111-8111-111111111111";
+let grantSigningKey: CryptoKey;
+let grantPublicKeys = "";
+
+function b64url(bytes: ArrayBuffer | Uint8Array): string {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+beforeAll(async () => {
+  const keys = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  grantSigningKey = keys.privateKey;
+  grantPublicKeys = JSON.stringify({ key: btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)))) });
+});
 
 function grant(id = sessionUuid, patId = "22222222-2222-4222-8222-222222222222"): AuthorizedDevenvStart {
   return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid: id, patId, casPat: "synthetic-cas-secret", expiresAtMs: NOW + 60_000, computeReservationId: id } };
 }
-function token(id = sessionUuid) {
+async function token(id = sessionUuid) {
   const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: id, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
-  return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  return `${b64url(bytes)}.${b64url(await crypto.subtle.sign("Ed25519", grantSigningKey, bytes))}`;
 }
 function obligationToken(id: string, workloadId: string, expiresAtMs = NOW + 60_000) {
   const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: workloadId, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: expiresAtMs - 60_000, expires_at_ms: expiresAtMs };
@@ -38,7 +50,7 @@ function fixture(fetcher: typeof fetch) {
   const ctx = { storage: {
     get: vi.fn(async (key: string) => structuredClone(stored.get(key))), put: vi.fn(async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); }), delete: vi.fn(async (key: string) => { stored.delete(key); }), list: vi.fn(async (options: { prefix: string; limit: number; startAfter?: string }) => new Map([...stored].filter(([key]) => key.startsWith(options.prefix) && (!options.startAfter || key > options.startAfter)).sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit).map(([key, value]) => [key, structuredClone(value)]))),
   }, blockConcurrencyWhile: (fn: () => Promise<unknown>) => { const result = gate.then(fn); gate = result.then(() => undefined, () => undefined); return result; }, id: { toString: () => "devenv-test" } };
-  const env: any = { FABRIC_COMPUTE_URL: "https://fabric.example", FABRIC_COMPUTE_TERMINAL_AUTHORITY: terminalConfig.terminalAuthority, FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY: terminalConfig.terminalPublicKey, FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION: terminalConfig.receiptVersion, FABRIC_COMPUTE_TERMINAL_KEY_ID: terminalConfig.terminalKeyId, SPAWN_WORKER_PUBLIC_URL: "https://spawn.test", CORELINK_RUNNER_MINT_AUTH_KEY: "synthetic-dispatcher-key", CRED_STASH: { idFromName: (id: string) => id, get: (id: string) => ({ stash: vi.fn(async (ticket: string, cred: unknown) => { stashed.set(id, { ticket, cred }); return "a".repeat(64); }), wipe: vi.fn(async () => { stashed.delete(id); }) }) } };
+  const env: any = { FABRIC_COMPUTE_URL: "https://fabric.example", FABRIC_COMPUTE_GRANT_PUBLIC_KEYS: grantPublicKeys, FABRIC_COMPUTE_TERMINAL_AUTHORITY: terminalConfig.terminalAuthority, FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY: terminalConfig.terminalPublicKey, FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION: terminalConfig.receiptVersion, FABRIC_COMPUTE_TERMINAL_KEY_ID: terminalConfig.terminalKeyId, SPAWN_WORKER_PUBLIC_URL: "https://spawn.test", CORELINK_RUNNER_MINT_AUTH_KEY: "synthetic-dispatcher-key", CRED_STASH: { idFromName: (id: string) => id, get: (id: string) => ({ stash: vi.fn(async (ticket: string, cred: unknown) => { stashed.set(id, { ticket, cred }); return "a".repeat(64); }), wipe: vi.fn(async () => { stashed.delete(id); }) }) } };
   vi.stubGlobal("fetch", fetcher);
   const instance = new RunnerDevEnvDO(ctx, env);
   return { instance, stored, stashed, ctx, env };
@@ -95,7 +107,7 @@ describe("authorized DevEnv compute composition", () => {
 
   it("prepares metered compute before credential/provider start and claims once", async () => {
     const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
-    await f.instance.prepareAuthorizedCompute({ token: token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    await f.instance.prepareAuthorizedCompute({ token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });
     vi.mocked(f.instance.start).mockImplementation(async () => { expect((f.stored.get(`compute:obligation:${sessionUuid}`) as { phase: string }).phase).toBe("dispatched"); });
     await expect(f.instance.startAuthorizedDevenv(grant())).resolves.toMatchObject({ status: "starting" });
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -105,12 +117,12 @@ describe("authorized DevEnv compute composition", () => {
 
   it.each([["reserve", 429], ["activate", 503]])("does not start a provider when %s admission fails", async (operation, status) => {
     const fetcher = vi.fn(async (url: string) => url.endsWith(`/${operation}`) ? new Response("rejected", { status }) : response(url)); const f = fixture(fetcher);
-    await expect(f.instance.prepareAuthorizedCompute({ token: token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
+    await expect(f.instance.prepareAuthorizedCompute({ token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
     expect(f.instance.start).not.toHaveBeenCalled(); expect(f.stashed.size).toBe(0);
   });
 
   it("does not spend the same reservation on a duplicate start", async () => {
-    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher); const b = { token: token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv" as const, workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 };
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher); const b = { token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv" as const, workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 };
     await f.instance.prepareAuthorizedCompute(b); const payload = grant();
     await f.instance.startAuthorizedDevenv(payload);
     await expect(f.instance.startAuthorizedDevenv(payload)).rejects.toThrow("DEVENV_START_REQUIRES_TERMINAL_STATE");
@@ -118,7 +130,7 @@ describe("authorized DevEnv compute composition", () => {
   });
 
   it("retains a dispatched reservation when provider start fails", async () => {
-    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher); const b = { token: token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv" as const, workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 };
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher); const b = { token: await token(), reservationId: sessionUuid, tenantId, workloadKind: "devenv" as const, workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 };
     await f.instance.prepareAuthorizedCompute(b); vi.mocked(f.instance.start).mockRejectedValueOnce(new Error("provider failed"));
     await expect(f.instance.startAuthorizedDevenv(grant())).rejects.toThrow("DEVENV_AUTHORIZED_START_FAILED");
     expect((f.stored.get(`compute:obligation:${sessionUuid}`) as { phase: string }).phase).toBe("dispatched");
@@ -135,14 +147,14 @@ describe("authorized DevEnv compute composition", () => {
     const f = fixture(fetcher);
     vi.mocked(f.instance.schedule).mockRejectedValueOnce(new Error("scheduler unavailable"));
     const id = "33333333-3333-4333-8333-333333333333";
-    await expect(f.instance.prepareAuthorizedCompute({ token: token(id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow("scheduler unavailable");
+    await expect(f.instance.prepareAuthorizedCompute({ token: await token(id), reservationId: id, tenantId, workloadKind: "devenv", workloadId: id, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow("scheduler unavailable");
     expect(fetcher).not.toHaveBeenCalled(); expect(f.instance.start).not.toHaveBeenCalled();
     expect((f.stored.get(`compute:obligation:${id}`) as { phase: string }).phase).toBe("preparing");
     expect(await f.ctx.storage.get("compute:devenv-session")).toBe(id);
     expect(f.stashed.size).toBe(0);
     const restarted = new RunnerDevEnvDO(f.ctx, f.env);
     await f.ctx.blockConcurrencyWhile(async () => undefined);
-    await restarted.prepareAuthorizedCompute({ token: token(), reservationId: sessionUuid, tenantId,
+    await restarted.prepareAuthorizedCompute({ token: await token(), reservationId: sessionUuid, tenantId,
       workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 28_800_000 });
     expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["cancel", "reserve", "activate"]);
     expect(f.stored.get(`compute:obligation:${id}`)).toMatchObject({ phase: "terminal", terminalKind: "cancelled" });
@@ -160,8 +172,8 @@ describe("authorized DevEnv compute composition", () => {
       return responseFor(newId, url.endsWith("/reserve") ? "prepared" : "active");
     });
     const f = fixture(fetcher);
-    await expect(f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
-    await f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    await expect(f.instance.prepareAuthorizedCompute({ token: await token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
+    await f.instance.prepareAuthorizedCompute({ token: await token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 });
     expect(fetcher).toHaveBeenCalledTimes(4); expect(f.instance.start).not.toHaveBeenCalled();
     expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["reserve", "cancel", "reserve", "activate"]);
     expect(f.stashed.size).toBe(0);
@@ -177,9 +189,9 @@ describe("authorized DevEnv compute composition", () => {
       return responseFor(oldId, url.endsWith("/reserve") ? "prepared" : "active");
     });
     const f = fixture(fetcher);
-    await f.instance.prepareAuthorizedCompute({ token: token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+    await f.instance.prepareAuthorizedCompute({ token: await token(oldId), reservationId: oldId, tenantId, workloadKind: "devenv", workloadId: oldId, vcpuCount: 4, maximumWallMs: 28_800_000 });
     cancel = true;
-    await expect(f.instance.prepareAuthorizedCompute({ token: token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
+    await expect(f.instance.prepareAuthorizedCompute({ token: await token(newId), reservationId: newId, tenantId, workloadKind: "devenv", workloadId: newId, vcpuCount: 4, maximumWallMs: 28_800_000 })).rejects.toThrow();
     expect(await f.ctx.storage.get("compute:devenv-session")).toBe(oldId); expect(f.instance.start).not.toHaveBeenCalled();
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(f.stored.has(`compute:obligation:${newId}`)).toBe(false);
