@@ -72,6 +72,12 @@ USAGE_URL="${AU18_USAGE_URL:-$BASE_URL/v1/usage}"
 PROVIDER_STABILITY_SECS="${AU18_PROVIDER_STABILITY_SECS:-5}"
 HEALTH_READY_MAX_SECS="${AU18_HEALTH_READY_MAX_SECS:-90}"
 HEALTH_READY_INTERVAL_SECS="${AU18_HEALTH_READY_INTERVAL_SECS:-2}"
+# This is an operational ceiling for the narrowly scoped, paused canary arm;
+# it is not a credential TTL or a security validity period.
+readonly OPERATIONAL_WINDOW_MAX_SECS=2400
+# A rotation needs enough time to recreate, prove the new signer, and disarm
+# the temporary test key before the irreversible credential mutation begins.
+readonly CREDENTIAL_MUTATION_MIN_REMAINING_SECS=900
 EVIDENCE_PATH="$REPO_ROOT/docs/plan/evidence/au1.8-fabricd-secret-rotation.json"
 TENANT="ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"
 REPO_FULL_NAME="HuGR-Labs/corelink-runners"
@@ -967,8 +973,19 @@ redeem_and_probe_clw() {
 
 check_window() {
   local elapsed=$(( $(date +%s) - WINDOW_START ))
-  [[ "$elapsed" -le 600 ]] || { log_event "window-seconds=$elapsed RED"; return 1; }
+  [[ "$elapsed" -le "$OPERATIONAL_WINDOW_MAX_SECS" ]] || { log_event "window-seconds=$elapsed RED"; return 1; }
   log_event "window-seconds=$elapsed"
+}
+
+require_credential_mutation_budget() {
+  local elapsed remaining
+  elapsed=$(( $(date +%s) - WINDOW_START ))
+  remaining=$((OPERATIONAL_WINDOW_MAX_SECS - elapsed))
+  [[ "$remaining" -ge "$CREDENTIAL_MUTATION_MIN_REMAINING_SECS" ]] || {
+    log_event "credential-mutation-budget=RED elapsed_seconds=$elapsed remaining_seconds=$remaining minimum_remaining_seconds=$CREDENTIAL_MUTATION_MIN_REMAINING_SECS"
+    return 1
+  }
+  log_event "credential-mutation-budget=GREEN elapsed_seconds=$elapsed remaining_seconds=$remaining minimum_remaining_seconds=$CREDENTIAL_MUTATION_MIN_REMAINING_SECS"
 }
 
 rollback_old() {
@@ -1036,6 +1053,7 @@ write_evidence() {
     --arg baseline_sha256 "$REMOTE_BASELINE_SHA256" --arg log_path "$EVENT_LOG" \
     --arg quiescence "$QUIESCENCE_STATE" --arg ledger_safe "$LEDGER_CROSS_INSTANCE_SAFE" --arg stability "$PROVIDER_STABILITY_STATE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
     --argjson stability_interval "$PROVIDER_STABILITY_SECS" --argjson elapsed "$elapsed" \
+    --argjson maximum_seconds "$OPERATIONAL_WINDOW_MAX_SECS" \
     '{schema_version:"evidence/v1", artifact_id:"au1.8-fabricd-secret-rotation", kind:"probe", status:$status, observed_at:$observed,
       source:{repository:"corelink-runners", commit_sha:$commit, path:"docs/plan/evidence/au1.8-fabricd-secret-rotation.json"},
       claims:["AU1.8","AU1.8:secret-rotation"], version:{id:$commit},
@@ -1045,7 +1063,7 @@ write_evidence() {
       provider_stability:{gate:$stability, samples:2, interval_seconds:$stability_interval},
       remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict","--containers-rollout=immediate"]},
       secret_handling:{old_rollback_path:$ENV_OLD_SECRET_FILE, new_operational_path:$ENV_NEW_SECRET_FILE, values:"excluded", oob_mode:"0600"},
-      timing:{maximum_seconds:600, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
+      timing:{maximum_seconds:$maximum_seconds, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
       logs:{status_path:$log_path, secrets:"excluded", mode:"0600"}}}' \
     --arg ENV_OLD_SECRET_FILE "$OLD_SECRET_FILE" --arg ENV_NEW_SECRET_FILE "$NEW_SECRET_FILE" > "$out"
   chmod 600 "$out"
@@ -1125,6 +1143,9 @@ mkdir -p "$(dirname -- "$NEW_SECRET_FILE")"
 openssl rand -base64 48 | tr -d '\n' > "$NEW_SECRET_FILE"
 chmod 600 "$NEW_SECRET_FILE"
 file_owner_mode_ok "$NEW_SECRET_FILE" || { echo "generated NEW secret is not mode 0600" >&2; exit 1; }
+# Do this immediately before the first permanent credential mutation.  A slow
+# arm exits through on_exit, which restores the old signer and always disarms.
+require_credential_mutation_budget || exit 1
 put_secret FABRIC_CRED_TICKET_SECRET "$NEW_SECRET_FILE" || exit 1
 check_window || exit 1
 recreate 1 || exit 1
