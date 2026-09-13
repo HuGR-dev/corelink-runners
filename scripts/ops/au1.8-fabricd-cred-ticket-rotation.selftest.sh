@@ -142,7 +142,7 @@ unset_local_regression() {
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-wrangler.XXXXXX")"
   key="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-key.XXXXXX")"
   printf '%s\n' '#!/usr/bin/env bash' \
-    'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""}]}'\''' > "$mock"
+    'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""},{"name":"AUTOSCALER_TOKEN","type":"secret_text","text":"secret-literal"},{"name":"UNEXPECTED_OPAQUE","type":"opaque","text":"opaque-literal"}]}'\''' > "$mock"
   printf 'mock-observability-key\n' > "$key"
   chmod 700 "$mock"
   chmod 600 "$key"
@@ -166,7 +166,15 @@ unset_local_regression() {
     CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
     result="$(capture_remote_bindings sample version-a)"
     test -f "$result"
-    jq -e "length == 1 and .[0].name == \"FABRIC_TEST_MINT_TENANTS\"" "$result" >/dev/null
+    jq -e '
+      length == 3 and
+      (map(select(.name == "FABRIC_TEST_MINT_TENANTS")) | length) == 1 and
+      (map(select(.name == "AUTOSCALER_TOKEN")) | .[0].type) == "secret_text" and
+      (map(select(.name == "AUTOSCALER_TOKEN")) | .[0].temporary_value) == null and
+      (map(select(.name == "UNEXPECTED_OPAQUE")) | .[0].type) == "opaque" and
+      (map(select(.name == "UNEXPECTED_OPAQUE")) | .[0].temporary_value) == null
+    ' "$result" >/dev/null
+    ! rg -q 'secret-literal|opaque-literal' "$result"
     header="$(make_oob_header_file observability "$key")"
     test "$(sed -n "1p" "$header")" = "X-Corelink-Internal-Auth: mock-observability-key"
     rm -rf -- "$TMP_DIR"
@@ -209,6 +217,34 @@ admission_pause_case() {
   rc=$?
   set -e
   rm -f -- "$mock"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
+remote_binding_case() {
+  local expected="$1" mode="$2" payload="$3" assert_fn tmp_dir baseline_file rc
+  assert_fn="$(sed -n '/^assert_remote_bindings() {/,/^}$/p' "$harness")"
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-remote-bindings.XXXXXX")"
+  baseline_file="$tmp_dir/baseline.json"
+  printf '%s\n' '[{"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null}]' > "$baseline_file"
+  set +e
+  SNAPSHOT="$payload" bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    TMP_DIR="$2"
+    REMOTE_BASELINE_FILE="$3"
+    TENANT="tenant-a"
+    REMOTE_TEMP_VAR_STATE=""
+    log_event() { :; }
+    capture_remote_bindings() { printf "%s\n" "$SNAPSHOT" > "$TMP_DIR/snapshot.json"; printf "%s\n" "$TMP_DIR/snapshot.json"; }
+    assert_remote_bindings fixture version-a "$4"
+  ' -- "$assert_fn" "$tmp_dir" "$baseline_file" "$mode"
+  rc=$?
+  set -e
+  rm -rf -- "$tmp_dir"
   if [[ "$expected" == pass ]]; then
     [[ "$rc" == 0 ]]
   else
@@ -596,6 +632,48 @@ if ! admission_pause_case pass '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","
    ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"plain_text","text":"0"}]}' ||
    ! admission_pause_case fail '{"bindings":[{"name":"FABRIC_ADMISSION_PAUSED","type":"secret_text","text":"1"}]}' ; then
   echo "FAIL: Fabricd admission pause must be exactly one authoritative plain-text binding set to 1" >&2
+  exit 1
+fi
+if ! remote_binding_case pass armed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null}
+]' ||
+   ! remote_binding_case pass disarmed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""}
+]' ||
+   ! remote_binding_case fail armed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null},
+  {"name":"UNEXPECTED_BINDING","type":"plain_text","temporary_value":null}
+]' ||
+   ! remote_binding_case fail armed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null}
+]' ||
+   ! remote_binding_case fail armed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null}
+]' ||
+   ! remote_binding_case fail armed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"plain_text","temporary_value":null}
+]' ||
+   ! remote_binding_case fail disarmed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""}
+]' ||
+   ! remote_binding_case fail disarmed '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null}
+]' ||
+   ! remote_binding_case fail disarmed '[{"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null}]' ; then
+  echo "FAIL: temporary AU1.8 bindings must be exact and mode-scoped" >&2
   exit 1
 fi
 

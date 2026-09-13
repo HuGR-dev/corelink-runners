@@ -502,10 +502,17 @@ capture_remote_bindings() {
   : > "$out"; chmod 600 "$out"; : > "$err"; chmod 600 "$err"
   set +e
   run_wrangle versions view "$version_id" --name "$worker_name" --json 2>"$err" |
-    jq -S --arg temp "FABRIC_TEST_MINT_TENANTS" '
+    jq -S '
       [ .. | objects | select((.name? | type) == "string" and (.type? | type) == "string") |
-        select(.type | test("^(plain_text|secret_text|json|kv_namespace|durable_object_namespace|service|wasm_module|plain_text_blob)$")) |
-        {name, type, temporary_value:(if .name == $temp or (.name | startswith("AUTOSCALER_")) then (.text // .value // "") else null end)}
+        {name, type, temporary_value:(
+          if .type == "plain_text" and
+             (.name == "FABRIC_TEST_MINT_TENANTS" or
+              .name == "AUTOSCALER_REDRIVE_PAUSED" or
+              .name == "AUTOSCALER_INTAKE_PAUSED")
+          then (.text // .value // "")
+          else null
+          end
+        )}
       ] | sort_by([.name,.type])
     ' >"$out"
   local -a pipe_status=("${PIPESTATUS[@]}")
@@ -521,19 +528,37 @@ assert_remote_bindings() {
   local label="$1" version_id="$2" mode="$3" snapshot current
   snapshot="$(capture_remote_bindings "$label" "$version_id")" || return 1
   current="$TMP_DIR/$label-remote-bindings-no-temp.json"
-  jq 'map(select(.name != "FABRIC_TEST_MINT_TENANTS"))' "$snapshot" > "$current"
+  # The tenant allowlist and test-mint key are deliberately armed only for the
+  # bounded proof. They are validated below by mode; every other binding must
+  # remain byte-for-byte equal to the baseline snapshot.
+  jq 'map(select(.name != "FABRIC_TEST_MINT_TENANTS" and .name != "FABRIC_TEST_MINT_KEY"))' "$snapshot" > "$current"
   chmod 600 "$current"
   jq -e --slurpfile baseline "$REMOTE_BASELINE_FILE" '$baseline[0] == .' "$current" >/dev/null || {
     log_event "$label remote-binding-drift=RED"; return 1;
   }
   if [[ "$mode" == armed ]]; then
-    jq -e --arg tenant "$TENANT" 'map(select(.name == "FABRIC_TEST_MINT_TENANTS")) | length == 1 and .[0].temporary_value == $tenant' "$snapshot" >/dev/null || return 1
+    jq -e --arg tenant "$TENANT" '
+      map(select(.name == "FABRIC_TEST_MINT_TENANTS")) as $tenants |
+      map(select(.name == "FABRIC_TEST_MINT_KEY")) as $keys |
+      ($tenants | length) == 1 and
+      $tenants[0].type == "plain_text" and
+      $tenants[0].temporary_value == $tenant and
+      ($keys | length) == 1 and
+      $keys[0].type == "secret_text"
+    ' "$snapshot" >/dev/null || return 1
     REMOTE_TEMP_VAR_STATE="armed"
   else
-    # `--keep-vars --strict` protects unknown bindings. An empty override is
-    # accepted as disarmed because it removes the effective tenant allowlist
-    # without deleting an operator-owned remote binding we cannot reconstruct.
-    jq -e 'map(select(.name == "FABRIC_TEST_MINT_TENANTS")) | length == 0 or (length == 1 and (.[0].temporary_value // "") == "")' "$snapshot" >/dev/null || return 1
+    # Wrangler's strict empty override leaves the tenant variable remotely as
+    # one plain-text binding with an empty value. The test key must be absent;
+    # any non-empty, duplicate, or differently typed temporary binding fails.
+    jq -e '
+      map(select(.name == "FABRIC_TEST_MINT_TENANTS")) as $tenants |
+      map(select(.name == "FABRIC_TEST_MINT_KEY")) as $keys |
+      ($tenants | length) == 1 and
+      $tenants[0].type == "plain_text" and
+      $tenants[0].temporary_value == "" and
+      ($keys | length) == 0
+    ' "$snapshot" >/dev/null || return 1
     REMOTE_TEMP_VAR_STATE="empty-disabled"
   fi
   log_event "$label remote-binding-baseline=GREEN mode=$mode"
