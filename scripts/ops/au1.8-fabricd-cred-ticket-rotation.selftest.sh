@@ -263,7 +263,9 @@ usage_fetch_case() {
   log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
   printf '%s\n' '#!/bin/bash' \
     'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
-    'printf "%s\\n" '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}'\'' > "${MOCK_BODY:?}"' \
+    'out=""; headers=""; while (($#)); do case "$1" in -o) out="${2:?}"; shift 2 ;; -D) headers="${2:?}"; shift 2 ;; -w) shift 2 ;; *) shift ;; esac; done' \
+    'printf "%s\\n" '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}'\'' > "${MOCK_BODY:?}"; [[ -z "$out" || "$out" == "$MOCK_BODY" ]] || cp -- "${MOCK_BODY:?}" "$out"' \
+    '[[ -z "$headers" ]] || printf "HTTP/1.1 %s\\r\\n\\r\\n" "${MOCK_HTTP:?}" > "$headers"' \
     'printf "%s" "${MOCK_HTTP:?}"; exit "${MOCK_RC:?}"' > "$mock"
   chmod 700 "$mock"
   printf 'usage-secret-value\n' > "$tmp/pat"
