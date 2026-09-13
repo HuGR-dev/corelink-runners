@@ -78,7 +78,7 @@ describe("NormalIntakeInbox", () => {
     const proof = { schema_version: 1 as const, run_id: "11111111-1111-4111-8111-111111111111", phase: "missing_key" as const, index: 0, nonce: "a317-proof-nonce-000", expires_at_ms: 2_000, build_sha: "abcdef1", event_id: "ignored", body_sha256: "a".repeat(64), authorization_attempts: 0, authorization_refusals: 0 };
     await expect(inbox.enqueueA317Proof(input("a317:v1:run:missing_key:0"), proof, 1_000)).resolves.toMatchObject({ status: "accepted" });
     expect(await inbox.a317Proof("a317:v1:run:missing_key:0", 1_001)).toMatchObject({ phase: "missing_key", index: 0 });
-    expect(await inbox.a317Snapshot(proof.run_id, 1_001)).toEqual({ schema_version: 1, run_id: proof.run_id, accepted: 1, pending: 1, complete: 0, uncertain: 0, authorization_attempts: 0, authorization_refusals: 0 });
+    expect(await inbox.a317Snapshot(proof.run_id, 1_001)).toEqual({ schema_version: 1, run_id: proof.run_id, accepted: 1, pending: 1, complete: 0, uncertain: 0, authorization_attempts: 0, authorization_refusals: 0, authorization_accepted: 0, authorization_unknown: 0 });
     await inbox.settle("a317:v1:run:missing_key:0", "a".repeat(64), "retry", 1_001);
     await expect(inbox.enqueueA317Proof(input("a317:v1:store_unavailable:0"), { ...proof, phase: "store_unavailable", index: 1, nonce: "a317-proof-nonce-001" }, 1_001, true)).rejects.toThrow("store unavailable");
     await inbox.cleanupExpiredA317Proofs(2_000);

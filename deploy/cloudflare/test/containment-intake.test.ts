@@ -341,6 +341,14 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
     expect(authorizationFetch).toHaveBeenCalledTimes(100);
     expect(acquire).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
   }, 15_000);
+
+  it("rejects an A3.17 capability whose signed installation differs from the webhook", async () => {
+    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "a317-proof-key", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo" });
+    const raw = new TextEncoder().encode(JSON.stringify({ action: "queued", workflow_job: { id: 44001, labels: ["corelink-a317-proof"] }, repository: { full_name: "acme/repo" }, installation: { id: 8 } }));
+    const req = await request(raw); req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: "44444444-4444-4444-8444-444444444444", phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "a317-installation-mismatch" }));
+    expect((await worker.fetch(req, e, ctx() as never)).status).toBe(202);
+    expect([...d.storage.map.keys()].some(key => key.startsWith("normal-inbox:v1:a317-proof:"))).toBe(false);
+  });
 });
 
 describe("durable intake authority and delivery identity", () => {
