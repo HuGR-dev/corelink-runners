@@ -5235,6 +5235,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
   const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.normalIntakeA317Pending(25);
   for (const event of candidates) {
     const proof = await authority.normalIntakeA317Proof(event.event_id);
+    if (proof && intakeState !== "paused") return;
     if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal" && !proof) return;
     if (proof && (!env.A317_LIVE_PROOF_HMAC_KEY || !env.A317_LIVE_PROOF_BUILD_SHA || proof.build_sha !== env.A317_LIVE_PROOF_BUILD_SHA)) return;
     // The qualification event deliberately enters the same durable pending →

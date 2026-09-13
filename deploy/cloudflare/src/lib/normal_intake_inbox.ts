@@ -16,7 +16,7 @@ export type NormalIntakeOutcome = "complete" | "uncertain" | "retry";
 export type A317ProofPhase = "missing_key" | "wrong_key" | "store_unavailable";
 export interface A317ProofRecord {
   schema_version: 1; run_id: string; phase: A317ProofPhase; index: number; nonce: string; expires_at_ms: number; build_sha: string; event_id: string; body_sha256: string;
-  authorization_attempts: number; authorization_refusals: number; authorization_state: "pending" | "in_flight" | "refused" | "unknown";
+  authorization_attempts: number; authorization_refusals: number; authorization_state: "pending" | "in_flight" | "refused" | "accepted" | "unknown";
 }
 
 export class NormalIntakeConflictError extends Error {
@@ -31,6 +31,7 @@ const INSTALLATION_TOMBSTONE_DELIVERY = "normal-inbox:v1:installation-tombstone-
 const A317_PROOF = "normal-inbox:v1:a317-proof:";
 const A317_NONCE = "normal-inbox:v1:a317-nonce:";
 const A317_SLOT = "normal-inbox:v1:a317-slot:";
+const A317_RUN = "normal-inbox:v1:a317-run:";
 const MAX = 500;
 const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
@@ -41,6 +42,7 @@ const eventKey = (id: string) => `${EVENT}${encodeURIComponent(id)}`;
 const proofKey = (id: string) => `${A317_PROOF}${encodeURIComponent(id)}`;
 const proofNonceKey = (runId: string, nonce: string) => `${A317_NONCE}${encodeURIComponent(runId)}:${encodeURIComponent(nonce)}`;
 const proofSlotKey = (runId: string, phase: A317ProofPhase, index: number) => `${A317_SLOT}${encodeURIComponent(runId)}:${phase}:${index}`;
+const proofRunKey = (runId: string) => `${A317_RUN}${encodeURIComponent(runId)}`;
 export const installationTombstoneKey = (installationId: string) => `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
 const validCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX;
@@ -123,6 +125,9 @@ export class NormalIntakeInbox {
     return this.storage.transaction(async tx => {
       const marker: A317ProofRecord = { ...proof, event_id: normalized.event_id, body_sha256: normalized.body_sha256, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" };
       const key = eventKey(normalized.event_id), markerKey = proofKey(normalized.event_id), nonceKey = proofNonceKey(proof.run_id, proof.nonce), slotKey = proofSlotKey(proof.run_id, proof.phase, proof.index);
+      const runKey = proofRunKey(proof.run_id); const run = await tx.get<{ phase?: unknown; build_sha?: unknown; repo?: unknown; labels?: unknown; expires_at_ms?: unknown; count?: unknown }>(runKey);
+      const runValue = { phase: proof.phase, build_sha: proof.build_sha, repo: normalized.repo, labels: normalized.labels, expires_at_ms: proof.expires_at_ms, count: 1 };
+      if (run !== undefined && (run.phase !== proof.phase || run.build_sha !== proof.build_sha || run.repo !== normalized.repo || JSON.stringify(run.labels) !== JSON.stringify(normalized.labels) || run.expires_at_ms !== proof.expires_at_ms || !Number.isSafeInteger(run.count) || (run.count as number) >= 100)) return { status: "conflict" as const };
       const prior = await tx.get<unknown>(markerKey); const slot = await tx.get<unknown>(slotKey); const nonce = await tx.get<unknown>(nonceKey);
       if (prior !== undefined || slot !== undefined || nonce !== undefined) {
         const immutable = prior && typeof prior === "object" ? { ...(prior as A317ProofRecord), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" as const } : prior;
@@ -134,7 +139,7 @@ export class NormalIntakeInbox {
       const countValue = await tx.get<unknown>(COUNT); if (countValue === undefined && (await tx.list({ prefix: EVENT, limit: 1 })).size > 0) fail("missing active count");
       const count = countValue === undefined ? 0 : countValue; if (!validCount(count)) fail("malformed active count"); if (count >= MAX) return { status: "full" as const };
       const record: NormalIntakeRecord = { schema_version: 1, event_id: normalized.event_id, body_sha256: normalized.body_sha256, job_id: normalized.job_id, repo: normalized.repo, installation_id: normalized.installation_id, labels: [...normalized.labels], received_at_ms: normalized.received_at_ms, state: "pending", next_attempt_ms: now };
-      await tx.put(key, record); await tx.put(pendingKey(record), record.event_id); await tx.put(COUNT, count + 1); await tx.put(markerKey, marker); await tx.put(nonceKey, normalized.event_id); await tx.put(slotKey, normalized.event_id);
+      await tx.put(key, record); await tx.put(pendingKey(record), record.event_id); await tx.put(COUNT, count + 1); await tx.put(markerKey, marker); await tx.put(nonceKey, normalized.event_id); await tx.put(slotKey, normalized.event_id); await tx.put(runKey, run === undefined ? runValue : { ...run, count: (run.count as number) + 1 });
       return { status: "accepted" as const, record };
     });
   }
@@ -178,26 +183,27 @@ export class NormalIntakeInbox {
     await this.storage.transaction(async tx => {
       const proof = await tx.get<A317ProofRecord>(proofKey(eventId)); if (!proof) fail("invalid A3.17 authorization transition");
       const refused = status === "refused401" || status === "refused403";
-      if ((proof.authorization_state === "refused" && refused) || (proof.authorization_state === "unknown" && !refused)) return;
+      const terminal = status === "accepted2xx" ? "accepted" as const : refused ? "refused" as const : "unknown" as const;
+      if (proof.authorization_state === terminal) return;
       if (proof.authorization_state !== "in_flight") fail("invalid A3.17 authorization transition");
-      await tx.put(proofKey(eventId), { ...proof, authorization_state: refused ? "refused" : "unknown", authorization_refusals: proof.authorization_refusals + (refused ? 1 : 0) });
+      await tx.put(proofKey(eventId), { ...proof, authorization_state: terminal, authorization_refusals: proof.authorization_refusals + (refused ? 1 : 0) });
     });
   }
 
-  async a317Snapshot(runId: string, now = Date.now()): Promise<{ schema_version: 1; run_id: string; accepted: number; pending: number; complete: number; uncertain: number; authorization_attempts: number; authorization_refusals: number }> {
+  async a317Snapshot(runId: string, now = Date.now()): Promise<{ schema_version: 1; run_id: string; accepted: number; pending: number; complete: number; uncertain: number; authorization_attempts: number; authorization_refusals: number; authorization_accepted: number; authorization_unknown: number }> {
     if (!text(runId, 96)) throw new Error("invalid A3.17 run"); validateNow(now);
     return this.storage.transaction(async tx => {
       const markers = await tx.list<A317ProofRecord>({ prefix: A317_PROOF, limit: MAX + 1 });
       if (markers.size > MAX) fail("A3.17 proof index exceeds capacity");
-      let accepted = 0, pending = 0, complete = 0, uncertain = 0, authorization_attempts = 0, authorization_refusals = 0;
+      let accepted = 0, pending = 0, complete = 0, uncertain = 0, authorization_attempts = 0, authorization_refusals = 0, authorization_accepted = 0, authorization_unknown = 0;
       for (const [key, proof] of markers) {
         if (proof?.run_id !== runId || proof.expires_at_ms <= now) continue;
         const id = decodeURIComponent(key.slice(A317_PROOF.length));
         const record = await tx.get<unknown>(eventKey(id));
         if (!validRecord(record, id)) fail("missing A3.17 inbox record");
-        accepted++; authorization_attempts += proof.authorization_attempts ?? 0; authorization_refusals += proof.authorization_refusals ?? 0; if (record.state === "pending") pending++; else if (record.state === "complete") complete++; else uncertain++;
+        accepted++; authorization_attempts += proof.authorization_attempts ?? 0; authorization_refusals += proof.authorization_refusals ?? 0; if (proof.authorization_state === "accepted") authorization_accepted++; if (proof.authorization_state === "unknown") authorization_unknown++; if (record.state === "pending") pending++; else if (record.state === "complete") complete++; else uncertain++;
       }
-      return { schema_version: 1, run_id: runId, accepted, pending, complete, uncertain, authorization_attempts, authorization_refusals };
+      return { schema_version: 1, run_id: runId, accepted, pending, complete, uncertain, authorization_attempts, authorization_refusals, authorization_accepted, authorization_unknown };
     });
   }
 
@@ -215,6 +221,8 @@ export class NormalIntakeInbox {
           await tx.delete(eventKey(id));
         }
         await tx.delete(key); await tx.delete(proofNonceKey(proof.run_id, proof.nonce)); await tx.delete(proofSlotKey(proof.run_id, proof.phase, proof.index));
+        const runKey = proofRunKey(proof.run_id); const run = await tx.get<{ count?: unknown }>(runKey);
+        if (run && Number.isSafeInteger(run.count)) { if ((run.count as number) <= 1) await tx.delete(runKey); else await tx.put(runKey, { ...run, count: (run.count as number) - 1 }); }
       }
     });
   }
