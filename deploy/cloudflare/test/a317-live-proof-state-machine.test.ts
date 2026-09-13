@@ -29,7 +29,11 @@ class Store {
   }
 }
 
-const RUN = "11111111-1111-4111-8111-111111111111";
+const RUNS = {
+  missing_key: "11111111-1111-4111-8111-111111111111",
+  wrong_key: "22222222-2222-4222-8222-222222222222",
+  store_unavailable: "33333333-3333-4333-8333-333333333333",
+} as const;
 const BUILD = "abcdef1";
 const T0 = 1_000_000;
 const sha = (char: string) => char.repeat(64);
@@ -43,11 +47,12 @@ const input = (event_id: string, body_sha256 = sha("a")) => ({
   schema_version: 1 as const, event_id, body_sha256, job_id: jobId(event_id),
   repo: "Owner/Repo", installation_id: "42", labels: ["self-hosted"], received_at_ms: T0,
 });
-const proof = (phase: A317ProofPhase, index: number, nonce = `nonce-${phase}-${index}`): A317ProofRecord => ({
-  schema_version: 1, run_id: RUN, phase, index, nonce, expires_at_ms: T0 + 120_000,
+const proof = (phase: A317ProofPhase, index: number, nonce = `nonce-${phase}-${index}`, run_id = RUNS[phase]): A317ProofRecord => ({
+  schema_version: 1, run_id, phase, index, nonce, expires_at_ms: T0 + 120_000,
   build_sha: BUILD, event_id: "ignored", body_sha256: sha("b"), authorization_attempts: 0, authorization_refusals: 0,
-});
-const eventId = (phase: A317ProofPhase, index: number) => `a317:v1:${RUN}:${phase}:${index}`;
+  authorization_state: "pending",
+} as A317ProofRecord);
+const eventId = (phase: A317ProofPhase, index: number, run_id = RUNS[phase]) => `a317:v1:${run_id}:${phase}:${index}`;
 
 // These calls are kept in one adapter so the test documents the source seam
 // precisely while allowing the writer to choose the result's literal shape.
@@ -71,9 +76,10 @@ describe("A3.17 live proof state machine", () => {
     }
     await inbox.enqueue(input("ordinary-event"), T0);
 
-    expect(await inbox.a317Pending(RUN, undefined, T0, 400)).toHaveLength(300);
-    expect(await inbox.a317Pending(RUN, "missing_key", T0, 200)).toHaveLength(100);
-    expect((await inbox.a317Pending(RUN, undefined, T0, 400)).some((record: any) => record.event_id === "ordinary-event")).toBe(false);
+    for (const phase of ["missing_key", "wrong_key", "store_unavailable"] as const) {
+      expect(await inbox.a317Pending(RUNS[phase], phase, T0, 200)).toHaveLength(100);
+    }
+    expect((await inbox.a317Pending(undefined, undefined, T0, 400)).some((record: any) => record.event_id === "ordinary-event")).toBe(false);
   });
 
   it("binds slot, nonce, event and body immutably, including late exact redelivery", async () => {
@@ -89,6 +95,19 @@ describe("A3.17 live proof state machine", () => {
     await expect(inbox.enqueueA317Proof(input(eventId("missing_key", 1)), proof("missing_key", 0, "nonce-new"), T0 + 61_003)).resolves.toMatchObject({ status: "conflict" });
   });
 
+  it("rejects mixing proof phases under one run identity", async () => {
+    const storage = new Store();
+    const inbox = a317(new NormalIntakeInbox(storage as never));
+    const run = "44444444-4444-4444-8444-444444444444";
+    const missingId = eventId("missing_key", 0, run);
+    const wrongId = eventId("wrong_key", 0, run);
+
+    await expect(inbox.enqueueA317Proof(input(missingId), proof("missing_key", 0, "mixed-missing", run), T0))
+      .resolves.toMatchObject({ status: "accepted" });
+    await expect(inbox.enqueueA317Proof(input(wrongId), proof("wrong_key", 0, "mixed-wrong", run), T0))
+      .resolves.toMatchObject({ status: "conflict" });
+  });
+
   it("allows exactly one authorization attempt and latches 401, 403, 2xx and unknown outcomes", async () => {
     const storage = new Store();
     const inbox = a317(new NormalIntakeInbox(storage as never));
@@ -102,9 +121,11 @@ describe("A3.17 live proof state machine", () => {
       await inbox.finishA317Authorization(id, statuses[i]);
       await inbox.finishA317Authorization(id, statuses[i]);
     }
-    const snapshot = await inbox.a317Snapshot(RUN, T0 + 1);
+    const snapshot = await inbox.a317Snapshot(RUNS.wrong_key, T0 + 1);
     expect(snapshot.authorization_attempts).toBe(4);
     expect(snapshot.authorization_refusals).toBe(2);
+    expect((snapshot as any).authorization_accepted).toBe(1);
+    expect((snapshot as any).authorization_unknown).toBe(1);
   });
 
   it("removes expired proof-owned event, pending, nonce and slot state atomically", async () => {
@@ -112,11 +133,11 @@ describe("A3.17 live proof state machine", () => {
     const inbox = a317(new NormalIntakeInbox(storage as never));
     const id = eventId("store_unavailable", 0);
     await inbox.enqueueA317Proof(input(id), proof("store_unavailable", 0), T0);
-    expect(await inbox.a317Pending(RUN, undefined, T0, 10)).toHaveLength(1);
+    expect(await inbox.a317Pending(RUNS.store_unavailable, undefined, T0, 10)).toHaveLength(1);
 
     await inbox.cleanupExpiredA317Proofs(T0 + 120_000);
-    expect(await inbox.a317Pending(RUN, undefined, T0 + 120_000, 10)).toHaveLength(0);
-    expect(await inbox.a317Snapshot(RUN, T0 + 120_000)).toMatchObject({ accepted: 0, pending: 0 });
+    expect(await inbox.a317Pending(RUNS.store_unavailable, undefined, T0 + 120_000, 10)).toHaveLength(0);
+    expect(await inbox.a317Snapshot(RUNS.store_unavailable, T0 + 120_000)).toMatchObject({ accepted: 0, pending: 0 });
     expect([...storage.data.keys()].filter((key) => key.includes("a317") || key.includes(id))).toEqual([]);
   });
 
