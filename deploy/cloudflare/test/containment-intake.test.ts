@@ -15,13 +15,13 @@ vi.mock("@cloudflare/containers", () => ({
   getContainer: containerSeams.getContainer,
 }));
 
-import worker, { ContainmentDO, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
+import worker, { ContainmentDO, MetricsDO, fixture-placeholder, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
 import { COUNTER_NAMES } from "../src/metrics";
-import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
-import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
+import { fixture-placeholder } from "../src/workflow_job_id";
+import { fixture-placeholder } from "../src/lib/fixture-placeholder";
 
 const T0 = 1_750_000_000_000;
-const SECRET = "containment-webhook-secret";
+const SECRET = "fixture-placeholder";
 
 function clone<T>(value: T): T { return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T; }
 
@@ -148,14 +148,14 @@ async function request(raw: Uint8Array, opts: { sig?: string; event?: string; de
 
 function ctx() {
   const tasks: Promise<unknown>[] = [];
-  return { tasks, waitUntil(p: Promise<unknown>) { tasks.push(Promise.resolve(p)); }, passThroughOnException() {} };
+  return { tasks, waitUntil(p: Promise<unknown>) { tasks.push(Promise.resolve(p)); }, fixture-placeholder() {} };
 }
 async function settle(c: ReturnType<typeof ctx>) { for (let n = 0; n < 8 && c.tasks.length; n++) await Promise.all(c.tasks.splice(0)); }
 
 function env(d: ReturnType<typeof makeDO>, kv = makeKv(), metrics = makeMetrics(), extra: Record<string, unknown> = {}) {
   return {
-    GITHUB_WEBHOOK_SECRET: SECRET, GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: kv, CONTAINMENT: d.binding, METRICS: metrics.binding,
-    RUNNER_CONTAINER: {}, CHECK_HOST_CONTAINER: {},
+    fixture-placeholder: SECRET, GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: kv, CONTAINMENT: d.binding, METRICS: metrics.binding,
+    RUNNER_CONTAINER: {}, fixture-placeholder: {},
     CONCURRENCY_SLOTS: namespace({ acquire: vi.fn(async () => ({ admitted: true })), release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }),
     CRED_STASH: namespace({ wipe: vi.fn(async () => {}) }), ...extra,
   } as never;
@@ -173,19 +173,19 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("T3-W17 switch/HMAC intake matrix", () => {
   it("lexically rejects non-canonical workflow job ids before JSON admission", async () => {
-    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":1}}')).toBe("1");
-    expect(canonicalWorkflowJobIdFromRaw('{"workflow_job":{"id":"1"}}')).toBe("1");
+    expect(fixture-placeholder('{"workflow_job":{"id":1}}')).toBe("1");
+    expect(fixture-placeholder('{"workflow_job":{"id":"1"}}')).toBe("1");
     for (const token of ["1e3", "1.0", "[1]", "null", "true", "\" 1\"", "\"01\"", "-1"]) {
-      expect(canonicalWorkflowJobIdFromRaw(`{"workflow_job":{"id":${token}}}`)).toBeNull();
+      expect(fixture-placeholder(`{"workflow_job":{"id":${token}}}`)).toBeNull();
     }
-    expect(canonicalWorkflowJobIdFromRaw('{"other":{"a":[{"b":1}]},"workflow_job":{"id":1}}')).toBe("1");
+    expect(fixture-placeholder('{"other":{"a":[{"b":1}]},"workflow_job":{"id":1}}')).toBe("1");
     for (const raw of [
       '{"workflow_job":{"id":1},"workflow_job":{"id":2}}',
       '{"workflow_job":{"id":1,"id":2}}',
       '{"workflow_job":{"id":"\\u0031"}}',
       '{"other":{"a":[1}},"workflow_job":{"id":1}}',
       '{"workflow_job":{"id":1}} trailing',
-    ]) expect(canonicalWorkflowJobIdFromRaw(raw)).toBeNull();
+    ]) expect(fixture-placeholder(raw)).toBeNull();
     const d = makeDO(); const store = makeKv(); const metrics = makeMetrics();
     for (const token of ["1e3", "1.0", "[1]"]) {
       const raw = new TextEncoder().encode(`{"action":"queued","workflow_job":{"id":${token},"labels":["corelink"]},"repository":{"full_name":"acme/repo"},"installation":{"id":7}}`);
@@ -195,8 +195,8 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
   });
 
   it("uses the exact independent 0/1/invalid table", () => {
-    expect(parseContainmentSwitch(undefined)).toBe("normal"); expect(parseContainmentSwitch("0")).toBe("normal"); expect(parseContainmentSwitch("1")).toBe("paused");
-    for (const raw of ["", " ", "\t", " 0", "0 ", "01", "2", "true", "TRUE", "false", "on", "yes"]) expect(parseContainmentSwitch(raw)).toBe("invalid");
+    expect(fixture-placeholder(undefined)).toBe("normal"); expect(fixture-placeholder("0")).toBe("normal"); expect(fixture-placeholder("1")).toBe("paused");
+    for (const raw of ["", " ", "\t", " 0", "0 ", "01", "2", "true", "TRUE", "false", "on", "yes"]) expect(fixture-placeholder(raw)).toBe("invalid");
   });
 
   it("verifies HMAC over exact bytes before UTF-8/JSON parsing", async () => {
@@ -221,9 +221,9 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
     for (const intake of values) for (const redrive of values) {
       const d = makeDO(); const c = ctx(); const kv = makeKv(); const metrics = makeMetrics(); const seams = externalSeams();
       const response = await worker.fetch(await request(body(41), { delivery: `d-${intake ?? "normal"}-${redrive ?? "normal"}` }), env(d, kv, metrics, {
-        AUTOSCALER_INTAKE_PAUSED: intake,
-        AUTOSCALER_REDRIVE_PAUSED: redrive,
-        INSTALLATION_ALLOWLIST: "7",
+        fixture-placeholder: intake,
+        fixture-placeholder: redrive,
+        fixture-placeholder: "7",
         CONCURRENCY_SLOTS: seams.slots,
         CRED_STASH: seams.stash,
       }), c as never);
@@ -270,7 +270,7 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       const metricBump = vi.spyOn(metrics.instance, "bump"); const metricBumpOnce = vi.spyOn(metrics.instance, "bumpOnce");
       const leaseAcquire = vi.spyOn(d.instance, "acquireLease"); const leaseRelease = vi.spyOn(d.instance, "releaseLease");
       const response = await worker.fetch(await request(body(n + 1000), { delivery: `storage-failure-${n}` }), env(d, kv, metrics, {
-        AUTOSCALER_INTAKE_PAUSED: "1", RUNNER_JOB_PATS: kv, CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
+        fixture-placeholder: "1", RUNNER_JOB_PATS: kv, CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
       }), c as never);
       expect(response.status).toBe(503);
       expect(kv.put).not.toHaveBeenCalled(); expect(kv.delete).not.toHaveBeenCalled(); expect(seams.acquire).not.toHaveBeenCalled(); expect(seams.release).not.toHaveBeenCalled(); expect(seams.wipe).not.toHaveBeenCalled();
@@ -287,11 +287,11 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       const kv = makeKv({ "orphan:123": JSON.stringify(orphan) });
       const drive = vi.fn(async () => {}); const verify = vi.fn(async () => null);
       const readRetry = vi.fn(async () => 0);
-      const e = env(d, kv, metrics, { AUTOSCALER_INTAKE_PAUSED: "1", AUTOSCALER_REDRIVE_PAUSED: redrive, CONCURRENCY_SLOTS: namespace({ readRetry }) });
+      const e = env(d, kv, metrics, { fixture-placeholder: "1", fixture-placeholder: redrive, CONCURRENCY_SLOTS: namespace({ readRetry }) });
       await retryOrphanedSpawns(e, ctx() as never, T0, drive, verify);
       if (redrive === "0") {
-        expect(kv.list).toHaveBeenCalledWith({ prefix: "orphan:" });
-        expect(readRetry).toHaveBeenCalledWith("123");
+        expect(kv.list).fixture-placeholder({ prefix: "orphan:" });
+        expect(readRetry).fixture-placeholder("123");
         expect(drive).not.toHaveBeenCalled(); // the fresh placement remains within grace
       } else {
         expect(readRetry).not.toHaveBeenCalled();
@@ -300,15 +300,15 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       }
       if (redrive === "bogus") {
         const digest = await sha256Hex("bogus");
-        const invalid = [...d.storage.map.entries()].find(([key]) => key === `containment:v1:invalid:AUTOSCALER_REDRIVE_PAUSED:${digest}`);
-        expect(invalid?.[1]).toMatchObject({ schema_version: 1, raw_value_sha256: digest, switch_name: "AUTOSCALER_REDRIVE_PAUSED" });
+        const invalid = [...d.storage.map.entries()].find(([key]) => key === `containment:v1:invalid:fixture-placeholder:${digest}`);
+        expect(invalid?.[1]).toMatchObject({ schema_version: 1, raw_value_sha256: digest, switch_name: "fixture-placeholder" });
         const firstOutbox = outboxRecords(d); expect(firstOutbox).toHaveLength(1); expect(firstOutbox[0]?.state).toBe("DELIVERED");
         const signal = firstOutbox[0]?.signal_id;
-        expect(signal).toBe(await sha256Hex(`containment:v1:config-invalid\nAUTOSCALER_REDRIVE_PAUSED\n${digest}`));
-        expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+        expect(signal).toBe(await sha256Hex(`containment:v1:config-invalid\fixture-placeholder\n${digest}`));
+        expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
         await retryOrphanedSpawns(e, ctx() as never, T0, drive, verify);
         const secondOutbox = outboxRecords(d); expect(secondOutbox).toHaveLength(1); expect(secondOutbox[0]?.signal_id).toBe(signal); expect(secondOutbox[0]?.state).toBe("DELIVERED");
-        expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1); expect(kv.list).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+        expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1); expect(kv.list).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
       }
     }
   });
@@ -316,56 +316,64 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
   it("keeps paused intake closed while 100 signed A3.17 proofs enter retry with zero provider seams", async () => {
     const d = makeDO(); const metrics = makeMetrics();
     const acquire = vi.fn(async () => ({ admitted: true })); const start = containerSeams.startWithEnv;
-    const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "a317-proof-key", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
-    const run = "11111111-1111-4111-8111-111111111111";
-    const wrongRun = "22222222-2222-4222-8222-222222222222";
-    const storeRun = "33333333-3333-4333-8333-333333333333";
+    const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, fixture-placeholder: "1", fixture-placeholder: "a317-proof-key", fixture-placeholder: "abcdef1", fixture-placeholder: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
+    const run = "fixture-placeholder";
+    const wrongRun = "fixture-placeholder";
+    const storeRun = "fixture-placeholder";
     for (let i = 0; i < 100; i++) {
       const raw = body(10_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-proof-nonce-${String(i).padStart(3, "0")}` }));
+      req.headers.set("fixture-placeholder", await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-proof-nonce-${String(i).padStart(3, "0")}` }));
       const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
     }
     const authorizationFetch = vi.fn(async () => new Response("forbidden", { status: 403 })); vi.stubGlobal("fetch", authorizationFetch);
     for (let i = 0; i < 100; i++) {
-      const raw = body(20_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-wrong-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: wrongRun, phase: "wrong_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-wrong-nonce-${String(i).padStart(3, "0")}` }));
+      const raw = body(20_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `fixture-placeholder${i}` });
+      req.headers.set("fixture-placeholder", await a317ProofHeader({ v: 1, run_id: wrongRun, phase: "wrong_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-wrong-nonce-${String(i).padStart(3, "0")}` }));
       const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
     }
     for (let i = 0; i < 100; i++) {
-      const raw = body(30_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-store-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: storeRun, phase: "store_unavailable", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-store-nonce-${String(i).padStart(3, "0")}` }));
+      const raw = body(30_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `fixture-placeholder${i}` });
+      req.headers.set("fixture-placeholder", await a317ProofHeader({ v: 1, run_id: storeRun, phase: "store_unavailable", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-store-nonce-${String(i).padStart(3, "0")}` }));
       expect((await worker.fetch(req, e, ctx() as never)).status).toBe(503);
     }
-    const snapshotRequest = new Request("https://worker/internal/v1/a317-live-proof", { headers: { "x-corelink-a317-proof": await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "a317-proof-nonce-snapshot" }) } });
-    expect(await (await worker.fetch(snapshotRequest, e, ctx() as never)).json()).toMatchObject({ run_id: run, accepted: 100, pending: 100, authorization_attempts: 0, authorization_refusals: 0 });
-    expect(authorizationFetch).toHaveBeenCalledTimes(100);
+    const snapshotRequest = new Request("https://worker/internal/v1/a317-live-proof", { headers: { "fixture-placeholder": await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "fixture-placeholder" }) } });
+    expect(await (await worker.fetch(snapshotRequest, e, ctx() as never)).json()).toMatchObject({ run_id: run, accepted: 100, pending: 100, fixture-placeholder: 0, fixture-placeholder: 0 });
+    expect(authorizationFetch).fixture-placeholder(100);
     expect(acquire).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
   }, 15_000);
+
+  it("rejects an A3.17 capability whose signed installation differs from the webhook", async () => {
+    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1", fixture-placeholder: "a317-proof-key", fixture-placeholder: "abcdef1", fixture-placeholder: "acme/repo" });
+    const raw = new TextEncoder().encode(JSON.stringify({ action: "queued", workflow_job: { id: 44001, labels: ["corelink-a317-proof"] }, repository: { full_name: "acme/repo" }, installation: { id: 8 } }));
+    const req = await request(raw); req.headers.set("fixture-placeholder", await a317ProofHeader({ v: 1, run_id: "fixture-placeholder", phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "fixture-placeholder" }));
+    expect((await worker.fetch(req, e, ctx() as never)).status).toBe(202);
+    expect([...d.storage.map.keys()].some(key => key.startsWith("normal-inbox:v1:a317-proof:"))).toBe(false);
+  });
 });
 
 describe("durable intake authority and delivery identity", () => {
   it("fresh paused webhook explicitly bootstraps its repo-job pair before admission", async () => {
     const d = makeDO(); const c = ctx();
-    const response = await worker.fetch(await request(body(777)), env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" }), c as never);
+    const response = await worker.fetch(await request(body(777)), env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1" }), c as never);
     expect(response.status).toBe(202);
     expect(d.storage.map.get("containment:v1:repo-job-index:acme/repo/777")).toMatchObject({ active_count: 1, active_event_ids: [expect.any(String)] });
-    expect(d.storage.map.get("containment:v1:repo-job-index-marker:acme/repo/777")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "777" });
+    expect(d.storage.map.get("containment:v1:fixture-placeholder:acme/repo/777")).toMatchObject({ schema_version: 1, repo: "acme/repo", job_id: "777" });
   });
 
   it("appends an ordered event with canonical schema and deduplicates/conflicts", async () => {
     const d = makeDO();
-    await d.instance.bootstrapContainedEventIndex("acme/repo", "1");
+    await d.instance.fixture-placeholder("acme/repo", "1");
     expect((await d.instance.append(event(1))).status).toBe("appended");
     expect((await d.instance.append(event(1))).status).toBe("duplicate");
     expect((await d.instance.append({ ...event(1), body_sha256: "b".repeat(64) })).status).toBe("conflict");
     expect(await d.instance.snapshot()).toMatchObject({ schema_version: 1, next_pause_seq: 2, backlog_count: 1, drain_cursor: 0 });
-    expect(d.storage.map.get("containment:v1:pause:00000000000000000001")).toEqual({ schema_version: 1, event_id: "evt-1", pause_seq: 1 });
+    expect(d.storage.map.get("containment:v1:pause:fixture-placeholder")).toEqual({ schema_version: 1, event_id: "evt-1", pause_seq: 1 });
     expect(await d.instance.getEvent("evt-1")).toMatchObject({ state: "QUEUED", claim: null, effect_permit: null, effect_id: "containment:v1:evt-1" });
   });
 
   it("allocates 100 distinct pause sequences atomically with exact metadata and pause records", async () => {
     const d = makeDO();
-    await Promise.all([...Array(100)].map((_, i) => d.instance.bootstrapContainedEventIndex("acme/repo", String(i + 1))));
+    await Promise.all([...Array(100)].map((_, i) => d.instance.fixture-placeholder("acme/repo", String(i + 1))));
     const results = await Promise.all([...Array(100)].map((_, i) => d.instance.append(event(i + 1))));
     expect(results.every((result) => result.status === "appended")).toBe(true);
     expect(await d.instance.snapshot()).toEqual({ schema_version: 1, next_pause_seq: 101, drain_cursor: 0, backlog_count: 100, lease_epoch: 0, lease: null, drain_requested: false });
@@ -379,7 +387,7 @@ describe("durable intake authority and delivery identity", () => {
   });
 
   it("trims delivery headers and derives byte-sensitive fallback ids", async () => {
-    const d = makeDO(); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" });
+    const d = makeDO(); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1" });
     const one = body(10, "acme/repo"); const two = body(10, "acme/other");
     expect((await worker.fetch(await request(one, { delivery: " \td-10\t " }), e, c as never)).status).toBe(202);
     expect((await worker.fetch(await request(one, { delivery: "d-10" }), e, c as never)).status).toBe(202);
@@ -389,7 +397,7 @@ describe("durable intake authority and delivery identity", () => {
   });
 
   it("uses the exact fallback formula for absent/ASCII-whitespace deliveries and raw-byte differences", async () => {
-    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" }); const c = ctx();
+    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1" }); const c = ctx();
     const firstRaw = new TextEncoder().encode('{"action":"queued","workflow_job":{"id":10,"labels":["corelink"]},"repository":{"full_name":"acme/repo"},"installation":{"id":7}}');
     const secondRaw = new TextEncoder().encode('{ "action": "queued", "workflow_job": { "id": 10, "labels": ["corelink"] }, "repository": { "full_name": "acme/repo" }, "installation": { "id": 7 } }');
     const expected = async (raw: Uint8Array) => {
@@ -405,7 +413,7 @@ describe("durable intake authority and delivery identity", () => {
 
   it("accepts completion outside paused intake without claiming unknown credentials revoked", async () => {
     const d = makeDO(); const c = ctx();
-    const response = await worker.fetch(await request(body(91, "acme/repo", ["corelink"], "completed"), { delivery: "done-91" }), env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" }), c as never);
+    const response = await worker.fetch(await request(body(91, "acme/repo", ["corelink"], "completed"), { delivery: "done-91" }), env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1" }), c as never);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ revoked: false });
     await settle(c); expect((await d.instance.snapshot()).backlog_count).toBe(0);
@@ -419,60 +427,60 @@ describe("durable intake authority and delivery identity", () => {
     // durable credential authority state is the revocation source of truth.
     kv.map.set("91", "pat-91"); kv.map.set("jtenant:91", "tenant-91"); kv.map.set("orphan:91", JSON.stringify({ jobId: "91" })); kv.map.set("jhandle:91", "handle-91");
     await d.instance.registerCredential({ jobId: "91", tenant: "tenant-91", patId: "pat-91" });
-    await d.instance.bootstrapContainedEventIndex("acme/repo", "91");
-    const reservation = await d.instance.reserveRedriveCandidate("acme/repo", "91");
+    await d.instance.fixture-placeholder("acme/repo", "91");
+    const reservation = await d.instance.fixture-placeholder("acme/repo", "91");
     expect(reservation.status).toBe("reserved");
     await d.instance.append(event(91));
-    const clearReservation = vi.spyOn(d.instance, "clearCompletedRedrive");
+    const clearReservation = vi.spyOn(d.instance, "fixture-placeholder");
     const completed = new TextEncoder().encode(JSON.stringify({ action: "completed", workflow_job: { id: 91, labels: ["corelink"], started_at: "2025-06-15T00:00:00.000Z", completed_at: "2025-06-15T00:00:02.000Z" }, repository: { full_name: "acme/repo" }, installation: { id: 7 } }));
-    const c = ctx(); const response = await worker.fetch(await request(completed, { delivery: "done-seeded-91-timed" }), env(d, kv, metrics, {
-      AUTOSCALER_INTAKE_PAUSED: "1", CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
-      CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth", CORELINK_MINT_URL: "https://corelink.test", BILLING_INGEST_URL: "https://billing.test", BILLING_INGEST_AUTH_KEY: "billing-auth", BILLING_REGION: "iad",
+    const c = ctx(); const response = await worker.fetch(await request(completed, { delivery: "fixture-placeholder" }), env(d, kv, metrics, {
+      fixture-placeholder: "1", CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
+      fixture-placeholder: "mint-auth", CORELINK_MINT_URL: "https://corelink.test", BILLING_INGEST_URL: "https://billing.test", fixture-placeholder: "billing-auth", BILLING_REGION: "iad",
     }), c as never);
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ revoked: true, billed: true, ledgered: true, tornDown: true, deduped: false }); await settle(c);
     expect(kv.map.has("orphan:91")).toBe(false); expect(kv.map.has("jhandle:91")).toBe(false); expect(kv.map.has("91")).toBe(true); expect(kv.map.has("jtenant:91")).toBe(false);
     expect(kv.map.has("usage:91")).toBe(true); expect(JSON.parse(kv.map.get("usage:91") as string)).toMatchObject({ jobId: "91", tenant: "tenant-91", region: "iad" });
-    expect(seams.release).toHaveBeenCalledWith("91"); expect(seams.wipe).toHaveBeenCalled(); expect(seams.stash.idFromName).toHaveBeenCalledWith(runnerCredentialLeaseId("91", "tenant-91", "pat-91"));
-    expect(fetchSpy).toHaveBeenCalledWith("https://corelink.test/internal/v1/runner/revoke", expect.objectContaining({ body: JSON.stringify({ pat_id: "pat-91", owner_tenant: "tenant-91" }) }));
-    expect((await d.instance.pendingCredentials({ kind: "job", jobId: "91" })).records).toHaveLength(0); expect(clearReservation).toHaveBeenCalledWith("acme/repo", "91", "containment:v1:redrive:acme/repo/91");
-    expect(fetchSpy).toHaveBeenCalledTimes(2); expect(containerSeams.getContainer).toHaveBeenCalled(); expect(containerSeams.teardown).toHaveBeenCalledWith(); expect(metricBump).toHaveBeenCalled();
+    expect(seams.release).fixture-placeholder("91"); expect(seams.wipe).toHaveBeenCalled(); expect(seams.stash.idFromName).fixture-placeholder(fixture-placeholder("91", "tenant-91", "pat-91"));
+    expect(fetchSpy).fixture-placeholder("https://corelink.test/internal/v1/runner/revoke", expect.objectContaining({ body: JSON.stringify({ pat_id: "pat-91", owner_tenant: "tenant-91" }) }));
+    expect((await d.instance.pendingCredentials({ kind: "job", jobId: "91" })).records).toHaveLength(0); expect(clearReservation).fixture-placeholder("acme/repo", "91", "containment:v1:redrive:acme/repo/91");
+    expect(fetchSpy).fixture-placeholder(2); expect(containerSeams.getContainer).toHaveBeenCalled(); expect(containerSeams.teardown).fixture-placeholder(); expect(metricBump).toHaveBeenCalled();
     expect(d.storage.map.has("containment:v1:reservation:acme/repo/91")).toBe(false);
-    expect((await d.instance.snapshot()).backlog_count).toBe(1); expect(d.storage.map.has("containment:v1:pause:00000000000000000001")).toBe(true);
+    expect((await d.instance.snapshot()).backlog_count).toBe(1); expect(d.storage.map.has("containment:v1:pause:fixture-placeholder")).toBe(true);
     // A redelivery still re-runs idempotent security cleanup, but the completed
     // signal is deduplicated by the durable `done:<job>` claim.
-    const secondCtx = ctx(); const second = await worker.fetch(await request(completed, { delivery: "done-seeded-91-redelivery" }), env(d, kv, metrics, {
-      AUTOSCALER_INTAKE_PAUSED: "1", CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
-      CORELINK_RUNNER_MINT_AUTH_KEY: "mint-auth", CORELINK_MINT_URL: "https://corelink.test", BILLING_INGEST_URL: "https://billing.test", BILLING_INGEST_AUTH_KEY: "billing-auth", BILLING_REGION: "iad",
+    const secondCtx = ctx(); const second = await worker.fetch(await request(completed, { delivery: "fixture-placeholder" }), env(d, kv, metrics, {
+      fixture-placeholder: "1", CONCURRENCY_SLOTS: seams.slots, CRED_STASH: seams.stash,
+      fixture-placeholder: "mint-auth", CORELINK_MINT_URL: "https://corelink.test", BILLING_INGEST_URL: "https://billing.test", fixture-placeholder: "billing-auth", BILLING_REGION: "iad",
     }), secondCtx as never);
     // Terminal revocation remains confirmed on replay, without another remote
     // revoke, exact-PAT ticket wipe or billing push. The historical job-scoped
     // stash still receives its idempotent migration cleanup on both deliveries.
     expect(second.status).toBe(200); expect(await second.json()).toMatchObject({ deduped: true, revoked: true, billed: false, ledgered: false, tornDown: false }); await settle(secondCtx);
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).fixture-placeholder(2);
     expect(seams.stash.idFromName.mock.calls).toEqual([
-      [runnerCredentialLeaseId("91", "tenant-91", "pat-91")], ["91"], ["91"],
+      [fixture-placeholder("91", "tenant-91", "pat-91")], ["91"], ["91"],
     ]);
-    expect((await metrics.instance.snapshot()).webhook_job_completed).toBe(1);
+    expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
   });
 
   it("admin drain is key-gated and accepts only an empty body", async () => {
-    const d = makeDO(); const c = ctx(); const base = env(d, makeKv(), makeMetrics(), { CONTAINMENT_ADMIN_KEY: "admin", AUTOSCALER_INTAKE_PAUSED: "1" });
-    const route = (body: string | undefined, key?: string) => worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", headers: key ? { "x-corelink-internal-auth": key } : {}, body }), base, c as never);
-    const missingConfig = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1" });
+    const d = makeDO(); const c = ctx(); const base = env(d, makeKv(), makeMetrics(), { fixture-placeholder: "admin", fixture-placeholder: "1" });
+    const route = (body: string | undefined, key?: string) => worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", headers: key ? { "fixture-placeholder": key } : {}, body }), base, c as never);
+    const missingConfig = env(d, makeKv(), makeMetrics(), { fixture-placeholder: "1" });
     expect((await worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", body: "" }), missingConfig, c as never)).status).toBe(404);
     expect((await route(undefined)).status).toBe(401); expect((await route("{}", "wrong")).status).toBe(401); expect((await route("{}", "admin")).status).toBe(400); expect((await route(" ", "admin")).status).toBe(400);
     const empty = { schema_version: 1, drain_requested: false, intake_paused: true, backlog_count: 0, drain_cursor: 0 };
     expect(await (await route(undefined, "admin")).json()).toEqual(empty); expect(await (await route("", "admin")).json()).toEqual(empty);
-    await d.instance.bootstrapContainedEventIndex("acme/repo", "501"); await d.instance.append(event(501));
+    await d.instance.fixture-placeholder("acme/repo", "501"); await d.instance.append(event(501));
     const expected = { schema_version: 1, drain_requested: true, intake_paused: true, backlog_count: 1, drain_cursor: 0 };
     const pausedBacklogCtx = ctx();
-    expect(await (await worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", headers: { "x-corelink-internal-auth": "admin" }, body: "" }), base, pausedBacklogCtx as never)).json()).toEqual(expected);
+    expect(await (await worker.fetch(new Request("https://worker/internal/v1/containment/drain", { method: "POST", headers: { "fixture-placeholder": "admin" }, body: "" }), base, pausedBacklogCtx as never)).json()).toEqual(expected);
     expect(pausedBacklogCtx.tasks).toHaveLength(0);
     expect(await (await route("", "admin")).json()).toEqual(expected);
   });
 
   it("never bypasses an older backlog on a fresh normal intake", async () => {
-    const d = makeDO(); await d.instance.bootstrapContainedEventIndex("acme/repo", "600"); await d.instance.append(event(600)); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { RUNNER_JOB_PATS: undefined });
+    const d = makeDO(); await d.instance.fixture-placeholder("acme/repo", "600"); await d.instance.append(event(600)); const c = ctx(); const e = env(d, makeKv(), makeMetrics(), { RUNNER_JOB_PATS: undefined });
     const response = await worker.fetch(await request(body(601), { delivery: "fresh-after-backlog" }), e, c as never);
     expect(response.status).toBe(202); expect(await response.json()).toMatchObject({ contained: true, deduped: false });
     expect(await d.instance.snapshot()).toMatchObject({ next_pause_seq: 3, backlog_count: 2 });
@@ -482,7 +490,7 @@ describe("durable intake authority and delivery identity", () => {
 
   it("refuses a non-allowlisted installation before claim or spawn", async () => {
     const d = makeDO(); const kv = makeKv(); const c = ctx();
-    const response = await worker.fetch(await request(body(77)), env(d, kv, makeMetrics(), { INSTALLATION_ALLOWLIST: "99" }), c as never);
+    const response = await worker.fetch(await request(body(77)), env(d, kv, makeMetrics(), { fixture-placeholder: "99" }), c as never);
     expect(response.status).toBe(202); expect(await response.json()).toMatchObject({ ignored: "installation not allowlisted" }); expect(kv.put).not.toHaveBeenCalled();
   });
 });
@@ -490,64 +498,64 @@ describe("durable intake authority and delivery identity", () => {
 describe("invalid-config outbox and MetricsDO.bumpOnce", () => {
   it("deduplicates one invalid signal and retries the same outbox id", async () => {
     const d = makeDO(); const digest = await sha256Hex("bogus");
-    const first = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", digest); const second = await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", digest);
-    expect(second.signal_id).toBe(first.signal_id); expect((await d.instance.pendingInvalidConfig())).toHaveLength(1); await d.instance.markInvalidConfigAttempt(first.signal_id); await d.instance.acknowledgeInvalidConfig(first.signal_id); expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
+    const first = await d.instance.recordInvalidConfig("fixture-placeholder", "bogus", digest); const second = await d.instance.recordInvalidConfig("fixture-placeholder", "bogus", digest);
+    expect(second.signal_id).toBe(first.signal_id); expect((await d.instance.fixture-placeholder())).toHaveLength(1); await d.instance.fixture-placeholder(first.signal_id); await d.instance.fixture-placeholder(first.signal_id); expect(await d.instance.fixture-placeholder()).toHaveLength(0);
   });
 
-  it("registers containment_config_invalid and atomically deduplicates a signal across 100 calls", async () => {
-    expect(COUNTER_NAMES).toContain("containment_config_invalid"); const metrics = makeMetrics();
+  it("registers fixture-placeholder and atomically deduplicates a signal across 100 calls", async () => {
+    expect(COUNTER_NAMES).toContain("fixture-placeholder"); const metrics = makeMetrics();
     expect(metrics.instance.bumpOnce).toBeTypeOf("function");
-    await Promise.all([...Array(100)].map(() => metrics.instance.bumpOnce("a".repeat(64), "containment_config_invalid")));
-    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+    await Promise.all([...Array(100)].map(() => metrics.instance.bumpOnce("a".repeat(64), "fixture-placeholder")));
+    expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
   });
 
   it("bumps once for the same raw value, but once per distinct raw value", async () => {
-    const d = makeDO(); const metrics = makeMetrics(); const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "bogus" }) as any;
+    const d = makeDO(); const metrics = makeMetrics(); const e = env(d, makeKv(), metrics, { fixture-placeholder: "bogus" }) as any;
     const first = await worker.fetch(await request(body(901), { delivery: "invalid-same-1" }), e, ctx() as never);
     const second = await worker.fetch(await request(body(902), { delivery: "invalid-same-2" }), e, ctx() as never);
     expect(first.status).toBe(202); expect(second.status).toBe(202);
-    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
-    e.AUTOSCALER_INTAKE_PAUSED = "also-bogus";
+    expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
+    e.fixture-placeholder = "also-bogus";
     const third = await worker.fetch(await request(body(903), { delivery: "invalid-different" }), e, ctx() as never);
-    expect(third.status).toBe(202); expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(2);
+    expect(third.status).toBe(202); expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(2);
   });
 
   it("keeps equal raw bytes distinct across supported switch names", async () => {
     const d = makeDO(); const metrics = makeMetrics(); const raw = "same-invalid-value"; const digest = await sha256Hex(raw);
-    await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", raw, digest);
-    await d.instance.recordInvalidConfig("AUTOSCALER_REDRIVE_PAUSED", raw, digest);
-    const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "1" });
+    await d.instance.recordInvalidConfig("fixture-placeholder", raw, digest);
+    await d.instance.recordInvalidConfig("fixture-placeholder", raw, digest);
+    const e = env(d, makeKv(), metrics, { fixture-placeholder: "1" });
     await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
-    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(2);
+    expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(2);
   });
 
   it("fails closed on unsupported or malformed durable identity records", async () => {
     const d = makeDO(); const digest = await sha256Hex("bogus");
     await expect(d.instance.recordInvalidConfig("UNSUPPORTED_SWITCH", "bogus", digest)).rejects.toThrow();
-    await expect(d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", "bogus", "0".repeat(64))).rejects.toThrow();
-    d.storage.map.set("containment:v1:invalid:AUTOSCALER_INTAKE_PAUSED:bad", { schema_version: 1, signal_id: "a".repeat(64), switch_name: "AUTOSCALER_INTAKE_PAUSED", raw_value_sha256: "bad" });
+    await expect(d.instance.recordInvalidConfig("fixture-placeholder", "bogus", "0".repeat(64))).rejects.toThrow();
+    d.storage.map.set("containment:v1:invalid:fixture-placeholder:bad", { schema_version: 1, signal_id: "a".repeat(64), switch_name: "fixture-placeholder", raw_value_sha256: "bad" });
     d.storage.map.set(`containment:v1:outbox:${"a".repeat(64)}`, { schema_version: 1, signal_id: "a".repeat(64), state: "PENDING", attempts: 0 });
-    expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
+    expect(await d.instance.fixture-placeholder()).toHaveLength(0);
   });
 
   it("does not duplicate delivery across repeated scheduled retries", async () => {
     const d = makeDO(); const metrics = makeMetrics(); const raw = "scheduled-invalid"; const digest = await sha256Hex(raw);
-    await d.instance.recordInvalidConfig("AUTOSCALER_INTAKE_PAUSED", raw, digest);
-    const e = env(d, makeKv(), metrics, { AUTOSCALER_INTAKE_PAUSED: "1" });
+    await d.instance.recordInvalidConfig("fixture-placeholder", raw, digest);
+    const e = env(d, makeKv(), metrics, { fixture-placeholder: "1" });
     await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
     await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
-    expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
-    expect(await d.instance.pendingInvalidConfig()).toHaveLength(0);
+    expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
+    expect(await d.instance.fixture-placeholder()).toHaveLength(0);
   });
 
   it("retries one stable invalid-config signal through Worker/scheduled across every cross-DO seam", async () => {
     for (const seam of ["record", "pending", "attempt", "metrics", "ack"] as const) {
       const d = makeDO(); const kv = makeKv(); const metrics = makeMetrics(); const c = ctx();
-      const e = env(d, kv, metrics, { AUTOSCALER_INTAKE_PAUSED: "bogus" });
+      const e = env(d, kv, metrics, { fixture-placeholder: "bogus" });
       const target = seam === "record" ? vi.spyOn(d.instance, "recordInvalidConfig")
-        : seam === "pending" ? vi.spyOn(d.instance, "pendingInvalidConfig")
-          : seam === "attempt" ? vi.spyOn(d.instance, "markInvalidConfigAttempt")
-            : seam === "ack" ? vi.spyOn(d.instance, "acknowledgeInvalidConfig")
+        : seam === "pending" ? vi.spyOn(d.instance, "fixture-placeholder")
+          : seam === "attempt" ? vi.spyOn(d.instance, "fixture-placeholder")
+            : seam === "ack" ? vi.spyOn(d.instance, "fixture-placeholder")
               : vi.spyOn(metrics.instance, "bumpOnce");
       target.mockRejectedValue(new Error(`injected ${seam} failure`));
       const response = await worker.fetch(await request(body(700 + seam.length), { delivery: `invalid-${seam}` }), e, c as never);
@@ -561,21 +569,21 @@ describe("invalid-config outbox and MetricsDO.bumpOnce", () => {
       const after = outboxRecords(d);
       expect(after).toHaveLength(1); expect(after[0]?.state).toBe("DELIVERED"); expect(after[0]?.signal_id).toMatch(/^[0-9a-f]{64}$/);
       if (priorSignal) expect(after[0]?.signal_id).toBe(priorSignal);
-      expect((await metrics.instance.snapshot()).containment_config_invalid).toBe(1);
+      expect((await metrics.instance.snapshot()).fixture-placeholder).toBe(1);
     }
   });
 
   it("keeps an invalid switch fail-closed when the metrics stub lacks bumpOnce, then delivers once after restore", async () => {
     const d = makeDO(); const kv = makeKv(); const fallbackMetrics = makeMetrics();
-    const e = env(d, kv, fallbackMetrics, { AUTOSCALER_INTAKE_PAUSED: "bogus" }) as any;
+    const e = env(d, kv, fallbackMetrics, { fixture-placeholder: "bogus" }) as any;
     e.METRICS = namespace({}); // Deliberately no bumpOnce surface.
     const c = ctx(); const response = await worker.fetch(await request(body(811), { delivery: "invalid-no-bump" }), e, c as never);
     expect(response.status).toBe(202); expect((await d.instance.snapshot()).backlog_count).toBe(1);
     await settle(c);
-    const pending = await d.instance.pendingInvalidConfig(); expect(pending).toHaveLength(1); expect(outboxRecords(d)[0]?.state).toBe("PENDING");
+    const pending = await d.instance.fixture-placeholder(); expect(pending).toHaveLength(1); expect(outboxRecords(d)[0]?.state).toBe("PENDING");
     const restored = makeMetrics(); e.METRICS = restored.binding;
     await worker.scheduled({} as ScheduledEvent, e, ctx() as never);
-    expect(await d.instance.pendingInvalidConfig()).toHaveLength(0); expect((await restored.instance.snapshot()).containment_config_invalid).toBe(1);
+    expect(await d.instance.fixture-placeholder()).toHaveLength(0); expect((await restored.instance.snapshot()).fixture-placeholder).toBe(1);
     expect(outboxRecords(d)[0]?.state).toBe("DELIVERED"); expect(outboxRecords(d)[0]?.signal_id).toBe(pending[0]?.signal_id);
   });
 });
