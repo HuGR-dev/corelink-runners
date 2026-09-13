@@ -94,6 +94,20 @@ provider_stability_pair_ok() {
   [[ -n "$first" && -n "$second" && "$first" == "$second" ]]
 }
 
+# Wrangler's `containers info` response uses a numeric top-level `version`
+# for the current container application, while older/mocked responses expose
+# a string top-level `version_id`.  Accept both scalar forms and canonicalize
+# to text; inspect only the top level so unrelated nested metadata cannot
+# satisfy the identity gate. Reject objects, arrays, booleans, and null.
+extract_container_version() {
+  local info="$1"
+  jq -er 'if has("version") then .version
+    elif has("version_id") then .version_id
+    else error("top-level container version is absent") end
+    | select((type == "string" or type == "number") and ((tostring | length) > 0))
+    | tostring' "$info"
+}
+
 # The provider's version inventory is the authority for non-secret Worker
 # bindings.  Keep only the one binding under test on disk; never retain the
 # complete `versions view` response because it may contain unrelated values.
@@ -337,7 +351,7 @@ capture_state() {
     log_event "$label application-name-mismatch"; return 1;
   }
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
-  container="$(jq -er 'first(.. | objects | to_entries[] | select((.key | ascii_downcase | test("version(_id)?$")) and ((.value | type) == "string")) | .value)' "$info")" || return 1
+  container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg ENV_EXPECTED_DIGEST "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$ENV_EXPECTED_DIGEST] then .[0] else error("unexpected image digest") end' "$info")" || return 1
   case "$label" in
     before) BEFORE_WORKER_VERSION="$worker"; BEFORE_CONTAINER_VERSION="$container"; BEFORE_DIGEST="$digest" ;;
@@ -357,7 +371,7 @@ provider_snapshot() {
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
-  container="$(jq -er 'first(.. | objects | to_entries[] | select((.key | ascii_downcase | test("version(_id)?$")) and ((.value | type) == "string")) | .value)' "$info")" || return 1
+  container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
   assert_fabricd_admission_paused "$label" "$worker" || return 1
   printf '%s\t%s\t%s\n' "$worker" "$container" "$digest"
