@@ -318,24 +318,26 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
     const acquire = vi.fn(async () => ({ admitted: true })); const start = containerSeams.startWithEnv;
     const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "REDACTED_SYNTHETIC_FIXTURE", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
     const run = "11111111-1111-4111-8111-111111111111";
+    const wrongRun = "22222222-2222-4222-8222-222222222222";
+    const storeRun = "33333333-3333-4333-8333-333333333333";
     for (let i = 0; i < 100; i++) {
       const raw = body(10_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-proof-nonce-${String(i).padStart(3, "0")}` }));
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-proof-nonce-${String(i).padStart(3, "0")}` }));
       const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
     }
     const authorizationFetch = vi.fn(async () => new Response("forbidden", { status: 403 })); vi.stubGlobal("fetch", authorizationFetch);
     for (let i = 0; i < 100; i++) {
       const raw = body(20_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-wrong-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "wrong_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-wrong-nonce-${String(i).padStart(3, "0")}` }));
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: wrongRun, phase: "wrong_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-wrong-nonce-${String(i).padStart(3, "0")}` }));
       const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
     }
     for (let i = 0; i < 100; i++) {
       const raw = body(30_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-store-delivery-${i}` });
-      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "store_unavailable", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-store-nonce-${String(i).padStart(3, "0")}` }));
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: storeRun, phase: "store_unavailable", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: `a317-store-nonce-${String(i).padStart(3, "0")}` }));
       expect((await worker.fetch(req, e, ctx() as never)).status).toBe(503);
     }
-    const snapshotRequest = new Request("https://worker/internal/v1/a317-live-proof", { headers: { "x-corelink-a317-proof": await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: "a317-proof-nonce-snapshot" }) } });
-    expect(await (await worker.fetch(snapshotRequest, e, ctx() as never)).json()).toMatchObject({ run_id: run, accepted: 200, pending: 200, authorization_attempts: 100, authorization_refusals: 100 });
+    const snapshotRequest = new Request("https://worker/internal/v1/a317-live-proof", { headers: { "x-corelink-a317-proof": await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "a317-proof-nonce-snapshot" }) } });
+    expect(await (await worker.fetch(snapshotRequest, e, ctx() as never)).json()).toMatchObject({ run_id: run, accepted: 100, pending: 100, authorization_attempts: 0, authorization_refusals: 0 });
     expect(authorizationFetch).toHaveBeenCalledTimes(100);
     expect(acquire).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
   }, 15_000);
