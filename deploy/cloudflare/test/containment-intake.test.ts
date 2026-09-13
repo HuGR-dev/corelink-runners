@@ -102,6 +102,13 @@ function hmac(secret: string, body: Uint8Array): Promise<string> {
     .then((mac) => `sha256=${[...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("")}`);
 }
 
+async function a317ProofHeader(claim: Record<string, unknown>, key = "a317-proof-key") {
+  const encoded = btoa(JSON.stringify(claim)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  const signing = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", signing, new TextEncoder().encode(`a317:v1\n${encoded}`)));
+  return `${encoded}.${btoa(String.fromCharCode(...mac)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+}
+
 async function sha256Hex(value: string | Uint8Array): Promise<string> {
   const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -305,6 +312,33 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
       }
     }
   });
+
+  it("keeps paused intake closed while 100 signed A3.17 proofs enter retry with zero provider seams", async () => {
+    const d = makeDO(); const metrics = makeMetrics();
+    const acquire = vi.fn(async () => ({ admitted: true })); const start = containerSeams.startWithEnv;
+    const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "a317-proof-key", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
+    const run = "11111111-1111-4111-8111-111111111111";
+    for (let i = 0; i < 100; i++) {
+      const raw = body(10_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-delivery-${i}` });
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-proof-nonce-${String(i).padStart(3, "0")}` }));
+      const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
+    }
+    const authorizationFetch = vi.fn(async () => new Response("forbidden", { status: 403 })); vi.stubGlobal("fetch", authorizationFetch);
+    for (let i = 0; i < 100; i++) {
+      const raw = body(20_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-wrong-delivery-${i}` });
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "wrong_key", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-wrong-nonce-${String(i).padStart(3, "0")}` }));
+      const c = ctx(); expect((await worker.fetch(req, e, c as never)).status).toBe(202); await settle(c);
+    }
+    for (let i = 0; i < 100; i++) {
+      const raw = body(30_000 + i, "acme/repo", ["corelink-a317-proof"]); const req = await request(raw, { delivery: `github-store-delivery-${i}` });
+      req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: run, phase: "store_unavailable", i, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: `a317-store-nonce-${String(i).padStart(3, "0")}` }));
+      expect((await worker.fetch(req, e, ctx() as never)).status).toBe(503);
+    }
+    const snapshotRequest = new Request("https://worker/internal/v1/a317-live-proof", { headers: { "x-corelink-a317-proof": await a317ProofHeader({ v: 1, run_id: run, phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", nonce: "a317-proof-nonce-snapshot" }) } });
+    expect(await (await worker.fetch(snapshotRequest, e, ctx() as never)).json()).toMatchObject({ run_id: run, accepted: 200, pending: 200, authorization_attempts: 100, authorization_refusals: 100 });
+    expect(authorizationFetch).toHaveBeenCalledTimes(100);
+    expect(acquire).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
+  }, 15_000);
 });
 
 describe("durable intake authority and delivery identity", () => {

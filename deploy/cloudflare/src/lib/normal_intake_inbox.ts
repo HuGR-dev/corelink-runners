@@ -13,6 +13,11 @@ export interface NormalIntakeInput {
   labels: string[]; received_at_ms: number;
 }
 export type NormalIntakeOutcome = "complete" | "uncertain" | "retry";
+export type A317ProofPhase = "missing_key" | "wrong_key" | "store_unavailable";
+export interface A317ProofRecord {
+  schema_version: 1; run_id: string; phase: A317ProofPhase; index: number; nonce: string; expires_at_ms: number; build_sha: string; event_id: string; body_sha256: string;
+  authorization_attempts: number; authorization_refusals: number;
+}
 
 export class NormalIntakeConflictError extends Error {
   readonly status = 409 as const; readonly code = "normal_intake_conflict" as const;
@@ -23,6 +28,9 @@ const PENDING = "normal-inbox:v1:pending:";
 const COUNT = "normal-inbox:v1:count";
 const INSTALLATION_TOMBSTONE = "normal-inbox:v1:installation-tombstone:";
 const INSTALLATION_TOMBSTONE_DELIVERY = "normal-inbox:v1:installation-tombstone-delivery:";
+const A317_PROOF = "normal-inbox:v1:a317-proof:";
+const A317_NONCE = "normal-inbox:v1:a317-nonce:";
+const A317_SLOT = "normal-inbox:v1:a317-slot:";
 const MAX = 500;
 const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
@@ -30,6 +38,9 @@ const text = (value: unknown, max = MAX_TEXT, empty = false): value is string =>
   typeof value === "string" && value.length <= max && (empty || value.length > 0) && !/[\u0000-\u001f\u007f]/.test(value);
 const safeTime = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const eventKey = (id: string) => `${EVENT}${encodeURIComponent(id)}`;
+const proofKey = (id: string) => `${A317_PROOF}${encodeURIComponent(id)}`;
+const proofNonceKey = (runId: string, nonce: string) => `${A317_NONCE}${encodeURIComponent(runId)}:${encodeURIComponent(nonce)}`;
+const proofSlotKey = (runId: string, phase: A317ProofPhase, index: number) => `${A317_SLOT}${encodeURIComponent(runId)}:${phase}:${index}`;
 export const installationTombstoneKey = (installationId: string) => `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
 const validCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX;
@@ -94,6 +105,91 @@ export class NormalIntakeInbox {
       await tx.put(pendingKey(record), record.event_id);
       await tx.put(COUNT, count + 1);
       return { status: "accepted", record };
+    });
+  }
+
+  /**
+   * The A3.17 proof marker is deliberately co-committed with the normal inbox
+   * record. It has no effect on ordinary intake and is consumed by its event id.
+   */
+  async enqueueA317Proof(input: NormalIntakeInput, proof: A317ProofRecord, now = Date.now(), unavailable = false): Promise<{ status: "accepted" | "duplicate" | "conflict" | "full" | "tombstoned"; record?: NormalIntakeRecord }> {
+    if (!proof || proof.schema_version !== 1 || !text(proof.run_id, 96) || !text(proof.nonce, 192)
+      || !["missing_key", "wrong_key", "store_unavailable"].includes(proof.phase)
+      || !Number.isSafeInteger(proof.index) || proof.index < 0 || proof.index > 99 || !safeTime(proof.expires_at_ms) || proof.expires_at_ms <= now) throw new Error("invalid A3.17 proof");
+    // This is intentionally before the inbox transaction: the unavailable-store
+    // phase must leave no durable marker, nonce consumption, or inbox record.
+    if (unavailable) throw new Error("A3.17 injected inbox store unavailable");
+    const normalized = validateInput(input);
+    return this.storage.transaction(async tx => {
+      const marker: A317ProofRecord = { ...proof, event_id: normalized.event_id, body_sha256: normalized.body_sha256, authorization_attempts: 0, authorization_refusals: 0 };
+      const key = eventKey(normalized.event_id), markerKey = proofKey(normalized.event_id), nonceKey = proofNonceKey(proof.run_id, proof.nonce), slotKey = proofSlotKey(proof.run_id, proof.phase, proof.index);
+      const prior = await tx.get<unknown>(markerKey); const slot = await tx.get<unknown>(slotKey); const nonce = await tx.get<unknown>(nonceKey);
+      if (prior !== undefined || slot !== undefined || nonce !== undefined) {
+        if (JSON.stringify(prior) === JSON.stringify(marker) && slot === normalized.event_id && nonce === normalized.event_id) return { status: "duplicate" as const, record: await tx.get<NormalIntakeRecord>(key) };
+        return { status: "conflict" as const };
+      }
+      if (await tx.get(installationTombstoneKey(normalized.installation_id)) !== undefined) return { status: "tombstoned" as const };
+      if (await tx.get(key) !== undefined) return { status: "conflict" as const };
+      const countValue = await tx.get<unknown>(COUNT); if (countValue === undefined && (await tx.list({ prefix: EVENT, limit: 1 })).size > 0) fail("missing active count");
+      const count = countValue === undefined ? 0 : countValue; if (!validCount(count)) fail("malformed active count"); if (count >= MAX) return { status: "full" as const };
+      const record: NormalIntakeRecord = { schema_version: 1, event_id: normalized.event_id, body_sha256: normalized.body_sha256, job_id: normalized.job_id, repo: normalized.repo, installation_id: normalized.installation_id, labels: [...normalized.labels], received_at_ms: normalized.received_at_ms, state: "pending", next_attempt_ms: now };
+      await tx.put(key, record); await tx.put(pendingKey(record), record.event_id); await tx.put(COUNT, count + 1); await tx.put(markerKey, marker); await tx.put(nonceKey, normalized.event_id); await tx.put(slotKey, normalized.event_id);
+      return { status: "accepted" as const, record };
+    });
+  }
+
+  async a317Proof(eventId: string, now = Date.now()): Promise<A317ProofRecord | null> {
+    if (!text(eventId)) throw new Error("invalid A3.17 proof event"); validateNow(now);
+    return this.storage.transaction(async tx => {
+      const value = await tx.get<unknown>(proofKey(eventId));
+      if (value === undefined) return null;
+      const p = value as Partial<A317ProofRecord>;
+      if (p.schema_version !== 1 || !text(p.run_id, 96) || !text(p.nonce, 192) || !["missing_key", "wrong_key", "store_unavailable"].includes(p.phase as string)
+        || !Number.isSafeInteger(p.index) || p.index! < 0 || p.index! > 99 || !safeTime(p.expires_at_ms)) fail("malformed A3.17 proof marker");
+      if (p.expires_at_ms! <= now) return null;
+      return p as A317ProofRecord;
+    });
+  }
+
+  async recordA317Authorization(eventId: string, refused: boolean): Promise<void> {
+    await this.storage.transaction(async tx => {
+      const proof = await tx.get<A317ProofRecord>(proofKey(eventId));
+      if (!proof) fail("missing A3.17 proof marker");
+      await tx.put(proofKey(eventId), { ...proof, authorization_attempts: proof.authorization_attempts + 1, authorization_refusals: proof.authorization_refusals + (refused ? 1 : 0) });
+    });
+  }
+
+  async a317Snapshot(runId: string, now = Date.now()): Promise<{ schema_version: 1; run_id: string; accepted: number; pending: number; complete: number; uncertain: number; authorization_attempts: number; authorization_refusals: number }> {
+    if (!text(runId, 96)) throw new Error("invalid A3.17 run"); validateNow(now);
+    return this.storage.transaction(async tx => {
+      const markers = await tx.list<A317ProofRecord>({ prefix: A317_PROOF, limit: MAX + 1 });
+      if (markers.size > MAX) fail("A3.17 proof index exceeds capacity");
+      let accepted = 0, pending = 0, complete = 0, uncertain = 0, authorization_attempts = 0, authorization_refusals = 0;
+      for (const [key, proof] of markers) {
+        if (proof?.run_id !== runId || proof.expires_at_ms <= now) continue;
+        const id = decodeURIComponent(key.slice(A317_PROOF.length));
+        const record = await tx.get<unknown>(eventKey(id));
+        if (!validRecord(record, id)) fail("missing A3.17 inbox record");
+        accepted++; authorization_attempts += proof.authorization_attempts ?? 0; authorization_refusals += proof.authorization_refusals ?? 0; if (record.state === "pending") pending++; else if (record.state === "complete") complete++; else uncertain++;
+      }
+      return { schema_version: 1, run_id: runId, accepted, pending, complete, uncertain, authorization_attempts, authorization_refusals };
+    });
+  }
+
+  async cleanupExpiredA317Proofs(now = Date.now()): Promise<void> {
+    validateNow(now);
+    await this.storage.transaction(async tx => {
+      const markers = await tx.list<A317ProofRecord>({ prefix: A317_PROOF, limit: MAX + 1 });
+      if (markers.size > MAX) fail("A3.17 proof index exceeds capacity");
+      for (const [key, proof] of markers) {
+        if (!proof || proof.expires_at_ms > now) continue;
+        const id = decodeURIComponent(key.slice(A317_PROOF.length)); const record = await tx.get<unknown>(eventKey(id));
+        if (validRecord(record, id) && record.state === "pending") {
+          const count = await tx.get<unknown>(COUNT); if (!validCount(count) || count < 1) fail("malformed active count");
+          await tx.delete(pendingKey(record)); await tx.delete(eventKey(id)); await tx.put(COUNT, count - 1);
+        }
+        await tx.delete(key); await tx.delete(proofNonceKey(proof.run_id, proof.nonce)); await tx.delete(proofSlotKey(proof.run_id, proof.phase, proof.index));
+      }
     });
   }
 
