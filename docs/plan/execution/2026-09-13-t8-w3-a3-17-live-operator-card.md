@@ -45,12 +45,28 @@ Capture only status, delivery id, job id, response classification, timestamps,
 version/config identity, and redacted hashes. Never capture request bodies,
 headers containing secrets, mint responses, PATs, or JIT material.
 
-## Evidence that exists today
+## Evidence and default-off proof seam
 
 The source seam is reviewable: normal intake calls `normalIntakeEnqueue` before
 returning 202, catches durable-write failure as 503, and only later drains into
 `prepareSpawn`; `prepareSpawn` precedes claim/provider/container work. Focused
 Vitest covers the 100-request missing, wrong, and injected-store-failure cases.
+
+The promoted source also provides a default-off, capability-authenticated
+proof seam specifically for this card: `GET /internal/v1/a317-live-proof`
+(`index.ts:5519-5527`) reads the run-scoped aggregate from the durable
+ContainmentDO. The signed capability is bound to run, phase, index, nonce,
+expiry, build SHA, repository, and installation. It cannot create, settle,
+drain, or alter intake configuration. The underlying transactional snapshot
+(`normal_intake_inbox.ts:194-208`) counts accepted/pending/complete/uncertain
+records and authorization attempts/refusals.
+
+The proof webhook path is restricted to the exact proof repository,
+installation, single `corelink-a317-proof` label, paused intake, and matching
+build claim. In the `store_unavailable` phase, the deterministic fault is
+selected before the transaction (`index.ts:5732-5742`), so the 100×503 result
+is reproducible without taking a production storage outage. This seam remains
+inactive unless its capability/configuration is explicitly provisioned.
 
 For a real run, the following read-only observations can support the zero-effect
 claim without adding per-run production counters:
@@ -66,22 +82,24 @@ claim without adding per-run production counters:
 
 ## Hard evidence gaps
 
-Worker KV `spawn:<jobId>` claims and ContainmentDO normal-inbox records have no
-external read endpoint. A 202 therefore proves the handler's enqueue branch,
-but cannot independently prove all 100 durable records without a commit receipt
-or read-only inbox seam. Provider snapshots also cannot prove that a transient
-JIT/box existed and disappeared between polls.
+The default-off proof endpoint now supplies durable normal-inbox readback for
+the scoped run; it removes the earlier record-readback gap. Worker KV
+`spawn:<jobId>` claims still have no public read endpoint, and provider
+snapshots cannot prove that a transient JIT/box existed and disappeared between
+polls. Those effects remain covered by the ordered source control flow plus
+quiescent before/after external snapshots; they must not be replaced with
+invented per-run production counters.
 
-Most decisively, production has no deterministic way to make the Durable Object
-store unavailable. A real outage is unsafe and non-reproducible; inventing a
-fault response or adding a production-only counter would not satisfy the
-contract. The STORE phase is therefore `RED` until an isolated, owner-approved
-fault seam exists.
+The STORE phase is executable through the default-off deterministic fault seam,
+subject to owner provisioning and version binding. It must still be recorded
+RED if that capability/configuration is absent, stale, or cannot be read back;
+an actual storage outage is never a substitute.
 
 ## Disposition
 
 Proceed with source acceptance and, when the AU terminal/root relay permits it,
-the missing/wrong-key live cells using version binding, unique job scope,
-quiescent before/after snapshots, and redacted tail evidence. Keep canonical
-A3.17 `RED` overall until the durable inbox evidence and deterministic store
-fault seam are independently available. No waiver is proposed.
+the full missing/wrong/store matrix using the default-off proof capability,
+version binding, unique job scope, quiescent before/after snapshots, and
+redacted tail evidence. Keep canonical A3.17 `RED` if the proof capability,
+owner credentials, or version-bound deployment is unavailable. No waiver is
+proposed.
