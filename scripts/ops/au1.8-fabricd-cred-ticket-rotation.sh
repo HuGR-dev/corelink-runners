@@ -70,6 +70,8 @@ OBSERVABILITY_URL="${AU18_OBSERVABILITY_URL:-$BASE_URL/internal/v1/occupancy}"
 STATUS_URL="${AU18_STATUS_URL:-$BASE_URL/internal/v1/status}"
 USAGE_URL="${AU18_USAGE_URL:-$BASE_URL/v1/usage}"
 PROVIDER_STABILITY_SECS="${AU18_PROVIDER_STABILITY_SECS:-5}"
+HEALTH_READY_MAX_SECS="${AU18_HEALTH_READY_MAX_SECS:-90}"
+HEALTH_READY_INTERVAL_SECS="${AU18_HEALTH_READY_INTERVAL_SECS:-2}"
 EVIDENCE_PATH="$REPO_ROOT/docs/plan/evidence/au1.8-fabricd-secret-rotation.json"
 TENANT="ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"
 REPO_FULL_NAME="HuGR-Labs/corelink-runners"
@@ -234,6 +236,11 @@ if ! [[ "$PROVIDER_STABILITY_SECS" =~ ^[0-9]+$ ]]; then
   echo "refusing: AU18_PROVIDER_STABILITY_SECS must be a non-negative integer" >&2
   exit 1
 fi
+if ! [[ "$HEALTH_READY_MAX_SECS" =~ ^[1-9][0-9]*$ ]] || [[ "$HEALTH_READY_MAX_SECS" -gt 90 ]] ||
+   ! [[ "$HEALTH_READY_INTERVAL_SECS" =~ ^[1-9][0-9]*$ ]] || [[ "$HEALTH_READY_INTERVAL_SECS" -gt "$HEALTH_READY_MAX_SECS" ]]; then
+  echo "refusing: health readiness must use a positive interval and a maximum of 90 seconds" >&2
+  exit 1
+fi
 
 source_tree_gate || exit 1
 if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
@@ -319,6 +326,7 @@ QUIESCENCE_STATE="not-checked"
 LEDGER_CROSS_INSTANCE_SAFE="not-checked"
 PROVIDER_STABILITY_STATE="not-checked"
 CAS_PAT_PROOF="not-checked"
+MINT_FIXTURE_FAILURE="not-run"
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
 
@@ -423,10 +431,8 @@ capture_state() {
   local label="$1"
   local deploys="$TMP_DIR/$label-deployments.json"
   local info="$TMP_DIR/$label-container.json"
-  local health worker container digest
-  health="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' "$HEALTH_URL" 2>"$TMP_DIR/$label-health.err")" || health=000
-  scrub_file "$TMP_DIR/$label-health.err"
-  [[ "$health" == 200 ]] || { log_event "$label health=$health"; return 1; }
+  local worker container digest
+  wait_for_health "$label" || return 1
   capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || {
@@ -443,6 +449,44 @@ capture_state() {
   esac
   CURRENT_WORKER_VERSION="$worker"
   log_event "$label health=200 worker_version_id=$worker container_version_id=$container image_digest=$digest"
+}
+
+wait_for_health() {
+  local label="$1" started now elapsed remaining timeout sleep_for attempts=0 health=000 curl_rc err
+  started="$(date +%s)"
+  while :; do
+    now="$(date +%s)"
+    elapsed=$((now - started))
+    if [[ "$elapsed" -ge "$HEALTH_READY_MAX_SECS" ]]; then
+      log_event "$label health-ready=RED http_status=$health curl_rc=${curl_rc:-000} elapsed_seconds=$elapsed attempts=$attempts"
+      return 1
+    fi
+    remaining=$((HEALTH_READY_MAX_SECS - elapsed))
+    timeout=10
+    [[ "$remaining" -lt "$timeout" ]] && timeout="$remaining"
+    attempts=$((attempts + 1))
+    err="$TMP_DIR/$label-health.err"
+    set +e
+    health="$(curl -sS --connect-timeout 5 --max-time "$timeout" -o /dev/null -w '%{http_code}' "$HEALTH_URL" 2>"$err")"
+    curl_rc=$?
+    set -e
+    scrub_file "$err"
+    [[ "$health" =~ ^[0-9]{3}$ ]] || health=000
+    now="$(date +%s)"
+    elapsed=$((now - started))
+    if [[ "$curl_rc" == 0 && "$health" == 200 ]]; then
+      log_event "$label health-ready=GREEN http_status=200 elapsed_seconds=$elapsed attempts=$attempts"
+      return 0
+    fi
+    if [[ "$elapsed" -ge "$HEALTH_READY_MAX_SECS" ]]; then
+      log_event "$label health-ready=RED http_status=$health curl_rc=$curl_rc elapsed_seconds=$elapsed attempts=$attempts"
+      return 1
+    fi
+    sleep_for="$HEALTH_READY_INTERVAL_SECS"
+    remaining=$((HEALTH_READY_MAX_SECS - elapsed))
+    [[ "$remaining" -lt "$sleep_for" ]] && sleep_for="$remaining"
+    sleep "$sleep_for"
+  done
 }
 
 provider_snapshot() {
@@ -824,19 +868,35 @@ quiescence_gate() {
 }
 
 mint_fixture() {
-  local body_err="$TMP_DIR/mint.err" raw
+  local body_err="$TMP_DIR/mint.err" raw body status curl_rc
   : > "$body_err"; chmod 600 "$body_err"
   set +e
   raw="$(jq -nc --arg tenant "$TENANT" --arg repo "$REPO_FULL_NAME" --arg installation "$INSTALLATION_ID" --rawfile pat "$PAT_FILE" \
     '{tenant:$tenant,repo_full_name:$repo,installation_id:$installation,acquiring_pat:($pat|sub("\\n$";""))}' \
-    | curl -fsS --connect-timeout 10 --max-time 45 --header "@$HEADER_FILE" --header 'content-type: application/json' --data-binary @- "$BASE_URL/v1/test/mint-cred-ticket" 2>>"$body_err" \
-    | jq -er '[.ticket,.lease_id] | @tsv' 2>>"$body_err")"
-  local rc=$?
+    | curl -sS --connect-timeout 10 --max-time 45 --header "@$HEADER_FILE" --header 'content-type: application/json' --data-binary @- -w '\n%{http_code}' "$BASE_URL/v1/test/mint-cred-ticket" 2>>"$body_err")"
+  curl_rc=$?
   set -e
   scrub_file "$body_err"
-  [[ "$rc" == 0 ]] || return 1
-  IFS=$'\t' read -r FIXTURE_TICKET FIXTURE_LEASE_ID <<< "$raw"
-  [[ -n "$FIXTURE_TICKET" && -n "$FIXTURE_LEASE_ID" ]] || return 1
+  if [[ "$curl_rc" != 0 ]]; then
+    MINT_FIXTURE_FAILURE="transport"
+    return 1
+  fi
+  status="${raw##*$'\n'}"
+  body="${raw%$'\n'*}"
+  [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+  if [[ "$status" != 200 ]]; then
+    MINT_FIXTURE_FAILURE="http_status=$status"
+    return 1
+  fi
+  if ! IFS=$'\t' read -r FIXTURE_TICKET FIXTURE_LEASE_ID < <(jq -er '[.ticket,.lease_id] | @tsv' <<<"$body"); then
+    MINT_FIXTURE_FAILURE="shape"
+    return 1
+  fi
+  if [[ -z "$FIXTURE_TICKET" || -z "$FIXTURE_LEASE_ID" ]]; then
+    MINT_FIXTURE_FAILURE="shape"
+    return 1
+  fi
+  MINT_FIXTURE_FAILURE="none"
   # Success here is the live server's validation of the exact dogfood PAT,
   # tenant, GitHub repository, and installation tuple sent above.
   log_event "dogfood-mint-preflight=GREEN tenant=$TENANT repo=$REPO_FULL_NAME installation=$INSTALLATION_ID"
@@ -914,21 +974,49 @@ check_window() {
 rollback_old() {
   # Re-arm the known OOB test key only long enough to prove the restored signer;
   # this is followed by a disarm/recreate before returning to the caller.
-  put_secret FABRIC_CRED_TICKET_SECRET "$OLD_SECRET_FILE" || return 1
-  put_secret FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE" || return 1
-  recreate 1 || return 1
-  capture_state rollback || return 1
-  mint_fixture || return 1
-  local expected
-  expected="$(hmac_ticket "$OLD_SECRET_FILE" "$FIXTURE_LEASE_ID")"
-  [[ "$expected" == "$FIXTURE_TICKET" ]] || return 1
-  [[ "$(redeem_status "$FIXTURE_LEASE_ID" "$expected")" == 200 ]] || return 1
-  delete_test_key || return 1
-  recreate 0 || return 1
-  capture_state rollback-final || return 1
-  assert_test_key_absent || return 1
-  assert_remote_bindings rollback-final "$CURRENT_WORKER_VERSION" disarmed || return 1
-  return 0
+  local result=0 arm_ready=0 expected redeem
+  if ! put_secret FABRIC_CRED_TICKET_SECRET "$OLD_SECRET_FILE"; then
+    log_event "rollback-signer-proof=RED leaf=old-secret-put"
+    result=1
+  fi
+  if ! put_secret FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE"; then
+    log_event "rollback-signer-proof=RED leaf=test-key-put"
+    result=1
+  fi
+  if recreate 1 && capture_state rollback; then
+    arm_ready=1
+  else
+    log_event "rollback-signer-proof=RED leaf=arm-or-capture"
+    result=1
+  fi
+  if [[ "$arm_ready" == 1 ]]; then
+    if ! mint_fixture; then
+      log_event "rollback-signer-proof=RED leaf=mint-${MINT_FIXTURE_FAILURE:-unknown}"
+      result=1
+    else
+      expected="$(hmac_ticket "$OLD_SECRET_FILE" "$FIXTURE_LEASE_ID")"
+      if [[ "$expected" != "$FIXTURE_TICKET" ]]; then
+        log_event "rollback-signer-proof=RED leaf=hmac-mismatch"
+        result=1
+      else
+        redeem="$(redeem_status "$FIXTURE_LEASE_ID" "$expected")"
+        [[ "$redeem" =~ ^[0-9]{3}$ ]] || redeem=000
+        if [[ "$redeem" != 200 ]]; then
+          log_event "rollback-signer-proof=RED leaf=redeem-status=$redeem"
+          result=1
+        fi
+      fi
+    fi
+  fi
+  if ! delete_test_key; then log_event "rollback-cleanup=RED leaf=test-key-delete"; result=1; fi
+  if ! recreate 0; then log_event "rollback-cleanup=RED leaf=disarm-recreate"; result=1; fi
+  if ! capture_state rollback-final; then log_event "rollback-cleanup=RED leaf=final-capture"; result=1; fi
+  if ! assert_test_key_absent; then log_event "rollback-cleanup=RED leaf=test-key-absent"; result=1; fi
+  if ! assert_remote_bindings rollback-final "$CURRENT_WORKER_VERSION" disarmed; then
+    log_event "rollback-cleanup=RED leaf=final-remote-binding"
+    result=1
+  fi
+  return "$result"
 }
 
 write_evidence() {
