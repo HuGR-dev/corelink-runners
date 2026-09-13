@@ -127,13 +127,14 @@ export class NormalIntakeInbox {
       const key = eventKey(normalized.event_id), markerKey = proofKey(normalized.event_id), nonceKey = proofNonceKey(proof.run_id, proof.nonce), slotKey = proofSlotKey(proof.run_id, proof.phase, proof.index);
       const runKey = proofRunKey(proof.run_id); const run = await tx.get<{ phase?: unknown; build_sha?: unknown; repo?: unknown; installation_id?: unknown; labels?: unknown; expires_at_ms?: unknown; count?: unknown }>(runKey);
       const runValue = { phase: proof.phase, build_sha: proof.build_sha, repo: normalized.repo, installation_id: normalized.installation_id, labels: normalized.labels, expires_at_ms: proof.expires_at_ms, count: 1 };
-      if (run !== undefined && (run.phase !== proof.phase || run.build_sha !== proof.build_sha || run.repo !== normalized.repo || run.installation_id !== normalized.installation_id || JSON.stringify(run.labels) !== JSON.stringify(normalized.labels) || run.expires_at_ms !== proof.expires_at_ms || !Number.isSafeInteger(run.count) || (run.count as number) >= 100)) return { status: "conflict" as const };
+      if (run !== undefined && (run.phase !== proof.phase || run.build_sha !== proof.build_sha || run.repo !== normalized.repo || run.installation_id !== normalized.installation_id || JSON.stringify(run.labels) !== JSON.stringify(normalized.labels) || run.expires_at_ms !== proof.expires_at_ms || !Number.isSafeInteger(run.count))) return { status: "conflict" as const };
       const prior = await tx.get<unknown>(markerKey); const slot = await tx.get<unknown>(slotKey); const nonce = await tx.get<unknown>(nonceKey);
       if (prior !== undefined || slot !== undefined || nonce !== undefined) {
         const immutable = prior && typeof prior === "object" ? { ...(prior as A317ProofRecord), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" as const } : prior;
         if (JSON.stringify(immutable) === JSON.stringify(marker) && slot === normalized.event_id && nonce === normalized.event_id) return { status: "duplicate" as const, record: await tx.get<NormalIntakeRecord>(key) };
         return { status: "conflict" as const };
       }
+      if (run !== undefined && (run.count as number) >= 100) return { status: "conflict" as const };
       if (await tx.get(installationTombstoneKey(normalized.installation_id)) !== undefined) return { status: "tombstoned" as const };
       if (await tx.get(key) !== undefined) return { status: "conflict" as const };
       const countValue = await tx.get<unknown>(COUNT); if (countValue === undefined && (await tx.list({ prefix: EVENT, limit: 1 })).size > 0) fail("missing active count");
