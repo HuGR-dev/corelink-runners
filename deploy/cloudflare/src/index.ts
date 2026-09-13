@@ -1,12 +1,12 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
-import { NormalIntakeInbox, installationTombstoneKey, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { NormalIntakeInbox, installationTombstoneKey, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
-import { authorizeRunner, RunnerAuthorizationError } from "./lib/runner_authorization";
+import { authorizeRunner, inspectRunnerAuthorization, RunnerAuthorizationError } from "./lib/runner_authorization";
 import { adoptIssuedRunnerCredential } from "./lib/runner_credential_adoption";
 import { runnerCredentialLeaseId } from "./lib/runner_credential_lease";
 import { ConcurrencyAuthority } from "./lib/concurrency_authority";
@@ -261,6 +261,10 @@ export interface Env {
   FABRIC_ADMISSION_PAUSED?: string;
   AUTOSCALER_INTAKE_PAUSED?: string;
   AUTOSCALER_REDRIVE_PAUSED?: string;
+  /** Default-off A3.17 qualification capability. Never an operational control. */
+  A317_LIVE_PROOF_HMAC_KEY?: string;
+  A317_LIVE_PROOF_BUILD_SHA?: string;
+  A317_LIVE_PROOF_REPO?: string;
   CONTAINMENT_ADMIN_KEY?: string;
   CONTAINMENT?: DurableObjectNamespace<ContainmentDO>;
   // Track-C C2b: the bearer the in-container check-host exec-server requires on
@@ -322,6 +326,7 @@ export interface Env {
   // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Required
   // spawn preparation refuses missing authorization before JIT/provider work.
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
+  REQUIRE_MINT_KEY?: string;
   // D-9 mint base URL (default the public on-net hostname; Option B).
   CORELINK_MINT_URL?: string;
   // The CAS API base URL injected as CLW_ENDPOINT (default same host).
@@ -882,6 +887,16 @@ export class ContainmentDO extends DurableObject<Env> {
   async normalIntakeEnqueue(input: NormalIntakeInput, delayMs = 0) {
     return new NormalIntakeInbox(this.ctx.storage).enqueue(input, Date.now(), delayMs);
   }
+
+  async normalIntakeA317ProofEnqueue(input: NormalIntakeInput, proof: A317ProofRecord, unavailable = false) {
+    return new NormalIntakeInbox(this.ctx.storage).enqueueA317Proof(input, proof, Date.now(), unavailable);
+  }
+  async normalIntakeA317Proof(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Proof(eventId, Date.now()); }
+  async normalIntakeA317Pending(limit = 25) { return new NormalIntakeInbox(this.ctx.storage).a317Pending(undefined, undefined, Date.now(), limit); }
+  async beginA317Authorization(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).beginA317Authorization(eventId); }
+  async finishA317Authorization(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown") { return new NormalIntakeInbox(this.ctx.storage).finishA317Authorization(eventId, status); }
+  async normalIntakeA317Snapshot(runId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Snapshot(runId, Date.now()); }
+  async cleanupExpiredA317Proofs() { return new NormalIntakeInbox(this.ctx.storage).cleanupExpiredA317Proofs(Date.now()); }
 
   async normalIntakePending(limit = 25): Promise<NormalIntakeRecord[]> {
     return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
@@ -5214,10 +5229,38 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
   // Normal-intake drain creates NEW runner admissions. A completed webhook is
   // intentionally independent and continues to revoke, tear down, and release
   // capacity while this gate is active.
-  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   const authority = containmentAuthority(env);
-  for (const event of await authority.normalIntakePending(25)) {
-    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
+  await authority.cleanupExpiredA317Proofs();
+  const intakeState = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+  const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.normalIntakeA317Pending(25);
+  for (const event of candidates) {
+    const proof = await authority.normalIntakeA317Proof(event.event_id);
+    if (proof && intakeState !== "paused") return;
+    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal" && !proof) return;
+    if (proof && (!env.A317_LIVE_PROOF_HMAC_KEY || !env.A317_LIVE_PROOF_BUILD_SHA || proof.build_sha !== env.A317_LIVE_PROOF_BUILD_SHA)) return;
+    // The qualification event deliberately enters the same durable pending →
+    // retry transition, but terminates before every authorization/provider
+    // primitive. Its per-event mint overlay is therefore observational only;
+    // it cannot create claims, JIT registrations, leases, or boxes.
+    if (proof) {
+      // Do not alter the deployment secret: use a one-call overlay only. Both
+      // synthetic key cases fail at this pre-provider fence, so neither can
+      // reach authorization, claim, JIT, lease, nor container code.
+      const proofEnv: Env = proof.phase === "missing_key"
+        ? { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: undefined, REQUIRE_MINT_KEY: "1" }
+        : { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: "REDACTED_SYNTHETIC_FIXTURE", REQUIRE_MINT_KEY: "1" };
+      if (proof.phase === "missing_key") {
+        await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
+        continue;
+      }
+      if (await authority.beginA317Authorization(event.event_id)) {
+        const authorization = await inspectRunnerAuthorization(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
+        await authority.finishA317Authorization(event.event_id, authorization.kind === "refused" ? (authorization.status === 401 ? "refused401" : "refused403") : authorization.kind === "authorized" ? "accepted2xx" : "unknown");
+        await authority.normalIntakeSettle(event.event_id, event.body_sha256, authorization.kind === "refused" ? "retry" : "uncertain");
+      }
+      continue;
+    }
+    if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
     if ((await authority.snapshot()).backlog_count !== 0) return;
     if (await authority.installationTombstoned(event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
@@ -5290,6 +5333,7 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (env.CONTAINMENT) ctx.waitUntil(containmentAuthority(env).cleanupExpiredA317Proofs().catch(() => {}));
     // Reuse the existing cron: post-start projection failures retain an exact
     // teardown intent in ConcurrencySlotsDO until the provider confirms down.
     ctx.waitUntil(retryActiveSpawnTeardowns(env));
@@ -5307,10 +5351,8 @@ export default {
         await deliverInvalidConfig(env);
         const intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
         if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
-        if (intake === "normal") {
-          await runContainmentDrain(env);
-          await runNormalIntakeDrain(env);
-        }
+        if (intake === "normal") await runContainmentDrain(env);
+        if (intake === "normal" || !!env.A317_LIVE_PROOF_HMAC_KEY) await runNormalIntakeDrain(env);
       } catch (e) {
         logEvent("error", "containment_tick_failed", { error: (e as Error).message });
       }
@@ -5426,6 +5468,33 @@ export default {
 // The actual route table, factored out of `fetch` so the top-level guard above
 // can wrap it uniformly. Behavior is byte-identical to before the guard was
 // added — only the outer catch is new.
+interface A317LiveClaim { v: 1; run_id: string; phase: "missing_key" | "wrong_key" | "store_unavailable"; i: number; exp_ms: number; build_sha: string; nonce: string; installation_id: string; }
+const A317_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const A317_SHA = /^[0-9a-f]{7,64}$/i;
+function a317Base64Url(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }
+function a317Decode(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]{1,4096}$/.test(value)) return null;
+  try { const raw = atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)); return Uint8Array.from(raw, c => c.charCodeAt(0)); } catch { return null; }
+}
+async function verifyA317LiveClaim(request: Request, env: Env): Promise<A317LiveClaim | null> {
+  const key = env.A317_LIVE_PROOF_HMAC_KEY, build = env.A317_LIVE_PROOF_BUILD_SHA;
+  if (!key || !build) return null;
+  const header = request.headers.get("x-corelink-a317-proof") ?? ""; const [encoded, mac, extra] = header.split(".");
+  if (!encoded || !mac || extra !== undefined) return null;
+  const payload = a317Decode(encoded); const supplied = a317Decode(mac); if (!payload || !supplied || supplied.length !== 32) return null;
+  const signingKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", signingKey, new TextEncoder().encode(`a317:v1\n${encoded}`)));
+  if (!safeEqual(a317Base64Url(expected), mac)) return null;
+  let claim: Partial<A317LiveClaim>;
+  try { claim = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(payload)) as Partial<A317LiveClaim>; } catch { return null; }
+  const fields = Object.keys(claim).sort().join(",");
+  if (fields !== "build_sha,exp_ms,i,installation_id,nonce,phase,run_id,v" || claim.v !== 1 || !A317_UUID.test(claim.run_id ?? "") || !/^[1-9][0-9]{0,18}$/.test(claim.installation_id ?? "")
+    || !["missing_key", "wrong_key", "store_unavailable"].includes(claim.phase as string) || !Number.isSafeInteger(claim.i) || claim.i! < 0 || claim.i! > 99
+    || !Number.isSafeInteger(claim.exp_ms) || claim.exp_ms! <= Date.now() || claim.exp_ms! > Date.now() + 600_000
+    || !A317_SHA.test(claim.build_sha ?? "") || claim.build_sha !== build || !/^[A-Za-z0-9_-]{16,128}$/.test(claim.nonce ?? "")) return null;
+  return claim as A317LiveClaim;
+}
+
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -5445,6 +5514,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const presented = request.headers.get("x-corelink-internal-auth") ?? "";
       if (!safeEqual(presented, key)) return unauthorized();
       return json({ counters: await snapshotMetrics(env) }, 200);
+    }
+
+    // A3.17's only control-plane surface is a capability-authenticated,
+    // run-scoped read. It exposes aggregate durable evidence only; it cannot
+    // create, settle, drain, fault, or alter normal intake configuration.
+    if (request.method === "GET" && pathname === "/internal/v1/a317-live-proof") {
+      const claim = await verifyA317LiveClaim(request, env);
+      if (!claim) return json({ error: "not found" }, 404);
+      try { return json(await containmentAuthority(env).normalIntakeA317Snapshot(claim.run_id), 200); }
+      catch { return json({ error: "A3.17 proof store unavailable" }, 503); }
     }
 
     // Authenticated fabric suspension signal. The producer is fabricd's
@@ -5576,7 +5655,6 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (githubEvent !== "workflow_job") {
         return json({ ok: true, ignored: "not workflow_job" }, 200);
       }
-      if (!env.GITHUB_MINT_TOKEN) return json({ error: "autoscaler not configured" }, 503);
       let evt: {
         action?: string;
         workflow_job?: {
@@ -5594,6 +5672,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         installation?: { id?: number | string };
       };
       let lexicalJobId: string | null = null;
+      let a317Claim: A317LiveClaim | null = null;
       try {
         lexicalJobId = canonicalWorkflowJobIdFromRaw(raw);
         if (lexicalJobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
@@ -5634,6 +5713,34 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
         if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
         const installationId = resolvedInstallation.installationId;
+        // A3.17 is a run-scoped qualification lane. GitHub's webhook HMAC has
+        // already authenticated this delivery; this second capability is only
+        // accepted while normal intake remains paused and can never unpause it.
+        a317Claim = await verifyA317LiveClaim(request, env);
+        if (a317Claim) {
+          const proofRepo = env.A317_LIVE_PROOF_REPO ?? "";
+          const proofLabel = "corelink-a317-proof";
+          if (proofRepo !== repo || a317Claim.installation_id !== installationId || jobLabels.length !== 1 || jobLabels[0] !== proofLabel
+            || parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "paused") a317Claim = null;
+        }
+        if (a317Claim) {
+          try {
+            const authority = containmentAuthority(env);
+            await authority.cleanupExpiredA317Proofs();
+            const bodySha = await sha256Hex(rawBytes);
+            const eventId = `a317:v1:${a317Claim.run_id}:${a317Claim.phase}:${a317Claim.i}`;
+            const result = await authority.normalIntakeA317ProofEnqueue({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha,
+              job_id: jobId, repo, installation_id: installationId, labels: mintLabels },
+              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" },
+              a317Claim.phase === "store_unavailable");
+            if (result.status === "conflict") return json({ error: "A3.17 proof conflicts with durable evidence" }, 409);
+            if (result.status === "full") return json({ error: "A3.17 proof inbox full" }, 503);
+            ctx.waitUntil(runNormalIntakeDrain(env));
+            return json({ ok: true, a317_proof: true, duplicate: result.status === "duplicate", job_id: jobId }, 202);
+          } catch {
+            return json({ error: "A3.17 proof durable store unavailable", retryable: true }, 503);
+          }
+        }
         if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
           && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
           logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
@@ -5668,6 +5775,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           return json({ error: "containment authority unavailable" }, 503);
         }
       }
+
+      if (!env.GITHUB_MINT_TOKEN) return json({ error: "autoscaler not configured" }, 503);
 
       // This visibility-only signal is deliberately after containment. A paused
       // event must produce zero success/continuation side effects of any kind.
