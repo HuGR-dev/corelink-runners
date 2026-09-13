@@ -77,6 +77,8 @@ class Provider(Protocol):
 
     def public_status(self, path: str, timeout_s: float) -> int: ...
 
+    def public_witness(self, path: str, timeout_s: float) -> dict[str, Any]: ...
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -456,14 +458,35 @@ class ReadOnlyHttpProvider:
     def _api_get(self, path: str) -> Any:
         return self._api_payload(path).get("result")
 
-    def _public_get(self, path: str, timeout_s: float) -> int:
+    @staticmethod
+    def _safe_header(headers: Any, name: str) -> str | None:
+        """Keep only bounded, printable response metadata; never copy a body."""
+        value = headers.get(name) if headers is not None else None
+        if not isinstance(value, str):
+            return None
+        value = re.sub(r"[\x00-\x1f\x7f]", "", value).strip()
+        return value[:256] if value else None
+
+    def _public_get(self, path: str, timeout_s: float) -> dict[str, Any]:
         request = Request(f"{self.fabric_url}{path}", method="GET", headers={"Accept": "application/json"})
         try:
             with urlopen(request, timeout=timeout_s) as response:
                 response.read(1024)  # bounded discard; bodies never enter evidence
-                return int(response.status)
+                return {
+                    "http": int(response.status),
+                    "content_type": self._safe_header(response.headers, "Content-Type"),
+                    "server": self._safe_header(response.headers, "Server"),
+                    "cf_ray": self._safe_header(response.headers, "CF-Ray"),
+                    "x_request_id": self._safe_header(response.headers, "X-Request-ID"),
+                }
         except HTTPError as exc:
-            return int(exc.code)
+            return {
+                "http": int(exc.code),
+                "content_type": self._safe_header(exc.headers, "Content-Type"),
+                "server": self._safe_header(exc.headers, "Server"),
+                "cf_ray": self._safe_header(exc.headers, "CF-Ray"),
+                "x_request_id": self._safe_header(exc.headers, "X-Request-ID"),
+            }
         except (URLError, TimeoutError) as exc:
             raise HarnessError("public fabricd read failed") from exc
 
@@ -561,6 +584,9 @@ class ReadOnlyHttpProvider:
         return active[0]
 
     def public_status(self, path: str, timeout_s: float) -> int:
+        return int(self.public_witness(path, timeout_s)["http"])
+
+    def public_witness(self, path: str, timeout_s: float) -> dict[str, Any]:
         if path not in ("/health", "/v1/attestation/key"):
             raise HarnessError("harness attempted an unapproved public route")
         return self._public_get(path, timeout_s)
@@ -650,6 +676,19 @@ class SleepWakeHarness:
                 raise HarnessError("scale-zero was not observed before the bounded deadline")
             self.sleeper(min(self.config.poll_interval_s, max(0.0, deadline - self.clock())))
 
+    def _public_witness(self, path: str) -> dict[str, Any]:
+        """Capture one bounded GET witness, with compatibility for test providers."""
+        method = getattr(self.provider, "public_witness", None)
+        if callable(method):
+            value = method(path, self.config.wake_timeout_s)
+            if not isinstance(value, dict) or not isinstance(value.get("http"), int):
+                raise CapabilityError("public health witness has an unsupported shape")
+            return value
+        status = self.provider.public_status(path, self.config.wake_timeout_s)
+        if not isinstance(status, int):
+            raise CapabilityError("public health status has an unsupported shape")
+        return {"http": status}
+
     def run(self, preflight: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         witness = preflight or self.preflight()
         app_id = witness["app_id"]
@@ -697,14 +736,16 @@ class SleepWakeHarness:
                 }
 
                 health_at = utc_now()
-                health_status = self.provider.public_status("/health", self.config.wake_timeout_s)
-                record["wake"] = {"route": "/health", "http": health_status, "observed_at": health_at}
+                health = self._public_witness("/health")
+                health_status = health["http"]
+                record["wake"] = {"route": "/health", **health, "observed_at": health_at}
                 if health_status != 200:
                     raise HarnessError("fabricd health wake did not return HTTP 200")
 
                 att_at = utc_now()
-                att_status = self.provider.public_status("/v1/attestation/key", self.config.wake_timeout_s)
-                record["attestation"] = {"route": "/v1/attestation/key", "http": att_status, "observed_at": att_at}
+                attestation = self._public_witness("/v1/attestation/key")
+                att_status = attestation["http"]
+                record["attestation"] = {"route": "/v1/attestation/key", **attestation, "observed_at": att_at}
                 if att_status != 200:
                     raise HarnessError("fabricd attestation endpoint did not return HTTP 200")
 
