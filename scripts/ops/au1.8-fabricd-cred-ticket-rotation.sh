@@ -333,6 +333,7 @@ LEDGER_CROSS_INSTANCE_SAFE="not-checked"
 PROVIDER_STABILITY_STATE="not-checked"
 CAS_PAT_PROOF="not-checked"
 MINT_FIXTURE_FAILURE="not-run"
+MINT_FAILURE_DIAGNOSTIC="not-run"
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
 
@@ -359,6 +360,33 @@ scrub_file() {
     "$file" > "$safe" || true
   chmod 600 "$safe"
   mv -f -- "$safe" "$file"
+}
+
+# Reduce a mint response to an allowlisted code and status. The body is parsed
+# transiently and never written; unknown text is intentionally discarded. A
+# restricted CF-Ray value is retained only as a provider correlation handle.
+classify_mint_failure() {
+  local body="$1" status="$2" headers="${3:-}" error_code cf_ray
+  [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+  error_code="$(jq -r '
+    (.error // .code // "") as $e |
+    if ($e | type) != "string" then "unknown"
+    elif $e == "CAS PAT mint failed" then "cas_pat_mint_failed"
+    elif ($e | startswith("test-mint requires the cred-ticket signer")) then "mint_not_armed"
+    elif $e == "test lease admission refused" then "lease_admission_refused"
+    elif $e == "lease ledger unavailable" then "ledger_unavailable"
+    elif $e == "lease ledger refused Pending->Held" then "ledger_transition_failed"
+    else "unknown" end' <<<"$body" 2>/dev/null || printf '%s' unknown)"
+  case "$error_code" in
+    cas_pat_mint_failed|mint_not_armed|lease_admission_refused|ledger_unavailable|ledger_transition_failed) ;;
+    *) error_code=unknown ;;
+  esac
+  cf_ray="absent"
+  if [[ -n "$headers" && -f "$headers" ]]; then
+    cf_ray="$(sed -n 's/^[Cc][Ff]-[Rr]ay:[[:space:]]*//p' "$headers" 2>/dev/null | head -n 1 | sed -E 's/[^A-Za-z0-9._-]//g' | cut -c1-80)"
+    [[ -n "$cf_ray" ]] || cf_ray=absent
+  fi
+  printf 'error_code=%s http_status=%s cf_ray=%s' "$error_code" "$status" "$cf_ray"
 }
 
 run_quiet() {
@@ -874,17 +902,21 @@ quiescence_gate() {
 }
 
 mint_fixture() {
-  local body_err="$TMP_DIR/mint.err" raw body status curl_rc
+  local body_err="$TMP_DIR/mint.err" response_headers="$TMP_DIR/mint.headers" raw body status=000 curl_rc
+  MINT_FAILURE_DIAGNOSTIC="not-run"
   : > "$body_err"; chmod 600 "$body_err"
+  : > "$response_headers"; chmod 600 "$response_headers"
   set +e
   raw="$(jq -nc --arg tenant "$TENANT" --arg repo "$REPO_FULL_NAME" --arg installation "$INSTALLATION_ID" --rawfile pat "$PAT_FILE" \
     '{tenant:$tenant,repo_full_name:$repo,installation_id:$installation,acquiring_pat:($pat|sub("\\n$";""))}' \
-    | curl -sS --connect-timeout 10 --max-time 45 --header "@$HEADER_FILE" --header 'content-type: application/json' --data-binary @- -w '\n%{http_code}' "$BASE_URL/v1/test/mint-cred-ticket" 2>>"$body_err")"
+    | curl -sS --connect-timeout 10 --max-time 45 --header "@$HEADER_FILE" --header 'content-type: application/json' --data-binary @- -D "$response_headers" -w '\n%{http_code}' "$BASE_URL/v1/test/mint-cred-ticket" 2>>"$body_err")"
   curl_rc=$?
   set -e
   scrub_file "$body_err"
   if [[ "$curl_rc" != 0 ]]; then
     MINT_FIXTURE_FAILURE="transport"
+    MINT_FAILURE_DIAGNOSTIC="error_code=transport http_status=000 cf_ray=absent"
+    log_event "mint-failure $MINT_FAILURE_DIAGNOSTIC"
     return 1
   fi
   status="${raw##*$'\n'}"
@@ -892,6 +924,8 @@ mint_fixture() {
   [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
   if [[ "$status" != 200 ]]; then
     MINT_FIXTURE_FAILURE="http_status=$status"
+    MINT_FAILURE_DIAGNOSTIC="$(classify_mint_failure "$body" "$status" "$response_headers")"
+    log_event "mint-failure $MINT_FAILURE_DIAGNOSTIC"
     return 1
   fi
   if ! IFS=$'\t' read -r FIXTURE_TICKET FIXTURE_LEASE_ID < <(jq -er '[.ticket,.lease_id] | @tsv' <<<"$body"); then
@@ -903,6 +937,7 @@ mint_fixture() {
     return 1
   fi
   MINT_FIXTURE_FAILURE="none"
+  MINT_FAILURE_DIAGNOSTIC="none"
   # Success here is the live server's validation of the exact dogfood PAT,
   # tenant, GitHub repository, and installation tuple sent above.
   log_event "dogfood-mint-preflight=GREEN tenant=$TENANT repo=$REPO_FULL_NAME installation=$INSTALLATION_ID"
