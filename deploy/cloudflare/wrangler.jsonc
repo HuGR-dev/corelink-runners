@@ -222,9 +222,13 @@
       // is ALSO what evicts those three: no token has instance-delete scope, so a
       // new image is the only lever. Rollback = increment-4 digest
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
-      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
-      // image-provenance: digest=sha256:186a8e48ff876a04a732710939c7d9b83694c12bb8408ef788bcea1ef652047b build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:186a8e48ff876a04a732710939c7d9b83694c12bb8408ef788bcea1ef652047b",
+      // 2026-09-12 T2-W4/T2-W4 immutable runner refresh. The registry ref was
+      // built and pushed from source commit 192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      // for linux/amd64. This records registry provenance only; deployment and
+      // live runner qualification remain separate gates.
+      // build-sha: 192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      // image-provenance: digest=sha256:6aa0326851c6bca03cf1861393b34a35456a2601efe90e33922fa274044a7815 build-sha=192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:6aa0326851c6bca03cf1861393b34a35456a2601efe90e33922fa274044a7815",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
