@@ -782,6 +782,9 @@ if ! MINT_DIAG_TMP="$mint_diag_tmp" bash -u -c '
   out="$(classify_mint_failure '\''{"error":"CAS PAT mint failed","token":"token-secret-should-not-leak"}'\'' 503 "$headers")"
   [[ "$out" == "error_code=cas_pat_mint_failed http_status=503 cf_ray=abc-123xyz" ]]
   ! [[ "$out" == *token-secret* ]]
+  out="$(classify_mint_failure '\''{"error":"fabricd upstream timeout","secret":"upstream-secret-should-not-leak"}'\'' 503 "$headers")"
+  [[ "$out" == "error_code=worker_upstream_timeout http_status=503 cf_ray=abc-123xyz" ]]
+  ! [[ "$out" == *upstream-secret* ]]
   out="$(classify_mint_failure '\''{"error":"unexpected","token_plaintext":"pat-secret-should-not-leak"}'\'' 503 "$headers")"
   [[ "$out" == "error_code=unknown http_status=503 cf_ray=abc-123xyz" ]]
   ! [[ "$out" == *pat-secret* ]]
