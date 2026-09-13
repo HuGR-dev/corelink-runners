@@ -30,7 +30,7 @@ dispatch_case() {
     missing) : ;;
     wrong|correct)
       # shellcheck disable=SC2016
-      printf '%s\n' '#!/usr/bin/env bash' \
+      printf '%s\n' '#!/bin/bash' \
         'printf "%s|%s\\n" "$PWD" "$*" >> "${DISPATCH_LOG:?}"' \
         "if [ \"\${1:-}\" = --version ]; then printf '%s\\n' '$version'; exit 0; fi" \
         'if [ "${1:-}" = auth ] && [ "${2:-}" = token ]; then printf '\''{"token":"dispatch-test-token-1234567890"}\n'\''; exit 0; fi' \
@@ -141,7 +141,7 @@ unset_local_regression() {
   header_fn="$(sed -n '/^make_oob_header_file() {/,/^}$/p' "$harness")"
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-wrangler.XXXXXX")"
   key="$(mktemp "${TMPDIR:-/tmp}/au1.8-mock-key.XXXXXX")"
-  printf '%s\n' '#!/usr/bin/env bash' \
+  printf '%s\n' '#!/bin/bash' \
     'printf '\''{"bindings":[{"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","text":""},{"name":"AUTOSCALER_TOKEN","type":"secret_text","text":"secret-literal"},{"name":"UNEXPECTED_OPAQUE","type":"opaque","text":"opaque-literal"}]}'\''' > "$mock"
   printf 'mock-observability-key\n' > "$key"
   chmod 700 "$mock"
@@ -192,7 +192,7 @@ admission_pause_case() {
   assert_fn="$(sed -n '/^assert_fabricd_admission_paused() {/,/^}$/p' "$harness")"
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-admission-mock.XXXXXX")"
   # shellcheck disable=SC2016
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "${MOCK_BINDINGS_JSON:?}"' > "$mock"
   chmod 700 "$mock"
   set +e
   # shellcheck disable=SC2016
@@ -297,9 +297,11 @@ usage_fetch_case() {
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-curl.XXXXXX")"
   args="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-args.XXXXXX")"
   log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
-  printf '%s\n' '#!/usr/bin/env bash' \
+  printf '%s\n' '#!/bin/bash' \
     'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
-    'printf '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}\n'\'' > "${MOCK_BODY:?}"' \
+    'out=""; headers=""; while (($#)); do case "$1" in -o) out="${2:?}"; shift 2 ;; -D) headers="${2:?}"; shift 2 ;; -w) shift 2 ;; *) shift ;; esac; done' \
+    'printf "%s\n" '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}'\'' > "${MOCK_BODY:?}"; [[ -z "$out" || "$out" == "$MOCK_BODY" ]] || cp -- "${MOCK_BODY:?}" "$out"' \
+    '[[ -z "$headers" ]] || printf "HTTP/1.1 %s\\r\\n\\r\\n" "${MOCK_HTTP:?}" > "$headers"' \
     'printf "%s" "${MOCK_HTTP:?}"; exit "${MOCK_RC:?}"' > "$mock"
   chmod 700 "$mock"
   printf 'usage-secret-value\n' > "$tmp/pat"
@@ -314,7 +316,7 @@ usage_fetch_case() {
       log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
       if usage="$(fetch_usage_response)"; then
         [[ "'"$expected"'" == pass ]] || exit 10
-        [[ "$usage" == *'"active_now":0'* ]] || exit 11
+        jq -e ".active_now == 0" <<<"$usage" >/dev/null || exit 11
         printf passed > "$TMP_DIR/occupancy"
       else
         [[ "'"$expected"'" == fail ]] || exit 12
@@ -445,6 +447,7 @@ rm -rf -- "$usage_log_dir"
 # A usage failure is the first live leaf: one mocked curl call must stop the
 # gate before occupancy, status, fleet, or pause reads can occur.
 quiescence_fn="$(sed -n '/^quiescence_gate() {/,/^}$/p' "$harness")"
+quiescence_header_fn="$(sed -n '/^make_pat_header_file() {/,/^}$/p' "$harness")"
 quiescence_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-quiescence-order.XXXXXX")"
 quiescence_pat="$quiescence_log_dir/pat"
 printf 'bearer-secret-value\n' > "$quiescence_pat"
@@ -453,8 +456,9 @@ if ! env -u response -u fleet -u status_report bash -u -c '
   set -Eeuo pipefail
   eval "$1"
   eval "$2"
-  TMP_DIR="$3"; LOG_DIR="$TMP_DIR/log"; mkdir -p "$LOG_DIR"
-  PAT_FILE="$4"; TENANT=tenant-a; EVENT_LOG="$TMP_DIR/events"; CALLS="$TMP_DIR/calls"
+  eval "$3"
+  TMP_DIR="$4"; LOG_DIR="$TMP_DIR/log"; mkdir -p "$LOG_DIR"
+  PAT_FILE="$5"; TENANT=tenant-a; EVENT_LOG="$TMP_DIR/events"; CALLS="$TMP_DIR/calls"
   USAGE_URL=https://usage.invalid/v1/usage
   OBSERVABILITY_URL=https://observability.invalid/occupancy
   STATUS_URL=https://observability.invalid/status
@@ -484,7 +488,7 @@ if ! env -u response -u fleet -u status_report bash -u -c '
   ! rg -q "observability\\.invalid|fleet\\.invalid" "$CALLS"
   rg -q "leaf=usage_fetch reason=http http_status=000 content_type=application/json cf_ray=ray-123" "$EVENT_LOG"
   ! rg -q "bearer-secret-value" "$EVENT_LOG"
-' -- "$quiescence_fn" "$usage_log_fn" "$quiescence_log_dir" "$quiescence_pat"; then
+' -- "$quiescence_fn" "$quiescence_header_fn" "$usage_log_fn" "$quiescence_log_dir" "$quiescence_pat"; then
   rm -rf -- "$quiescence_log_dir"
   echo "FAIL: first usage failure must stop quiescence reads and remain sanitized" >&2
   exit 1
