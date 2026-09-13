@@ -8,7 +8,9 @@ harness="$here/au1.8-fabricd-cred-ticket-rotation.sh"
 repo="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-selftest.XXXXXX")"
 test_mint_key="$(mktemp "${TMPDIR:-/tmp}/au1.8-test-mint.XXXXXX")"
 observability_key="$(mktemp "${TMPDIR:-/tmp}/au1.8-observability.XXXXXX")"
-trap 'rm -rf -- "$repo" "$test_mint_key" "$observability_key"' EXIT
+access_id="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-id.XXXXXX")"
+access_secret="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-secret.XXXXXX")"
+trap 'rm -rf -- "$repo" "$test_mint_key" "$observability_key" "$access_id" "$access_secret"' EXIT
 
 git -C "$repo" init -q
 git -C "$repo" config user.email au1.8-selftest@example.invalid
@@ -67,6 +69,11 @@ if rg -n '\bnpx\b' "$harness" >/dev/null; then
   echo 'FAIL: AU1.8 must not resolve Wrangler through npx' >&2
   exit 1
 fi
+if ! rg -n -- '--header "@\$INTROSPECT_HEADER_FILE"' "$harness" >/dev/null ||
+   ! rg -n 'INTROSPECT_URL.*corelink-api\.humangr\.com/internal/v1/auth/introspect|INTROSPECT_URL.*CANONICAL' "$harness" >/dev/null; then
+  echo 'FAIL: canonical introspection must use the combined temporary header file' >&2
+  exit 1
+fi
 
 validate() {
   local status_json="${2-}"
@@ -95,6 +102,15 @@ validate_stability() {
   AU18_PROVIDER_STABILITY_SECS=0 \
   AU18_PROVIDER_STABILITY_SAMPLE_1="$1" \
   AU18_PROVIDER_STABILITY_SAMPLE_2="$2" \
+    "$harness" --execute --ack-destructive >/dev/null 2>&1
+}
+
+validate_access_pair() {
+  AU18_REPO_ROOT="$repo" \
+  AU18_SOURCE_COMMIT="$head" \
+  AU18_VALIDATE_ONLY=1 \
+  AU18_ACCESS_CLIENT_ID_FILE="$1" \
+  AU18_ACCESS_CLIENT_SECRET_FILE="$2" \
     "$harness" --execute --ack-destructive >/dev/null 2>&1
 }
 
@@ -200,6 +216,42 @@ admission_pause_case() {
   fi
 }
 
+access_header_case() {
+  local header_fn scrub_fn id secret key tmp output
+  header_fn="$(sed -n '/^make_introspect_header_file() {/,/^}$/p' "$harness")"
+  scrub_fn="$(sed -n '/^scrub_file() {/,/^}$/p' "$harness")"
+  id="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-id.XXXXXX")"
+  secret="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-secret.XXXXXX")"
+  key="$(mktemp "${TMPDIR:-/tmp}/au1.8-access-header-key.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-access-header-case.XXXXXX")"
+  printf 'access-id-value\n' > "$id"
+  printf 'access-secret-value\n' > "$secret"
+  printf 'internal-key-value\n' > "$key"
+  chmod 600 "$id" "$secret" "$key"
+  # The helper returns only the temporary path; the scrubber removes both
+  # Access header values before an error file can be retained.
+  # shellcheck disable=SC2016
+  output="$(bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    eval "$2"
+    TMP_DIR="$3"
+    INTROSPECT_KEY_FILE="$4"
+    ACCESS_CLIENT_ID_FILE="$5"
+    ACCESS_CLIENT_SECRET_FILE="$6"
+    header="$(make_introspect_header_file)"
+    grep -F "CF-Access-Client-Id: access-id-value" "$header" >/dev/null
+    grep -F "CF-Access-Client-Secret: access-secret-value" "$header" >/dev/null
+    printf "CF-Access-Client-Id: access-id-value\nCF-Access-Client-Secret: access-secret-value\n" > "$TMP_DIR/error"
+    scrub_file "$TMP_DIR/error"
+    ! grep -F "access-id-value" "$TMP_DIR/error" >/dev/null
+    ! grep -F "access-secret-value" "$TMP_DIR/error" >/dev/null
+    printf "%s" "$header"
+  ' -- "$header_fn" "$scrub_fn" "$tmp" "$key" "$id" "$secret")"
+  test -n "$output"
+  rm -rf -- "$id" "$secret" "$key" "$tmp"
+}
+
 validate
 
 printf 'untracked\n' > "$repo/untracked"
@@ -228,6 +280,24 @@ printf 'test-mint-key\n' > "$test_mint_key"
 printf 'observability-key\n' > "$observability_key"
 chmod 600 "$test_mint_key" "$observability_key"
 validate_files
+printf 'access-id-value\n' > "$access_id"
+printf 'access-secret-value\n' > "$access_secret"
+chmod 600 "$access_id" "$access_secret"
+if validate_access_pair "$access_id" ""; then
+  echo "FAIL: incomplete Cloudflare Access pair must block AU1.8" >&2
+  exit 1
+fi
+printf 'access-id-value\nsecond-line\n' > "$access_id"
+if validate_access_pair "$access_id" "$access_secret"; then
+  echo "FAIL: multiline Cloudflare Access id must block AU1.8" >&2
+  exit 1
+fi
+printf 'access-id-value\n' > "$access_id"
+validate_access_pair "$access_id" "$access_secret"
+if ! access_header_case; then
+  echo "FAIL: direct introspection must carry and scrub Cloudflare Access headers" >&2
+  exit 1
+fi
 chmod 640 "$test_mint_key"
 if validate_files; then
   echo "FAIL: FABRIC_TEST_MINT_KEY mode drift must block AU1.8" >&2
