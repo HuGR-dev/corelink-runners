@@ -98,6 +98,27 @@ validate_stability() {
     "$harness" --execute --ack-destructive >/dev/null 2>&1
 }
 
+container_version_case() {
+  local expected="$1" payload="$2" expected_value="${3-}" extractor info output rc
+  extractor="$(sed -n '/^extract_container_version() {/,/^}$/p' "$harness")"
+  info="$(mktemp "${TMPDIR:-/tmp}/au1.8-container-info.XXXXXX")"
+  printf '%s\n' "$payload" > "$info"
+  set +e
+  output="$(bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    extract_container_version "$2"
+  ' -- "$extractor" "$info")"
+  rc=$?
+  set -e
+  rm -f -- "$info"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 && "$output" == "$expected_value" ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
 unset_local_regression() {
   local remote_fn header_fn mock key
   remote_fn="$(sed -n '/^capture_remote_bindings() {/,/^}$/p' "$harness")"
@@ -240,6 +261,15 @@ if validate_stability 'worker-a	container-a	sha256:aaa' 'worker-b	container-a	sh
 fi
 if validate_stability 'worker-a	container-a	sha256:aaa' ''; then
   echo "FAIL: missing provider stability sample must block AU1.8" >&2
+  exit 1
+fi
+
+if ! container_version_case pass '{"name":"corelink-fabricd-fabricdcontainer","version":1}' '1' ||
+   ! container_version_case pass '{"name":"corelink-fabricd-fabricdcontainer","version_id":"container-v1"}' 'container-v1' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","version":{"id":"container-v1"}}' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","version":null}' ||
+   ! container_version_case fail '{"name":"corelink-fabricd-fabricdcontainer","metadata":{"version":2}}' ; then
+  echo "FAIL: containers info version scalar compatibility must remain fail-closed" >&2
   exit 1
 fi
 
