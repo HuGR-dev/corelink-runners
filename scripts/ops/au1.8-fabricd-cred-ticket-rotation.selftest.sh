@@ -252,6 +252,59 @@ access_header_case() {
   rm -rf -- "$id" "$secret" "$key" "$tmp"
 }
 
+usage_fetch_case() {
+  local expected="$1" http="$2" curl_rc="$3" fetch_fn header_fn scrub_fn tmp mock args log output rc
+  fetch_fn="$(sed -n '/^fetch_usage_response() {/,/^}$/p' "$harness")"
+  header_fn="$(sed -n '/^make_pat_header_file() {/,/^}$/p' "$harness")"
+  scrub_fn="$(sed -n '/^scrub_file() {/,/^}$/p' "$harness")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-usage-case.XXXXXX")"
+  mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-curl.XXXXXX")"
+  args="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-args.XXXXXX")"
+  log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
+    'printf '\''{"tenant":"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3","active_now":0}\n'\'' > "${MOCK_BODY:?}"' \
+    'printf "%s" "${MOCK_HTTP:?}"; exit "${MOCK_RC:?}"' > "$mock"
+  chmod 700 "$mock"
+  printf 'usage-secret-value\n' > "$tmp/pat"
+  chmod 600 "$tmp/pat"
+  set +e
+  output="$(MOCK_ARGS="$args" MOCK_BODY="$tmp/usage.body" MOCK_HTTP="$http" MOCK_RC="$curl_rc" PATH="$(dirname "$mock"):$PATH" \
+    bash -u -c '
+      set -Eeuo pipefail
+      eval "$1"; eval "$2"; eval "$3"
+      TMP_DIR="$4"; PAT_FILE="$TMP_DIR/pat"; USAGE_URL=https://usage.invalid; EVENT_LOG="$5"
+      curl() { command "'"$mock"'" "$@"; }
+      log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
+      if usage="$(fetch_usage_response)"; then
+        [[ "'"$expected"'" == pass ]] || exit 10
+        [[ "$usage" == *'"active_now":0'* ]] || exit 11
+        printf passed > "$TMP_DIR/occupancy"
+      else
+        [[ "'"$expected"'" == fail ]] || exit 12
+      fi
+    ' -- "$fetch_fn" "$header_fn" "$scrub_fn" "$tmp" "$log")"
+  rc=$?
+  set -e
+  grep -F 'usage-secret-value' "$args" >/dev/null && rc=1
+  [[ "$(wc -l < "$args" | tr -d ' ')" == 1 ]] || rc=1
+  if [[ "$expected" == fail ]]; then
+    rg -q "usage-failure curl_rc=$curl_rc http_status=$http" "$log" || rc=1
+    [[ ! -e "$tmp/occupancy" ]] || rc=1
+  else
+    [[ "$rc" == 0 && -e "$tmp/occupancy" ]] || rc=1
+  fi
+  rm -rf -- "$tmp" "$mock" "$args" "$log"
+  return "$rc"
+}
+
+if ! usage_fetch_case fail 000 26 ||
+   ! usage_fetch_case fail 503 0 ||
+   ! usage_fetch_case pass 200 0; then
+  echo "FAIL: usage must use a stable redacted header file, require HTTP 200, and make one GET" >&2
+  exit 1
+fi
+
 validate
 
 printf 'untracked\n' > "$repo/untracked"
