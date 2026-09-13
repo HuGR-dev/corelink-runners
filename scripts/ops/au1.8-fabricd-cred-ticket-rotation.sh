@@ -292,6 +292,26 @@ EVENT_LOG="$LOG_DIR/events.log"
 : > "$EVENT_LOG"
 chmod 600 "$EVENT_LOG"
 
+LOCK_DIR="${AU18_LOCK_DIR:-$HOME/.corelink/locks}"
+LOCK_PATH="$LOCK_DIR/au1.8-fabricd-cred-ticket-rotation.lock"
+LOCK_HELD=0
+acquire_lock() {
+  mkdir -p "$LOCK_DIR"; chmod 700 "$LOCK_DIR"
+  mkdir "$LOCK_PATH" 2>/dev/null || { echo "refusing: AU1.8 harness lock is already held: $LOCK_PATH" >&2; return 1; }
+  chmod 700 "$LOCK_PATH"
+  printf 'pid=%s\nrun_id=%s\nsource_commit=%s\n' "$$" "$RUN_ID" "$SOURCE_COMMIT" > "$LOCK_PATH/owner"
+  chmod 600 "$LOCK_PATH/owner"
+  LOCK_HELD=1
+}
+release_lock() {
+  [[ "$LOCK_HELD" == 1 && -f "$LOCK_PATH/owner" ]] || return 0
+  rg -q "^pid=$$" "$LOCK_PATH/owner" || return 1
+  rm -f -- "$LOCK_PATH/owner"; rmdir "$LOCK_PATH" 2>/dev/null || true
+  LOCK_HELD=0
+}
+acquire_lock || exit 1
+trap release_lock EXIT
+
 WRANGLER_DIR="${CONFIG%/*}"
 WRANGLER_BIN="$WRANGLER_DIR/node_modules/.bin/wrangler"
 [[ -x "$WRANGLER_BIN" ]] || { echo "missing local Wrangler binary: $WRANGLER_BIN" >&2; exit 1; }
@@ -334,6 +354,8 @@ PROVIDER_STABILITY_STATE="not-checked"
 CAS_PAT_PROOF="not-checked"
 MINT_FIXTURE_FAILURE="not-run"
 MINT_FAILURE_DIAGNOSTIC="not-run"
+NEW_SECRET_TMP=""
+declare -A STATE_CREATED_ON=()
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
 
@@ -466,7 +488,7 @@ capture_state() {
   local label="$1"
   local deploys="$TMP_DIR/$label-deployments.json"
   local info="$TMP_DIR/$label-container.json"
-  local worker container digest
+  local worker container digest created_on
   wait_for_health "$label" || return 1
   capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
@@ -477,10 +499,12 @@ capture_state() {
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg ENV_EXPECTED_DIGEST "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$ENV_EXPECTED_DIGEST] then .[0] else error("unexpected image digest") end' "$info")" || return 1
+  created_on="$(jq -er '.created_on // empty' "$info")" || return 1
   case "$label" in
-    before) BEFORE_WORKER_VERSION="$worker"; BEFORE_CONTAINER_VERSION="$container"; BEFORE_DIGEST="$digest" ;;
-    rotated) ROTATED_WORKER_VERSION="$worker"; ROTATED_CONTAINER_VERSION="$container"; ROTATED_DIGEST="$digest" ;;
-    final) FINAL_WORKER_VERSION="$worker"; FINAL_CONTAINER_VERSION="$container"; FINAL_DIGEST="$digest" ;;
+    before) BEFORE_WORKER_VERSION="$worker"; BEFORE_CONTAINER_VERSION="$container"; BEFORE_DIGEST="$digest"; BEFORE_CREATED_ON="$created_on" ;;
+    armed) ARMED_WORKER_VERSION="$worker"; ARMED_CONTAINER_VERSION="$container"; ARMED_DIGEST="$digest"; ARMED_CREATED_ON="$created_on" ;;
+    rotated) ROTATED_WORKER_VERSION="$worker"; ROTATED_CONTAINER_VERSION="$container"; ROTATED_DIGEST="$digest"; ROTATED_CREATED_ON="$created_on" ;;
+    final) FINAL_WORKER_VERSION="$worker"; FINAL_CONTAINER_VERSION="$container"; FINAL_DIGEST="$digest"; FINAL_CREATED_ON="$created_on" ;;
   esac
   CURRENT_WORKER_VERSION="$worker"
   log_event "$label health=200 worker_version_id=$worker container_version_id=$container image_digest=$digest"
@@ -876,13 +900,8 @@ quiescence_gate() {
     # singleton window.  The deployment timestamp comes from the provider
     # response above; caller-supplied age/version assertions are ignored.
     LEDGER_CROSS_INSTANCE_SAFE="false"
-    memory_singleton_status_ok "$status_report" || { log_quiescence_leaf stability; return 1; }
-    assert_singleton_capacity "$TMP_DIR/before-container.json" || { log_quiescence_leaf capacity; return 1; }
-    local before_created_on before_worker
-    before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || { log_quiescence_leaf age; return 1; }
-    memory_singleton_age_gate "$before_created_on" || { log_quiescence_leaf age; return 1; }
-    before_worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/before-deployments.json")" || { log_quiescence_leaf pause; return 1; }
-    assert_fabricd_admission_paused quiescence "$before_worker" || { log_quiescence_leaf pause; return 1; }
+    log_quiescence_leaf ledger-durability
+    return 1
   fi
 
   fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || { log_quiescence_leaf fleet; return 1; }
@@ -1084,6 +1103,7 @@ write_evidence() {
     --arg status "$status" --arg observed "$observed" --arg commit "$SOURCE_COMMIT" \
     --arg app_name "$CONTAINER_APP_NAME" --arg app_id_before "${BEFORE_APP_ID:-}" \
     --arg worker_before "${BEFORE_WORKER_VERSION:-}" --arg worker_rotated "${ROTATED_WORKER_VERSION:-}" --arg worker_final "${FINAL_WORKER_VERSION:-}" \
+    --arg created_before "${BEFORE_CREATED_ON:-}" --arg created_armed "${ARMED_CREATED_ON:-}" --arg created_rotated "${ROTATED_CREATED_ON:-}" --arg created_final "${FINAL_CREATED_ON:-}" \
     --arg container_before "${BEFORE_CONTAINER_VERSION:-}" --arg container_rotated "${ROTATED_CONTAINER_VERSION:-}" --arg container_final "${FINAL_CONTAINER_VERSION:-}" \
     --arg digest_before "${BEFORE_DIGEST:-}" --arg digest_rotated "${ROTATED_DIGEST:-}" --arg digest_final "${FINAL_DIGEST:-}" \
     --arg baseline_sha256 "$REMOTE_BASELINE_SHA256" --arg log_path "$EVENT_LOG" \
@@ -1094,6 +1114,7 @@ write_evidence() {
       source:{repository:"corelink-runners", commit_sha:$commit, path:"docs/plan/evidence/au1.8-fabricd-secret-rotation.json"},
       claims:["AU1.8","AU1.8:secret-rotation"], version:{id:$commit},
       evidence:{operation:{app_name:$app_name, app_id_before:$app_id_before, worker_versions:{before:$worker_before, rotated:$worker_rotated, final:$worker_final}, container_versions:{before:$container_before, rotated:$container_rotated, final:$container_final}, image_digests:{before:$digest_before, rotated:$digest_rotated, final:$digest_final}},
+      state_records:[{label:"before",created_on:$created_before,worker_version_id:$worker_before,container_version_id:$container_before,image_digest:$digest_before},{label:"armed",created_on:$created_armed,worker_version_id:$worker_rotated,container_version_id:$container_rotated,image_digest:$digest_rotated},{label:"rotated",created_on:$created_rotated,worker_version_id:$worker_rotated,container_version_id:$container_rotated,image_digest:$digest_rotated},{label:"final",created_on:$created_final,worker_version_id:$worker_final,container_version_id:$container_final,image_digest:$digest_final}],
       proofs:{old_hmac_prevalidated:true, old_hmac_redeem_status:401, new_hmac_redeem_status:200, replay_status:410, redeemed_cas_pat_clw:$cas_probe},
       quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, ledger_cross_instance_safe:($ledger_safe == "true"), intake_paused:true, redrive_paused:true},
       provider_stability:{gate:$stability, samples:2, interval_seconds:$stability_interval},
@@ -1125,6 +1146,8 @@ on_exit() {
   if [[ "$MUTATION_STARTED" == 1 ]]; then
     write_evidence "$rc" || rc=1
   fi
+  rm -f -- "$NEW_SECRET_TMP" 2>/dev/null || true
+  release_lock || rc=1
   find "$TMP_DIR" -type f -exec rm -f -- {} + 2>/dev/null || true
   rmdir "$TMP_DIR" 2>/dev/null || true
   exit "$rc"
@@ -1174,10 +1197,21 @@ OLD_HMAC="$(hmac_ticket "$OLD_SECRET_FILE" "$OLD_FIXTURE_LEASE_ID")"
 [[ "$OLD_HMAC" == "$OLD_FIXTURE_TICKET" ]] || { echo "old HMAC does not match deployed signer" >&2; exit 1; }
 log_event "prevalidate-old-hmac=GREEN ticket-redacted"
 
+publish_new_secret() {
+  local dir tmp
+  dir="$(dirname -- "$NEW_SECRET_FILE")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.au18-new-secret.XXXXXX")" || return 1
+  NEW_SECRET_TMP="$tmp"
+  chmod 600 "$tmp"
+  openssl rand -base64 48 | tr -d '\n' > "$tmp" || return 1
+  file_owner_mode_ok "$tmp" || return 1
+  ln "$tmp" "$NEW_SECRET_FILE" || return 1
+  rm -f -- "$tmp"
+  NEW_SECRET_TMP=""
+}
 umask 077
-mkdir -p "$(dirname -- "$NEW_SECRET_FILE")"
-openssl rand -base64 48 | tr -d '\n' > "$NEW_SECRET_FILE"
-chmod 600 "$NEW_SECRET_FILE"
+publish_new_secret || { echo "could not atomically publish NEW secret" >&2; exit 1; }
 file_owner_mode_ok "$NEW_SECRET_FILE" || { echo "generated NEW secret is not mode 0600" >&2; exit 1; }
 # Do this immediately before the first permanent credential mutation.  A slow
 # arm exits through on_exit, which restores the old signer and always disarms.
