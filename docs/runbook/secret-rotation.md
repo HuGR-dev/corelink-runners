@@ -55,12 +55,9 @@ The harness pauses intake and redrive and checks authoritative usage,
 occupancy, fleet-busy, ledger, admission-pause, and PAT state. When the ledger
 is in-memory, the current preflight state (`FABRIC_PG_DISABLED=1` and
 `ledger_cross_instance_safe=false`) is an explicit `RED` before mutation and
-blocks AU1.8. The 3900-second application-age wait is not a workaround for
-that durability blocker. Require the durable PG ledger hard gate
-(`ledger_cross_instance_safe=true`) before any live rotation. Once that gate is
-GREEN, the provider creation timestamp must still show application age
-`>=3900` seconds after every delete/recreate; a missing, stale, or unavailable
-timestamp is `RED`. The source of these checks is the
+blocks AU1.8. Require the durable PG ledger hard gate
+(`ledger_cross_instance_safe=true`) before any live rotation. The source of
+these checks is the
 [AU1.8 rotation harness](../../scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh).
 
 Resolve `AU18_APP_ID` by name before the change. The UUID must be the row named
