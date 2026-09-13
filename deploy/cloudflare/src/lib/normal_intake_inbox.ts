@@ -16,7 +16,7 @@ export type NormalIntakeOutcome = "complete" | "uncertain" | "retry";
 export type A317ProofPhase = "missing_key" | "wrong_key" | "store_unavailable";
 export interface A317ProofRecord {
   schema_version: 1; run_id: string; phase: A317ProofPhase; index: number; nonce: string; expires_at_ms: number; build_sha: string; event_id: string; body_sha256: string;
-  authorization_attempts: number; authorization_refusals: number;
+  authorization_attempts: number; authorization_refusals: number; authorization_state: "pending" | "in_flight" | "refused" | "unknown";
 }
 
 export class NormalIntakeConflictError extends Error {
@@ -121,11 +121,12 @@ export class NormalIntakeInbox {
     if (unavailable) throw new Error("A3.17 injected inbox store unavailable");
     const normalized = validateInput(input);
     return this.storage.transaction(async tx => {
-      const marker: A317ProofRecord = { ...proof, event_id: normalized.event_id, body_sha256: normalized.body_sha256, authorization_attempts: 0, authorization_refusals: 0 };
+      const marker: A317ProofRecord = { ...proof, event_id: normalized.event_id, body_sha256: normalized.body_sha256, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" };
       const key = eventKey(normalized.event_id), markerKey = proofKey(normalized.event_id), nonceKey = proofNonceKey(proof.run_id, proof.nonce), slotKey = proofSlotKey(proof.run_id, proof.phase, proof.index);
       const prior = await tx.get<unknown>(markerKey); const slot = await tx.get<unknown>(slotKey); const nonce = await tx.get<unknown>(nonceKey);
       if (prior !== undefined || slot !== undefined || nonce !== undefined) {
-        if (JSON.stringify(prior) === JSON.stringify(marker) && slot === normalized.event_id && nonce === normalized.event_id) return { status: "duplicate" as const, record: await tx.get<NormalIntakeRecord>(key) };
+        const immutable = prior && typeof prior === "object" ? { ...(prior as A317ProofRecord), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" as const } : prior;
+        if (JSON.stringify(immutable) === JSON.stringify(marker) && slot === normalized.event_id && nonce === normalized.event_id) return { status: "duplicate" as const, record: await tx.get<NormalIntakeRecord>(key) };
         return { status: "conflict" as const };
       }
       if (await tx.get(installationTombstoneKey(normalized.installation_id)) !== undefined) return { status: "tombstoned" as const };
@@ -150,12 +151,36 @@ export class NormalIntakeInbox {
       return p as A317ProofRecord;
     });
   }
+  async a317Pending(runId: string | undefined, phase: A317ProofPhase | undefined, now: number, limit = 25): Promise<NormalIntakeRecord[]> {
+    validateNow(now); if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX) throw new Error("invalid A3.17 proof limit");
+    return this.storage.transaction(async tx => {
+      const markers = await tx.list<A317ProofRecord>({ prefix: A317_PROOF, limit: MAX + 1 }); if (markers.size > MAX) fail("A3.17 proof index exceeds capacity");
+      const result: NormalIntakeRecord[] = [];
+      for (const [key, proof] of markers) {
+        if (!proof || proof.expires_at_ms <= now || (runId !== undefined && proof.run_id !== runId) || (phase !== undefined && proof.phase !== phase)) continue;
+        const id = decodeURIComponent(key.slice(A317_PROOF.length)); const record = await tx.get<unknown>(eventKey(id));
+        if (!validRecord(record, id)) fail("missing A3.17 inbox record");
+        if (record.state === "pending" && record.next_attempt_ms <= now) result.push(record);
+      }
+      return result.sort((a, b) => a.received_at_ms - b.received_at_ms || a.event_id.localeCompare(b.event_id)).slice(0, limit);
+    });
+  }
 
-  async recordA317Authorization(eventId: string, refused: boolean): Promise<void> {
-    await this.storage.transaction(async tx => {
+  async beginA317Authorization(eventId: string): Promise<boolean> {
+    return this.storage.transaction(async tx => {
       const proof = await tx.get<A317ProofRecord>(proofKey(eventId));
       if (!proof) fail("missing A3.17 proof marker");
-      await tx.put(proofKey(eventId), { ...proof, authorization_attempts: proof.authorization_attempts + 1, authorization_refusals: proof.authorization_refusals + (refused ? 1 : 0) });
+      if (proof.authorization_state !== "pending") return false;
+      await tx.put(proofKey(eventId), { ...proof, authorization_state: "in_flight" as const, authorization_attempts: proof.authorization_attempts + 1 }); return true;
+    });
+  }
+  async finishA317Authorization(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown"): Promise<void> {
+    await this.storage.transaction(async tx => {
+      const proof = await tx.get<A317ProofRecord>(proofKey(eventId)); if (!proof) fail("invalid A3.17 authorization transition");
+      const refused = status === "refused401" || status === "refused403";
+      if ((proof.authorization_state === "refused" && refused) || (proof.authorization_state === "unknown" && !refused)) return;
+      if (proof.authorization_state !== "in_flight") fail("invalid A3.17 authorization transition");
+      await tx.put(proofKey(eventId), { ...proof, authorization_state: refused ? "refused" : "unknown", authorization_refusals: proof.authorization_refusals + (refused ? 1 : 0) });
     });
   }
 
@@ -184,9 +209,10 @@ export class NormalIntakeInbox {
       for (const [key, proof] of markers) {
         if (!proof || proof.expires_at_ms > now) continue;
         const id = decodeURIComponent(key.slice(A317_PROOF.length)); const record = await tx.get<unknown>(eventKey(id));
-        if (validRecord(record, id) && record.state === "pending") {
-          const count = await tx.get<unknown>(COUNT); if (!validCount(count) || count < 1) fail("malformed active count");
-          await tx.delete(pendingKey(record)); await tx.delete(eventKey(id)); await tx.put(COUNT, count - 1);
+        if (validRecord(record, id)) {
+          if (record.state !== "complete") { const count = await tx.get<unknown>(COUNT); if (!validCount(count) || count < 1) fail("malformed active count"); await tx.put(COUNT, count - 1); }
+          if (record.state === "pending") await tx.delete(pendingKey(record));
+          await tx.delete(eventKey(id));
         }
         await tx.delete(key); await tx.delete(proofNonceKey(proof.run_id, proof.nonce)); await tx.delete(proofSlotKey(proof.run_id, proof.phase, proof.index));
       }
