@@ -15,7 +15,7 @@ usage() {
   cat >&2 <<'EOF'
 
 Usage:
-  au1.8-fabricd-cred-ticket-rotation.sh --execute --ack-destructive
+  au1.8-fabricd-cred-ticket-rotation.sh --execute --ack-destructive [Access OOB options]
 
 The two flags are mandatory. Without both flags this harness performs no
 provider, secret, deploy, delete, or network action.
@@ -24,12 +24,20 @@ EOF
 
 EXECUTE=0
 ACK=0
-for arg in "$@"; do
-  case "$arg" in
-    --execute) EXECUTE=1 ;;
-    --ack-destructive) ACK=1 ;;
+ACCESS_CLIENT_ID_FILE="${AU18_ACCESS_CLIENT_ID_FILE:-${CORELINK_CF_ACCESS_CLIENT_ID_FILE:-}}"
+ACCESS_CLIENT_SECRET_FILE="${AU18_ACCESS_CLIENT_SECRET_FILE:-${CORELINK_CF_ACCESS_CLIENT_SECRET_FILE:-}}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --ack-destructive) ACK=1; shift ;;
+    --access-client-id-file|--cf-access-client-id-file)
+      [[ "$#" -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
+      ACCESS_CLIENT_ID_FILE="$2"; shift 2 ;;
+    --access-client-secret-file|--cf-access-client-secret-file)
+      [[ "$#" -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }
+      ACCESS_CLIENT_SECRET_FILE="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; usage; exit 2 ;;
+    *) echo "unknown option: $1" >&2; usage; exit 2 ;;
   esac
 done
 if [[ "$EXECUTE" != 1 || "$ACK" != 1 ]]; then
@@ -156,6 +164,32 @@ file_owner_mode_ok() {
   [[ "$mode" == 600 && "$owner" == "$(id -u)" ]]
 }
 
+single_line_file() {
+  local file="$1" newlines carriage_returns
+  file_owner_mode_ok "$file" || return 1
+  newlines="$(tr -cd '\n' < "$file" | wc -c | tr -d ' ')"
+  carriage_returns="$(tr -cd '\r' < "$file" | wc -c | tr -d ' ')"
+  [[ "$newlines" -le 1 && "$carriage_returns" == 0 ]]
+}
+
+access_pair_gate() {
+  if [[ -z "$ACCESS_CLIENT_ID_FILE" && -z "$ACCESS_CLIENT_SECRET_FILE" ]]; then
+    return 0
+  fi
+  [[ -n "$ACCESS_CLIENT_ID_FILE" && -n "$ACCESS_CLIENT_SECRET_FILE" ]] || {
+    echo "Cloudflare Access requires both client id and client secret files" >&2
+    return 1
+  }
+  single_line_file "$ACCESS_CLIENT_ID_FILE" || {
+    echo "Cloudflare Access client id must be an owner-only regular 0600 single-line file" >&2
+    return 1
+  }
+  single_line_file "$ACCESS_CLIENT_SECRET_FILE" || {
+    echo "Cloudflare Access client secret must be an owner-only regular 0600 single-line file" >&2
+    return 1
+  }
+}
+
 oob_file_gate() {
   local label="$1" file="$2"
   file_owner_mode_ok "$file" || {
@@ -171,6 +205,7 @@ fi
 
 source_tree_gate || exit 1
 if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
+  access_pair_gate || exit 1
   if [[ "${AU18_VALIDATE_FILE_METADATA_ONLY:-0}" == 1 ]]; then
     oob_file_gate FABRIC_TEST_MINT_KEY "$TEST_MINT_KEY_FILE" || exit 1
     oob_file_gate FABRIC_OBSERVABILITY_KEY "$OBSERVABILITY_KEY_FILE" || exit 1
@@ -183,6 +218,10 @@ if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
   fi
   exit 0
 fi
+
+# Validate optional Access credentials before any Wrangler/provider read. This
+# keeps a malformed OOB pair fail-closed without revealing provider metadata.
+access_pair_gate || exit 1
 
 [[ -f "$CONFIG" && ! -L "$CONFIG" ]] || { echo "missing or symlinked wrangler config" >&2; exit 1; }
 EXPECTED_IMAGE_DIGEST="$(sed -n 's/^[[:space:]]*"image":[[:space:]]*"[^@]*@\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$CONFIG" | head -n 1)"
@@ -259,6 +298,7 @@ scrub_file() {
   sed -E \
     -e 's/(Bearer[[:space:]]+)[^[:space:]]+/\1<REDACTED>/g' \
     -e 's/(X-Fabric-Test-Mint-Key:[[:space:]]*)[^[:space:]]+/\1<REDACTED>/g' \
+    -e 's/(CF-Access-Client-(Id|Secret):[[:space:]]*)[^[:space:]]+/\1<REDACTED>/g' \
     -e 's/[A-Za-z0-9+\/_=-]{40,}/<REDACTED>/g' \
     "$file" > "$safe" || true
   chmod 600 "$safe"
@@ -548,8 +588,25 @@ make_oob_header_file() {
   printf '%s\n' "$out"
 }
 
+make_introspect_header_file() {
+  local out="$TMP_DIR/introspect-header" key
+  IFS= read -r key < "$INTROSPECT_KEY_FILE"
+  {
+    printf 'X-Corelink-Internal-Auth: %s\n' "$key"
+    if [[ -n "$ACCESS_CLIENT_ID_FILE" ]]; then
+      printf 'CF-Access-Client-Id: '
+      tr -d '\r\n' < "$ACCESS_CLIENT_ID_FILE"
+      printf '\nCF-Access-Client-Secret: '
+      tr -d '\r\n' < "$ACCESS_CLIENT_SECRET_FILE"
+      printf '\n'
+    fi
+  } > "$out"
+  chmod 600 "$out"
+  printf '%s\n' "$out"
+}
+
 preflight_dogfood_pat() {
-  INTROSPECT_HEADER_FILE="$(make_oob_header_file introspect "$INTROSPECT_KEY_FILE")"
+  INTROSPECT_HEADER_FILE="$(make_introspect_header_file)"
   local body err raw rc
   err="$TMP_DIR/pat-introspect.err"; : > "$err"; chmod 600 "$err"
   set +e
