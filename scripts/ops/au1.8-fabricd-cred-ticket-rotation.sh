@@ -94,7 +94,39 @@ source_tree_gate() {
 }
 
 validate_status_report() {
-  jq -e '(.num_shards | tonumber) == 1 and .ledger_cross_instance_safe == true' <<<"$1" >/dev/null
+  jq -e '(.num_shards | tonumber) == 1 and
+    (.ledger_cross_instance_safe == true or .ledger_cross_instance_safe == false)' <<<"$1" >/dev/null
+}
+
+status_ledger_is_safe() {
+  jq -er '.ledger_cross_instance_safe == true' <<<"$1" >/dev/null
+}
+
+memory_singleton_status_ok() {
+  jq -e '(.num_shards | type == "number") and .num_shards == 1 and
+    .ledger_cross_instance_safe == false' <<<"$1" >/dev/null
+}
+
+provider_timestamp_epoch() {
+  local value="$1"
+  node -e 'const t=Date.parse(process.argv[1]); if (!Number.isFinite(t)) process.exit(1); process.stdout.write(String(Math.floor(t/1000)))' "$value"
+}
+
+memory_singleton_age_gate() {
+  local created_on="$1" now created age
+  [[ -n "$created_on" ]] || return 1
+  created="$(provider_timestamp_epoch "$created_on")" || return 1
+  now="$(date +%s)"
+  age=$((now - created))
+  [[ "$age" -ge 3900 ]]
+  log_event "memory-singleton-quiescence-age=$age required=3900"
+}
+
+assert_singleton_capacity() {
+  local info="$1"
+  # The provider's app field is authoritative; unrelated nested metadata must
+  # never satisfy the singleton gate.
+  jq -e 'has("max_instances") and (.max_instances | type == "number") and .max_instances == 1' "$info" >/dev/null
 }
 
 provider_stability_pair_ok() {
@@ -390,6 +422,7 @@ capture_state() {
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || {
     log_event "$label application-name-mismatch"; return 1;
   }
+  assert_singleton_capacity "$info" || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg ENV_EXPECTED_DIGEST "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$ENV_EXPECTED_DIGEST] then .[0] else error("unexpected image digest") end' "$info")" || return 1
@@ -410,6 +443,7 @@ provider_snapshot() {
   capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
+  assert_singleton_capacity "$info" || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
@@ -645,15 +679,31 @@ quiescence_gate() {
 
   response="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$OBSERVABILITY_URL" 2>"$TMP_DIR/occupancy.err")" || return 1
   scrub_file "$TMP_DIR/occupancy.err"
-  jq -e '(.per_tenant | type) == "array" and all(.[]; ((.occupied // 0) | tonumber) == 0)' <<<"$response" >/dev/null || return 1
+  jq -e '(.per_tenant | type) == "array" and
+    all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<<"$response" >/dev/null || return 1
   status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || return 1
   scrub_file "$TMP_DIR/status.err"
   validate_status_report "$status_report" || return 1
-  LEDGER_CROSS_INSTANCE_SAFE="true"
+  if status_ledger_is_safe "$status_report"; then
+    LEDGER_CROSS_INSTANCE_SAFE="true"
+  else
+    # In-memory state is acceptable only during a provider-attested, paused
+    # singleton window.  The deployment timestamp comes from the provider
+    # response above; caller-supplied age/version assertions are ignored.
+    LEDGER_CROSS_INSTANCE_SAFE="false"
+    memory_singleton_status_ok "$status_report" || return 1
+    assert_singleton_capacity "$TMP_DIR/before-container.json" || return 1
+    local before_created_on before_worker
+    before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || return 1
+    memory_singleton_age_gate "$before_created_on" || return 1
+    before_worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/before-deployments.json")" || return 1
+    assert_fabricd_admission_paused quiescence "$before_worker" || return 1
+  fi
 
   fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || return 1
   scrub_file "$TMP_DIR/fleet-busy.err"
-  jq -e '((.busy // .active // .busy_count // 0) | tonumber) == 0 and ((.unverifiable // .unknown // 0) | tonumber) == 0' <<<"$fleet" >/dev/null || return 1
+  jq -e '(.busy | type) == "number" and .busy == 0 and
+    (.unverifiable | type) == "number" and .unverifiable == 0' <<<"$fleet" >/dev/null || return 1
 
   # The spawn Worker version is checked from provider state, not inferred from
   # a local config file. Both pause bindings must be remotely set to "1".
@@ -662,7 +712,7 @@ quiescence_gate() {
   spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || return 1
   jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || return 1
   QUIESCENCE_STATE="green"
-  log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 ledger_cross_instance_safe=true intake_paused=1 redrive_paused=1"
+  log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 ledger_cross_instance_safe=$LEDGER_CROSS_INSTANCE_SAFE intake_paused=1 redrive_paused=1"
 }
 
 mint_fixture() {

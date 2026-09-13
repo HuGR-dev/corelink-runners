@@ -267,13 +267,60 @@ if validate "0000000000000000000000000000000000000000"; then
 fi
 
 validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":true}'
-if validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'; then
-  echo "FAIL: ledger_cross_instance_safe=false must block AU1.8" >&2
+validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'
+memory_status_fn="$(sed -n '/^memory_singleton_status_ok() {/,/^}$/p' "$harness")"
+# shellcheck disable=SC2016
+if env -u status_report bash -u -c 'set -Eeuo pipefail; eval "$1"; memory_singleton_status_ok "$2"' -- "$memory_status_fn" '{"num_shards":"1","ledger_cross_instance_safe":false}'; then
+  echo "FAIL: memory singleton num_shards string must fail closed" >&2
   exit 1
 fi
 if validate "$head" '{"num_shards":1}'; then
   echo "FAIL: missing ledger_cross_instance_safe must block AU1.8" >&2
   exit 1
+fi
+
+# The canonical AU1.8 memory-ledger exception is a provider-attested paused
+# singleton window. Exercise the age boundary without any provider calls.
+memory_age_fn="$(sed -n '/^provider_timestamp_epoch() {/,/^}$/p' "$harness")
+$(sed -n '/^memory_singleton_age_gate() {/,/^}$/p' "$harness")"
+if ! now_iso="$(node -e 'process.stdout.write(new Date(Date.now()-3910*1000).toISOString())')"; then
+  echo "FAIL: unable to construct age fixture" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+if ! env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$now_iso"; then
+  echo "FAIL: exactly 65 minutes of provider age must pass" >&2
+  exit 1
+fi
+# shellcheck disable=SC2016
+if env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$(node -e 'process.stdout.write(new Date(Date.now()-3000*1000).toISOString())')"; then
+  echo "FAIL: provider age below 65 minutes must fail closed" >&2
+  exit 1
+fi
+
+capacity_fn="$(sed -n '/^assert_singleton_capacity() {/,/^}$/p' "$harness")"
+capacity_case() {
+  local expected="$1" payload="$2" info rc
+  info="$(mktemp "${TMPDIR:-/tmp}/au1.8-capacity.XXXXXX")"
+  printf '%s\n' "$payload" > "$info"
+  set +e
+  # shellcheck disable=SC2016
+  env -u info bash -u -c 'set -Eeuo pipefail; eval "$1"; assert_singleton_capacity "$2"' -- "$capacity_fn" "$info"
+  rc=$?
+  set -e
+  rm -f -- "$info"
+  [[ "$expected" == pass && "$rc" == 0 || "$expected" == fail && "$rc" != 0 ]]
+}
+capacity_case pass '{"name":"corelink-fabricd-fabricdcontainer","max_instances":1}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","metadata":{"max_instances":1}}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer"}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","max_instances":"1"}'
+
+if jq -e '(.busy | type) == "number" and .busy == 0 and (.unverifiable | type) == "number" and .unverifiable == 0' <<< '{"unverifiable":0}' >/dev/null; then
+  echo "FAIL: missing fleet busy must fail closed" >&2; exit 1
+fi
+if jq -e '(.per_tenant | type) == "array" and all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<< '{"per_tenant":[{}]}' >/dev/null; then
+  echo "FAIL: missing occupancy must fail closed" >&2; exit 1
 fi
 
 printf 'test-mint-key\n' > "$test_mint_key"
