@@ -386,33 +386,13 @@ if validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'; then
   echo 'FAIL: unsafe ledger fixture must stop before mutation' >&2
   exit 1
 fi
-memory_status_fn="$(sed -n '/^memory_singleton_status_ok() {/,/^}$/p' "$harness")"
-# shellcheck disable=SC2016
-if env -u status_report bash -u -c 'set -Eeuo pipefail; eval "$1"; memory_singleton_status_ok "$2"' -- "$memory_status_fn" '{"num_shards":"1","ledger_cross_instance_safe":false}'; then
-  echo "FAIL: memory singleton num_shards string must fail closed" >&2
-  exit 1
-fi
 if validate "$head" '{"num_shards":1}'; then
   echo "FAIL: missing ledger_cross_instance_safe must block AU1.8" >&2
   exit 1
 fi
 
-# The canonical AU1.8 memory-ledger exception is a provider-attested paused
-# singleton window. Exercise the age boundary without any provider calls.
-memory_age_fn="$(sed -n '/^provider_timestamp_epoch() {/,/^}$/p' "$harness")
-$(sed -n '/^memory_singleton_age_gate() {/,/^}$/p' "$harness")"
-if ! now_iso="$(node -e 'process.stdout.write(new Date(Date.now()-3910*1000).toISOString())')"; then
-  echo "FAIL: unable to construct age fixture" >&2
-  exit 1
-fi
-# shellcheck disable=SC2016
-if ! env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$now_iso"; then
-  echo "FAIL: exactly 65 minutes of provider age must pass" >&2
-  exit 1
-fi
-# shellcheck disable=SC2016
-if env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1"; memory_singleton_age_gate "$2"' -- "$memory_age_fn" "$(node -e 'process.stdout.write(new Date(Date.now()-3000*1000).toISOString())')"; then
-  echo "FAIL: provider age below 65 minutes must fail closed" >&2
+if rg -n '3900|memory_singleton_status_ok|provider_timestamp_epoch|memory_singleton_age_gate|memory-singleton' "$harness" "$here/../../docs/runbook/secret-rotation.md" >/dev/null; then
+  echo "FAIL: obsolete in-memory age substitute remains" >&2
   exit 1
 fi
 

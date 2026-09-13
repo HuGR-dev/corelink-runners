@@ -110,26 +110,6 @@ status_ledger_is_safe() {
   jq -er '.ledger_cross_instance_safe == true' <<<"$1" >/dev/null
 }
 
-memory_singleton_status_ok() {
-  jq -e '(.num_shards | type == "number") and .num_shards == 1 and
-    .ledger_cross_instance_safe == false' <<<"$1" >/dev/null
-}
-
-provider_timestamp_epoch() {
-  local value="$1"
-  node -e 'const t=Date.parse(process.argv[1]); if (!Number.isFinite(t)) process.exit(1); process.stdout.write(String(Math.floor(t/1000)))' "$value"
-}
-
-memory_singleton_age_gate() {
-  local created_on="$1" now created age
-  [[ -n "$created_on" ]] || return 1
-  created="$(provider_timestamp_epoch "$created_on")" || return 1
-  now="$(date +%s)"
-  age=$((now - created))
-  [[ "$age" -ge 3900 ]]
-  log_event "memory-singleton-quiescence-age=$age required=3900"
-}
-
 assert_singleton_capacity() {
   local info="$1"
   # The provider's app field is authoritative; unrelated nested metadata must
@@ -908,16 +888,8 @@ quiescence_gate() {
   status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || { log_quiescence_leaf status; return 1; }
   scrub_file "$TMP_DIR/status.err"
   validate_status_report "$status_report" || { log_quiescence_leaf status; return 1; }
-  if status_ledger_is_safe "$status_report"; then
-    LEDGER_CROSS_INSTANCE_SAFE="true"
-  else
-    # In-memory state is acceptable only during a provider-attested, paused
-    # singleton window.  The deployment timestamp comes from the provider
-    # response above; caller-supplied age/version assertions are ignored.
-    LEDGER_CROSS_INSTANCE_SAFE="false"
-    log_quiescence_leaf ledger-durability
-    return 1
-  fi
+  status_ledger_is_safe "$status_report" || { log_quiescence_leaf ledger-durability; return 1; }
+  LEDGER_CROSS_INSTANCE_SAFE="true"
 
   fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || { log_quiescence_leaf fleet; return 1; }
   scrub_file "$TMP_DIR/fleet-busy.err"
