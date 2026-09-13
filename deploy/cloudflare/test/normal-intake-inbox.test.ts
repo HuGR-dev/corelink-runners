@@ -85,4 +85,9 @@ describe("NormalIntakeInbox", () => {
     expect(await inbox.a317Proof("a317:v1:run:missing_key:0", 2_000)).toBeNull();
     expect((await inbox.pending(2_000)).map(x => x.event_id)).toEqual([]);
   });
+  it("returns duplicate for an exact replay after the A3.17 run reaches 100 slots", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never); const run = "11111111-1111-4111-8111-111111111111";
+    for (let i = 0; i < 100; i++) await inbox.enqueueA317Proof(input(`cap-${i}`, i + 1), { schema_version: 1, run_id: run, phase: "missing_key", index: i, nonce: `nonce-cap-${String(i).padStart(3, "0")}`, expires_at_ms: 9_000, build_sha: "abcdef1", event_id: "ignored", body_sha256: "a".repeat(64), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" }, 1);
+    await expect(inbox.enqueueA317Proof(input("cap-0", 1), { schema_version: 1, run_id: run, phase: "missing_key", index: 0, nonce: "nonce-cap-000", expires_at_ms: 9_000, build_sha: "abcdef1", event_id: "ignored", body_sha256: "a".repeat(64), authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" }, 2)).resolves.toMatchObject({ status: "duplicate" });
+  });
 });
