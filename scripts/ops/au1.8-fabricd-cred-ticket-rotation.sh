@@ -558,7 +558,7 @@ provider_snapshot() {
   local label="$1"
   local deploys="$TMP_DIR/$label-deployments.json"
   local info="$TMP_DIR/$label-container.json"
-  local worker container digest binding_state
+  local worker container digest binding_state app_id created_on
   capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
@@ -566,13 +566,15 @@ provider_snapshot() {
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
+  app_id="$(jq -er '.id // empty' "$info")" || return 1
+  created_on="$(jq -er '.created_on // empty' "$info")" || return 1
   assert_fabricd_admission_paused "$label" "$worker" || return 1
   # A stability record must read the temporary binding from the provider at
   # this exact Worker version, rather than copying an earlier baseline label.
   assert_remote_bindings "$label" "$worker" baseline || return 1
   binding_state="$REMOTE_TEMP_VAR_STATE"
   [[ "$binding_state" == empty-disabled ]] || return 1
-  printf '%s\t%s\t%s\t%s\n' "$worker" "$container" "$digest" disarmed
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$worker" "$container" "$digest" disarmed "$app_id" "$created_on"
 }
 
 provider_stability_gate() {
@@ -590,7 +592,7 @@ provider_stability_gate() {
     log_quiescence_leaf stability
     return 1
   }
-  if [[ -n "$expected_worker" && "$first" != "$expected_worker"$'\t'"$expected_container"$'\t'"$expected_digest"$'\t'disarmed ]]; then
+  if [[ -n "$expected_worker" && "$first" != "$expected_worker"$'\t'"$expected_container"$'\t'"$expected_digest"$'\t'disarmed$'\t'"$BEFORE_APP_ID"$'\t'"$BEFORE_CREATED_ON" ]]; then
     log_event "provider-stability=RED baseline_mismatch"
     log_quiescence_leaf stability
     return 1
@@ -1105,8 +1107,21 @@ rollback_old() {
 }
 
 evidence_pass_ready() {
-  [[ -n "${BEFORE_CREATED_ON:-}" && -n "${ARMED_CREATED_ON:-}" && -n "${ROTATED_CREATED_ON:-}" && -n "${FINAL_CREATED_ON:-}" ]] || return 1
-  [[ -n "$STABILITY_SAMPLE_1" && -n "$STABILITY_SAMPLE_2" && "$STABILITY_SAMPLE_1" == "$STABILITY_SAMPLE_2" ]] || return 1
+  local sample_worker sample_container sample_digest sample_binding sample_app sample_created sample_extra field
+  for label in BEFORE ARMED ROTATED FINAL; do
+    for suffix in CREATED_ON WORKER_VERSION CONTAINER_VERSION DIGEST; do
+      field="${label}_${suffix}"
+      [[ -n "${!field:-}" ]] || return 1
+    done
+  done
+  [[ -n "${BEFORE_APP_ID:-}" && -n "$STABILITY_SAMPLE_1" &&
+     -n "$STABILITY_SAMPLE_2" && "$STABILITY_SAMPLE_1" == "$STABILITY_SAMPLE_2" ]] || return 1
+  IFS=$'\t' read -r sample_worker sample_container sample_digest sample_binding sample_app sample_created sample_extra <<<"$STABILITY_SAMPLE_1"
+  [[ -z "$sample_extra" && -n "$sample_worker" && -n "$sample_container" &&
+     -n "$sample_digest" && "$sample_binding" == disarmed && -n "$sample_app" &&
+     -n "$sample_created" && "$sample_worker" == "$BEFORE_WORKER_VERSION" &&
+     "$sample_container" == "$BEFORE_CONTAINER_VERSION" && "$sample_digest" == "$BEFORE_DIGEST" &&
+     "$sample_app" == "$BEFORE_APP_ID" && "$sample_created" == "$BEFORE_CREATED_ON" ]] || return 1
   [[ "$FINAL_DISARM_STATE" == green && "$REMOTE_TEMP_VAR_STATE" == disarmed ]] || return 1
 }
 
@@ -1138,7 +1153,7 @@ write_evidence() {
       proofs:{old_hmac_prevalidated:true, old_hmac_redeem_status:401, new_hmac_redeem_status:200, replay_status:410, redeemed_cas_pat_clw:$cas_probe},
       quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, ledger_cross_instance_safe:($ledger_safe == "true"), intake_paused:true, redrive_paused:true},
       provider_stability:{gate:$stability, samples:2, interval_seconds:$stability_interval},
-      stability_records:([$stability_sample_1,$stability_sample_2] | to_entries | map({label:("sample_" + ((.key + 1)|tostring)),sampled_at:(if .key == 0 then $stability_at_1 else $stability_at_2 end),app_id:$app_id_before,created_on:$created_before,worker_version_id:(.value|split("\t")[0]),container_version_id:(.value|split("\t")[1]),image_digest:(.value|split("\t")[2]),binding_state:(.value|split("\t")[3])})),
+      stability_records:([$stability_sample_1,$stability_sample_2] | to_entries | map({label:("sample_" + ((.key + 1)|tostring)),sampled_at:(if .key == 0 then $stability_at_1 else $stability_at_2 end),app_id:(.value|split("\t")[4]),created_on:(.value|split("\t")[5]),worker_version_id:(.value|split("\t")[0]),container_version_id:(.value|split("\t")[1]),image_digest:(.value|split("\t")[2]),binding_state:(.value|split("\t")[3])})),
       remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict","--containers-rollout=immediate"]},
       secret_handling:{old_rollback_path:$ENV_OLD_SECRET_FILE, new_operational_path:$ENV_NEW_SECRET_FILE, values:"excluded", oob_mode:"0600"},
       timing:{maximum_seconds:$maximum_seconds, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
