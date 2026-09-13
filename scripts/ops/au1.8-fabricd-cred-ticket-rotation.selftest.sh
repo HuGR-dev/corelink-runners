@@ -845,9 +845,106 @@ if LOCK_DIR="$safety_lock_dir" LOCK_PATH="$safety_lock_dir/au1.8-fabricd-cred-ti
   exit 1
 fi
 rm -rf -- "$safety_lock_dir"
-rg -q 'ledger-durability' "$harness"
-rg -q 'ln "\$tmp" "\$NEW_SECRET_FILE"' "$harness"
-rg -q 'state_records:' "$harness"
+
+publish_fn="$(sed -n '/^publish_new_secret() {/,/^}$/p' "$harness")"
+file_mode_fn="$(sed -n '/^file_owner_mode_ok() {/,/^}$/p' "$harness")"
+publish_failure_case() {
+  local kind="$1" tmp rc
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-publish.XXXXXX")"
+  set +e
+  PUBLISH_TMP="$tmp" bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"; eval "$2"
+    dir="$PUBLISH_TMP/destination"; mkdir -p "$dir"
+    NEW_SECRET_FILE="$dir/new-secret"; NEW_SECRET_TMP=""
+    puts="$PUBLISH_TMP/puts"
+    put_secret() { printf called >> "$puts"; }
+    case "$3" in
+      symlink) printf sentinel > "$dir/sentinel"; ln -s "$dir/sentinel" "$NEW_SECRET_FILE" ;;
+      race) ln() { printf sentinel > "$NEW_SECRET_FILE"; command ln "$@"; } ;;
+      generator) openssl() { return 1; } ;;
+    esac
+    if publish_new_secret; then put_secret FABRIC_CRED_TICKET_SECRET "$NEW_SECRET_FILE"; exit 1; fi
+    [[ ! -e "$puts" && "$NEW_SECRET_TMP" == "" ]]
+    [[ -z "$(find "$dir" -name ".au18-new-secret.*" -print -quit)" ]]
+    case "$3" in
+      symlink|race) [[ "$(cat "$dir/sentinel")" == sentinel ]] ;;
+      generator) [[ ! -e "$NEW_SECRET_FILE" && ! -L "$NEW_SECRET_FILE" ]] ;;
+    esac
+  ' -- "$file_mode_fn" "$publish_fn" "$kind"
+  rc=$?
+  set -e
+  rm -rf -- "$tmp"
+  return "$rc"
+}
+if ! publish_failure_case symlink || ! publish_failure_case race || ! publish_failure_case generator; then
+  echo 'FAIL: publication failures must preserve the destination, clean temp files, and skip secret put' >&2
+  exit 1
+fi
+
+release_lock_fn="$(sed -n '/^release_lock() {/,/^}$/p' "$harness")"
+lock_owner_mismatch_case() {
+  local field="$1" tmp rc
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-lock-owner.XXXXXX")"
+  set +e
+  LOCK_TMP="$tmp" bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    LOCK_PATH="$LOCK_TMP/lock"; mkdir "$LOCK_PATH"
+    RUN_ID=ours; SOURCE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; LOCK_HELD=1
+    printf "pid=%s\nrun_id=ours\nsource_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" "$$" > "$LOCK_PATH/owner"
+    case "$2" in run) sed -i.bak "s/run_id=ours/run_id=foreign/" "$LOCK_PATH/owner"; rm -f "$LOCK_PATH/owner.bak" ;; source) sed -i.bak "s/source_commit=.*/source_commit=foreign/" "$LOCK_PATH/owner"; rm -f "$LOCK_PATH/owner.bak" ;; esac
+    if release_lock; then exit 1; fi
+    [[ -d "$LOCK_PATH" && -f "$LOCK_PATH/owner" ]]
+  ' -- "$release_lock_fn" "$field"
+  rc=$?
+  set -e
+  rm -rf -- "$tmp"
+  return "$rc"
+}
+if ! lock_owner_mismatch_case run || ! lock_owner_mismatch_case source; then
+  echo 'FAIL: mismatched lock owner metadata must retain the foreign lock' >&2
+  exit 1
+fi
+
+snapshot_fn="$(sed -n '/^provider_snapshot() {/,/^}$/p' "$harness")"
+container_fn="$(sed -n '/^extract_container_version() {/,/^}$/p' "$harness")"
+capacity_fn="$(sed -n '/^assert_singleton_capacity() {/,/^}$/p' "$harness")"
+stability_binding_case() {
+  local expected="$1" state="$2" tmp rc
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-stability-binding.XXXXXX")"
+  set +e
+  STABILITY_TMP="$tmp" bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"; eval "$2"; eval "$3"
+    TMP_DIR="$STABILITY_TMP"; APP_ID=app-a; WORKER_NAME=worker; CONTAINER_APP_NAME=app
+    EXPECTED_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    capture_json() {
+      case "$1" in
+        *deployments) printf "[{\"created_on\":\"2026-01-01T00:00:00Z\",\"versions\":[{\"version_id\":\"worker-v\"}]}]" > "$2" ;;
+        *container-info) printf "{\"name\":\"app\",\"max_instances\":1,\"version\":\"container-v\",\"image\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" > "$2" ;;
+      esac
+    }
+    assert_fabricd_admission_paused() { :; }
+    assert_remote_bindings() { REMOTE_TEMP_VAR_STATE="$STABILITY_STATE"; }
+    STABILITY_STATE="$4"
+    provider_snapshot sample
+  ' -- "$snapshot_fn" "$container_fn" "$capacity_fn" "$state" > "$tmp/out"
+  rc=$?
+  set -e
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 && "$(cat "$tmp/out")" == $'worker-v\tcontainer-v\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tdisarmed' ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+  rc=$?
+  rm -rf -- "$tmp"
+  return "$rc"
+}
+if ! stability_binding_case pass empty-disabled || ! stability_binding_case fail armed; then
+  echo 'FAIL: stability binding state must be provider-attested and disarmed' >&2
+  exit 1
+fi
 
 # Behavioral evidence validator: omitted/mismatched tuples and missing disarm
 # cannot qualify a PASS-capable result.
