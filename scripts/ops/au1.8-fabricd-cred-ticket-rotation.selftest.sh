@@ -829,4 +829,21 @@ if ! ROLLBACK_TMP="$rollback_tmp" bash -u -c '
 fi
 rm -rf -- "$rollback_tmp"
 
+# Safety contract surfaces: stable lock refusal, fail-closed in-memory ledger,
+# no-replace secret publication, and bounded per-state evidence fields.
+safety_lock_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-lock.XXXXXX")"
+mkdir -p "$safety_lock_dir/au1.8-fabricd-cred-ticket-rotation.lock"
+printf 'pid=foreign\n' > "$safety_lock_dir/au1.8-fabricd-cred-ticket-rotation.lock/owner"
+chmod 700 "$safety_lock_dir" "$safety_lock_dir/au1.8-fabricd-cred-ticket-rotation.lock"
+lock_fn="$(sed -n '/^acquire_lock() {/,/^}/p' "$harness")"
+if LOCK_DIR="$safety_lock_dir" LOCK_PATH="$safety_lock_dir/au1.8-fabricd-cred-ticket-rotation.lock" RUN_ID=test SOURCE_COMMIT="$head" \
+    bash -u -c 'set -Eeuo pipefail; eval "$1"; acquire_lock' -- "$lock_fn" >/dev/null 2>&1; then
+  echo 'FAIL: foreign AU1.8 lock must fail closed before provider work' >&2
+  exit 1
+fi
+rm -rf -- "$safety_lock_dir"
+rg -q 'ledger-durability' "$harness"
+rg -q 'ln "\$tmp" "\$NEW_SECRET_FILE"' "$harness"
+rg -q 'state_records:' "$harness"
+
 echo "AU1.8 focused gates: PASS"
