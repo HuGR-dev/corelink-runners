@@ -188,7 +188,7 @@ export class RunnerDevEnvDO extends Container<any> {
           getState: () => this.devenvState, transition: (state) => this.transitionState(state),
           settle: () => this.recordUsage(), completeStopped: () => this.completeStoppedSession(),
           start: async (envVars) => {
-            if (reservationId) await this.computeObligations().claimProvider(reservationId, payload.grant.sessionUuid, Date.now());
+            if (reservationId) await this.computeObligations().claimProviderForTenant(reservationId, payload.grant.sessionUuid, payload.grant.tenantId, Date.now());
             this.envVars = envVars;
             await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
           },
