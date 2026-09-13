@@ -6,7 +6,7 @@ import { CredentialObligationAuthority } from "./lib/credential_obligation_autho
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
-import { authorizeRunner, RunnerAuthorizationError } from "./lib/runner_authorization";
+import { authorizeRunner, inspectRunnerAuthorization, RunnerAuthorizationError } from "./lib/runner_authorization";
 import { adoptIssuedRunnerCredential } from "./lib/runner_credential_adoption";
 import { runnerCredentialLeaseId } from "./lib/runner_credential_lease";
 import { ConcurrencyAuthority } from "./lib/concurrency_authority";
@@ -892,7 +892,9 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).enqueueA317Proof(input, proof, Date.now(), unavailable);
   }
   async normalIntakeA317Proof(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Proof(eventId, Date.now()); }
-  async recordA317Authorization(eventId: string, refused: boolean) { return new NormalIntakeInbox(this.ctx.storage).recordA317Authorization(eventId, refused); }
+  async normalIntakeA317Pending(limit = 25) { return new NormalIntakeInbox(this.ctx.storage).a317Pending(undefined, undefined, Date.now(), limit); }
+  async beginA317Authorization(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).beginA317Authorization(eventId); }
+  async finishA317Authorization(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown") { return new NormalIntakeInbox(this.ctx.storage).finishA317Authorization(eventId, status); }
   async normalIntakeA317Snapshot(runId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Snapshot(runId, Date.now()); }
   async cleanupExpiredA317Proofs() { return new NormalIntakeInbox(this.ctx.storage).cleanupExpiredA317Proofs(Date.now()); }
 
@@ -5229,7 +5231,9 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
   // capacity while this gate is active.
   const authority = containmentAuthority(env);
   await authority.cleanupExpiredA317Proofs();
-  for (const event of await authority.normalIntakePending(25)) {
+  const intakeState = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+  const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.normalIntakeA317Pending(25);
+  for (const event of candidates) {
     const proof = await authority.normalIntakeA317Proof(event.event_id);
     if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal" && !proof) return;
     if (proof && (!env.A317_LIVE_PROOF_HMAC_KEY || !env.A317_LIVE_PROOF_BUILD_SHA || proof.build_sha !== env.A317_LIVE_PROOF_BUILD_SHA)) return;
@@ -5248,14 +5252,10 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
         await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
         continue;
       }
-      try {
-        await authorizeRunner(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
-        await authority.recordA317Authorization(event.event_id, false);
-        await authority.normalIntakeSettle(event.event_id, event.body_sha256, "uncertain");
-      } catch (error) {
-        if (!(error instanceof RunnerAuthorizationError)) throw error;
-        await authority.recordA317Authorization(event.event_id, true);
-        await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
+      if (await authority.beginA317Authorization(event.event_id)) {
+        const authorization = await inspectRunnerAuthorization(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
+        await authority.finishA317Authorization(event.event_id, authorization.kind === "refused" ? (authorization.status === 401 ? "refused401" : "refused403") : authorization.kind === "authorized" ? "accepted2xx" : "unknown");
+        await authority.normalIntakeSettle(event.event_id, event.body_sha256, authorization.kind === "refused" ? "retry" : "uncertain");
       }
       continue;
     }
@@ -5332,6 +5332,7 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (env.CONTAINMENT) ctx.waitUntil(containmentAuthority(env).cleanupExpiredA317Proofs().catch(() => {}));
     // Reuse the existing cron: post-start projection failures retain an exact
     // teardown intent in ConcurrencySlotsDO until the provider confirms down.
     ctx.waitUntil(retryActiveSpawnTeardowns(env));
@@ -5729,7 +5730,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             const eventId = `a317:v1:${a317Claim.run_id}:${a317Claim.phase}:${a317Claim.i}`;
             const result = await authority.normalIntakeA317ProofEnqueue({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha,
               job_id: jobId, repo, installation_id: installationId, labels: mintLabels },
-              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, authorization_attempts: 0, authorization_refusals: 0 },
+              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" },
               a317Claim.phase === "store_unavailable");
             if (result.status === "conflict") return json({ error: "A3.17 proof conflicts with durable evidence" }, 409);
             if (result.status === "full") return json({ error: "A3.17 proof inbox full" }, 503);
