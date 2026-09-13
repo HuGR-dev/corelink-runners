@@ -316,6 +316,112 @@ capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","metadata":{"max
 capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer"}'
 capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","max_instances":"1"}'
 
+# /v1/usage is the first live leaf in quiescence. Exercise its fail-closed
+# shape predicate with mocked payloads and verify its HTTP diagnostics retain
+# bounded metadata only; the response body and bearer-like values never log.
+usage_shape_case() {
+  local expected="$1" payload="$2" rc
+  set +e
+  jq -e --arg tenant tenant-a '.tenant == $tenant and ((.active_now // .activeNow) | tonumber) == 0' <<<"$payload" >/dev/null
+  rc=$?
+  set -e
+  [[ "$expected" == pass && "$rc" == 0 || "$expected" == fail && "$rc" != 0 ]]
+}
+usage_shape_case pass '{"tenant":"tenant-a","active_now":0}'
+usage_shape_case pass '{"tenant":"tenant-a","activeNow":0}'
+usage_shape_case fail 'not-json'
+usage_shape_case fail '{"tenant":"tenant-a"}'
+usage_shape_case fail '{"tenant":"tenant-a","active_now":1}'
+usage_log_fn="$(sed -n '/^log_usage_fetch_failure() {/,/^}$/p' "$harness")"
+usage_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
+usage_log_headers="$usage_log_dir/headers"
+usage_log="$usage_log_dir/events"
+printf 'Content-Type: application/json\nCF-Ray: ray-123\nX-Leak: bearer-secret-value\n' > "$usage_log_headers"
+# shellcheck disable=SC2016
+if ! env -u status bash -u -c '
+  set -Eeuo pipefail
+  eval "$1"
+  EVENT_LOG="$3"
+  log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
+  log_usage_fetch_failure "$2" "$4" http
+  rg -q "leaf=usage_fetch reason=http http_status=503 content_type=application/json cf_ray=ray-123" "$3"
+  ! rg -q "bearer-secret-value" "$3"
+' -- "$usage_log_fn" 503 "$usage_log" "$usage_log_headers"; then
+  rm -rf -- "$usage_log_dir"
+  echo "FAIL: usage HTTP failure diagnostics must be sanitized and bounded" >&2
+  exit 1
+fi
+rm -rf -- "$usage_log_dir"
+
+# A usage failure is the first live leaf: one mocked curl call must stop the
+# gate before occupancy, status, fleet, or pause reads can occur.
+quiescence_fn="$(sed -n '/^quiescence_gate() {/,/^}$/p' "$harness")"
+quiescence_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-quiescence-order.XXXXXX")"
+quiescence_pat="$quiescence_log_dir/pat"
+printf 'bearer-secret-value\n' > "$quiescence_pat"
+# shellcheck disable=SC2016
+if ! env -u response -u fleet -u status_report bash -u -c '
+  set -Eeuo pipefail
+  eval "$1"
+  eval "$2"
+  TMP_DIR="$3"; LOG_DIR="$TMP_DIR/log"; mkdir -p "$LOG_DIR"
+  PAT_FILE="$4"; TENANT=tenant-a; EVENT_LOG="$TMP_DIR/events"; CALLS="$TMP_DIR/calls"
+  USAGE_URL=https://usage.invalid/v1/usage
+  OBSERVABILITY_URL=https://observability.invalid/occupancy
+  STATUS_URL=https://observability.invalid/status
+  FLEET_BUSY_URL=https://fleet.invalid/busy
+  OBSERVABILITY_KEY_FILE=unused; FLEET_BUSY_KEY_FILE=unused
+  scrub_file() { :; }
+  make_oob_header_file() { printf "%s/%s-header\n" "$TMP_DIR" "$1"; }
+  log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
+  curl() {
+    printf "%s\n" "$*" >> "$CALLS"
+    local header_file= body_file=
+    while (($#)); do
+      case "$1" in
+        -D) header_file="$2"; shift 2 ;;
+        -o) body_file="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf "Content-Type: application/json\nCF-Ray: ray-123\n" > "$header_file"
+    printf "bearer-secret-value" > "$body_file"
+    return 22
+  }
+  : > "$CALLS"; : > "$EVENT_LOG"
+  if quiescence_gate; then exit 1; fi
+  test "$(wc -l < "$CALLS" | tr -d " ")" -eq 1
+  rg -q "usage\\.invalid" "$CALLS"
+  ! rg -q "observability\\.invalid|fleet\\.invalid" "$CALLS"
+  rg -q "leaf=usage_fetch reason=http http_status=000 content_type=application/json cf_ray=ray-123" "$EVENT_LOG"
+  ! rg -q "bearer-secret-value" "$EVENT_LOG"
+' -- "$quiescence_fn" "$usage_log_fn" "$quiescence_log_dir" "$quiescence_pat"; then
+  rm -rf -- "$quiescence_log_dir"
+  echo "FAIL: first usage failure must stop quiescence reads and remain sanitized" >&2
+  exit 1
+fi
+rm -rf -- "$quiescence_log_dir"
+
+# Explicitly reject malformed HTTP status metadata rather than interpolating it.
+usage_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-usage-malformed.XXXXXX")"
+usage_log_headers="$usage_log_dir/headers"
+usage_log="$usage_log_dir/events"
+printf 'Content-Type: application/json\nCF-Ray: ray-123\n' > "$usage_log_headers"
+# shellcheck disable=SC2016
+if ! env -u status bash -u -c '
+  set -Eeuo pipefail
+  eval "$1"
+  EVENT_LOG="$3"
+  log_event() { printf "%s\n" "$*" >> "$EVENT_LOG"; }
+  log_usage_fetch_failure "$2" "$4" http
+  rg -q "http_status=000" "$3"
+' -- "$usage_log_fn" '503x' "$usage_log" "$usage_log_headers"; then
+  echo "FAIL: malformed usage HTTP status must be recorded as 000" >&2
+  rm -rf -- "$usage_log_dir"
+  exit 1
+fi
+rm -rf -- "$usage_log_dir"
+
 if jq -e '(.busy | type) == "number" and .busy == 0 and (.unverifiable | type) == "number" and .unverifiable == 0' <<< '{"unverifiable":0}' >/dev/null; then
   echo "FAIL: missing fleet busy must fail closed" >&2; exit 1
 fi
