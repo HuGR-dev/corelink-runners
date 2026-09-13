@@ -33,6 +33,14 @@ function periodKey(ms: number): number {
   return date.getUTCFullYear() * 100 + date.getUTCMonth() + 1;
 }
 
+function samePeriodOrExactNextPeriodStart(issuedAtMs: number, grantEndMs: number): boolean {
+  if (periodKey(grantEndMs) === periodKey(issuedAtMs)) return true;
+  const end = new Date(grantEndMs);
+  return end.getUTCDate() === 1 && end.getUTCHours() === 0 && end.getUTCMinutes() === 0 &&
+    end.getUTCSeconds() === 0 && end.getUTCMilliseconds() === 0 &&
+    periodKey(grantEndMs - 1) === periodKey(issuedAtMs);
+}
+
 /** Verifies the exact Server-issued wire token before it reaches Fabric. */
 export async function verifyDevenvComputeGrant(binding: ComputeBinding, publicKeysJson: unknown, nowMs: number): Promise<void> {
   if (typeof binding.token !== "string" || new TextEncoder().encode(binding.token).byteLength > MAX_TOKEN_BYTES ||
@@ -58,7 +66,7 @@ export async function verifyDevenvComputeGrant(binding: ComputeBinding, publicKe
       typeof payload.ceiling_vcpu_ms !== "string" || !/^[1-9][0-9]{0,18}$/.test(payload.ceiling_vcpu_ms) || BigInt(payload.ceiling_vcpu_ms) > MAX_I64 ||
       typeof payload.issued_at_ms !== "number" || typeof payload.expires_at_ms !== "number" || !Number.isSafeInteger(payload.issued_at_ms) || !Number.isSafeInteger(payload.expires_at_ms) ||
       payload.issued_at_ms < 0 || payload.expires_at_ms <= payload.issued_at_ms || payload.expires_at_ms - payload.issued_at_ms > 90_000 ||
-      payload.period_key !== periodKey(payload.issued_at_ms) || payload.period_key !== periodKey(payload.expires_at_ms + binding.maximumWallMs) ||
+      payload.period_key !== periodKey(payload.issued_at_ms) || !samePeriodOrExactNextPeriodStart(payload.issued_at_ms, payload.expires_at_ms + binding.maximumWallMs) ||
       nowMs < payload.issued_at_ms || nowMs >= payload.expires_at_ms) throw denied();
   let configured: unknown;
   try { configured = JSON.parse(typeof publicKeysJson === "string" && publicKeysJson.length <= 8192 ? publicKeysJson : ""); } catch { throw denied(); }

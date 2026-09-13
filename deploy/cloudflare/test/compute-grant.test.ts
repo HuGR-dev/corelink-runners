@@ -16,10 +16,10 @@ beforeAll(async () => {
   privateKey = keys.privateKey;
   publicKeys = JSON.stringify({ "server-2026-09": btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey("raw", keys.publicKey)))) });
 });
-async function binding(overrides: Partial<ComputeBinding> = {}): Promise<ComputeBinding> {
+async function binding(overrides: Partial<ComputeBinding> = {}, issuedAtMs = now - 1_000, expiresAtMs = now + 60_000): Promise<ComputeBinding> {
   const payload = { v: 1, key_id: "server-2026-09", tenant_id: tenantId, workload_kind: "devenv", workload_id: reservationId,
     reservation_id: reservationId, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000,
-    issued_at_ms: now - 1_000, expires_at_ms: now + 60_000 };
+    issued_at_ms: issuedAtMs, expires_at_ms: expiresAtMs };
   const encoded = b64url(new TextEncoder().encode(JSON.stringify(payload)));
   const signature = b64url(await crypto.subtle.sign("Ed25519", privateKey, new TextEncoder().encode(JSON.stringify(payload))));
   return { token: `${encoded}.${signature}`, reservationId, tenantId, workloadKind: "devenv", workloadId: reservationId, vcpuCount: 4, maximumWallMs: 28_800_000, ...overrides };
@@ -34,6 +34,11 @@ function tamper(token: string, change: (payload: Record<string, unknown>) => voi
 describe("Server compute grant verifier", () => {
   it("accepts only the Server canonical signed wire and matching binding", async () => {
     await expect(verifyDevenvComputeGrant(await binding(), publicKeys, now)).resolves.toBeUndefined();
+  });
+  it("allows a grant ending exactly at the next UTC period boundary", async () => {
+    const expiresAtMs = Date.parse("2026-09-30T16:00:00Z");
+    const issuedAtMs = expiresAtMs - 90_000;
+    await expect(verifyDevenvComputeGrant(await binding({}, issuedAtMs, expiresAtMs), publicKeys, expiresAtMs - 1)).resolves.toBeUndefined();
   });
   it.each(["signature", "key", "tenant", "period", "ceiling", "expired"])("fails closed for %s", async kind => {
     const value = await binding();
