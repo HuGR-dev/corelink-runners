@@ -524,8 +524,30 @@ capture_remote_bindings() {
   printf '%s\n' "$out"
 }
 
+# A clean baseline may omit the temporary tenant binding, or may contain the
+# provider's canonical disarmed representation (one empty plain-text binding).
+# Both forms must have no temporary key; all other shapes are unsafe.
+assert_temp_binding_shape() {
+  local snapshot="$1" mode="$2"
+  jq -e --arg mode "$mode" '
+    map(select(.name == "FABRIC_TEST_MINT_TENANTS")) as $tenants |
+    map(select(.name == "FABRIC_TEST_MINT_KEY")) as $keys |
+    ($keys | length) == 0 and
+    if $mode == "baseline" then
+      ($tenants | length) == 0 or
+      (($tenants | length) == 1 and
+       $tenants[0].type == "plain_text" and
+       $tenants[0].temporary_value == "")
+    else
+      ($tenants | length) == 1 and
+      $tenants[0].type == "plain_text" and
+      $tenants[0].temporary_value == ""
+    end
+  ' "$snapshot" >/dev/null
+}
+
 assert_remote_bindings() {
-  local label="$1" version_id="$2" mode="$3" snapshot current
+  local label="$1" version_id="$2" mode="$3" snapshot current baseline
   snapshot="$(capture_remote_bindings "$label" "$version_id")" || return 1
   current="$TMP_DIR/$label-remote-bindings-no-temp.json"
   # The tenant allowlist and test-mint key are deliberately armed only for the
@@ -533,7 +555,9 @@ assert_remote_bindings() {
   # remain byte-for-byte equal to the baseline snapshot.
   jq 'map(select(.name != "FABRIC_TEST_MINT_TENANTS" and .name != "FABRIC_TEST_MINT_KEY"))' "$snapshot" > "$current"
   chmod 600 "$current"
-  jq -e --slurpfile baseline "$REMOTE_BASELINE_FILE" '$baseline[0] == .' "$current" >/dev/null || {
+  baseline="$TMP_DIR/$label-remote-bindings-baseline-no-temp.json"
+  jq 'map(select(.name != "FABRIC_TEST_MINT_TENANTS" and .name != "FABRIC_TEST_MINT_KEY"))' "$REMOTE_BASELINE_FILE" > "$baseline"
+  jq -e --slurpfile baseline "$baseline" '$baseline[0] == .' "$current" >/dev/null || {
     log_event "$label remote-binding-drift=RED"; return 1;
   }
   if [[ "$mode" == armed ]]; then
@@ -551,14 +575,7 @@ assert_remote_bindings() {
     # Wrangler's strict empty override leaves the tenant variable remotely as
     # one plain-text binding with an empty value. The test key must be absent;
     # any non-empty, duplicate, or differently typed temporary binding fails.
-    jq -e '
-      map(select(.name == "FABRIC_TEST_MINT_TENANTS")) as $tenants |
-      map(select(.name == "FABRIC_TEST_MINT_KEY")) as $keys |
-      ($tenants | length) == 1 and
-      $tenants[0].type == "plain_text" and
-      $tenants[0].temporary_value == "" and
-      ($keys | length) == 0
-    ' "$snapshot" >/dev/null || return 1
+    assert_temp_binding_shape "$snapshot" disarmed || return 1
     REMOTE_TEMP_VAR_STATE="empty-disabled"
   fi
   log_event "$label remote-binding-baseline=GREEN mode=$mode"
@@ -910,6 +927,7 @@ rollback_old() {
   recreate 0 || return 1
   capture_state rollback-final || return 1
   assert_test_key_absent || return 1
+  assert_remote_bindings rollback-final "$CURRENT_WORKER_VERSION" disarmed || return 1
   return 0
 }
 
@@ -978,7 +996,10 @@ BEFORE_APP_ID="$APP_ID"
 REMOTE_BASELINE_FILE="$(capture_remote_bindings baseline "$BEFORE_WORKER_VERSION")" || {
   echo "remote binding baseline snapshot failed" >&2; exit 1;
 }
-jq -e 'map(select(.name == "FABRIC_TEST_MINT_TENANTS")) | length == 0' "$REMOTE_BASELINE_FILE" >/dev/null || {
+jq -e 'map(select(.name == "FABRIC_TEST_MINT_KEY")) | length == 0' "$REMOTE_BASELINE_FILE" >/dev/null || {
+  echo "temporary mint key is already present remotely" >&2; exit 1;
+}
+assert_temp_binding_shape "$REMOTE_BASELINE_FILE" baseline || {
   echo "temporary tenant binding is already present remotely" >&2; exit 1;
 }
 REMOTE_BASELINE_SHA256="$(hash_file "$REMOTE_BASELINE_FILE")"

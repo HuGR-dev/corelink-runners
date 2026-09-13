@@ -225,8 +225,9 @@ admission_pause_case() {
 }
 
 remote_binding_case() {
-  local expected="$1" mode="$2" payload="$3" assert_fn tmp_dir baseline_file rc
+  local expected="$1" mode="$2" payload="$3" assert_fn predicate tmp_dir baseline_file rc
   assert_fn="$(sed -n '/^assert_remote_bindings() {/,/^}$/p' "$harness")"
+  predicate="$(sed -n '/^assert_temp_binding_shape() {/,/^}$/p' "$harness")"
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-remote-bindings.XXXXXX")"
   baseline_file="$tmp_dir/baseline.json"
   printf '%s\n' '[{"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null}]' > "$baseline_file"
@@ -234,14 +235,37 @@ remote_binding_case() {
   SNAPSHOT="$payload" bash -u -c '
     set -Eeuo pipefail
     eval "$1"
-    TMP_DIR="$2"
-    REMOTE_BASELINE_FILE="$3"
+    eval "$2"
+    TMP_DIR="$3"
+    REMOTE_BASELINE_FILE="$4"
     TENANT="tenant-a"
     REMOTE_TEMP_VAR_STATE=""
     log_event() { :; }
     capture_remote_bindings() { printf "%s\n" "$SNAPSHOT" > "$TMP_DIR/snapshot.json"; printf "%s\n" "$TMP_DIR/snapshot.json"; }
-    assert_remote_bindings fixture version-a "$4"
-  ' -- "$assert_fn" "$tmp_dir" "$baseline_file" "$mode"
+    assert_remote_bindings fixture version-a "$5"
+  ' -- "$assert_fn" "$predicate" "$tmp_dir" "$baseline_file" "$mode"
+  rc=$?
+  set -e
+  rm -rf -- "$tmp_dir"
+  if [[ "$expected" == pass ]]; then
+    [[ "$rc" == 0 ]]
+  else
+    [[ "$rc" != 0 ]]
+  fi
+}
+
+remote_baseline_case() {
+  local expected="$1" payload="$2" predicate tmp_dir baseline_file rc
+  predicate="$(sed -n '/^assert_temp_binding_shape() {/,/^}$/p' "$harness")"
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-remote-baseline.XXXXXX")"
+  baseline_file="$tmp_dir/baseline.json"
+  printf '%s\n' "$payload" > "$baseline_file"
+  set +e
+  bash -u -c '
+    set -Eeuo pipefail
+    eval "$1"
+    assert_temp_binding_shape "$2" baseline
+  ' -- "$predicate" "$baseline_file"
   rc=$?
   set -e
   rm -rf -- "$tmp_dir"
@@ -679,6 +703,30 @@ if ! remote_binding_case pass armed '[
 ]' ||
    ! remote_binding_case fail disarmed '[{"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null}]' ; then
   echo "FAIL: temporary AU1.8 bindings must be exact and mode-scoped" >&2
+  exit 1
+fi
+if ! remote_baseline_case pass '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null}
+]' ||
+   ! remote_baseline_case pass '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""}
+]' ||
+   ! remote_baseline_case fail '[
+  {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":"tenant-a"}
+]' ||
+   ! remote_baseline_case fail '[
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""},
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""}
+]' ||
+   ! remote_baseline_case fail '[
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"secret_text","temporary_value":""}
+]' ||
+   ! remote_baseline_case fail '[
+  {"name":"FABRIC_TEST_MINT_KEY","type":"secret_text","temporary_value":null}
+]'; then
+  echo 'FAIL: remote baseline temporary bindings must be clean or canonically disarmed' >&2
   exit 1
 fi
 
