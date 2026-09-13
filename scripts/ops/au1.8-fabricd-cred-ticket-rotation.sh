@@ -634,6 +634,40 @@ make_oob_header_file() {
   printf '%s\n' "$out"
 }
 
+make_pat_header_file() {
+  local out="$TMP_DIR/pat-header"
+  local pat
+  pat="$(tr -d '\r\n' < "$PAT_FILE")"
+  [[ -n "$pat" ]] || return 1
+  printf 'Authorization: Bearer %s\n' "$pat" > "$out"
+  chmod 600 "$out"
+  printf '%s\n' "$out"
+}
+
+fetch_usage_response() {
+  local header body err http_status curl_rc
+  header="$(make_pat_header_file)" || {
+    log_event "usage-failure curl_rc=26 http_status=000"
+    return 1
+  }
+  body="$TMP_DIR/usage.body"
+  err="$TMP_DIR/usage.err"
+  : > "$body"; chmod 600 "$body"
+  : > "$err"; chmod 600 "$err"
+  set +e
+  http_status="$(curl -sS --connect-timeout 10 --max-time 30 \
+    --header "@$header" -o "$body" -w '%{http_code}' "$USAGE_URL" 2>"$err")"
+  curl_rc=$?
+  set -e
+  scrub_file "$err"
+  http_status="${http_status:-000}"
+  if [[ "$curl_rc" != 0 || "$http_status" != 200 ]]; then
+    log_event "usage-failure curl_rc=$curl_rc http_status=$http_status"
+    return 1
+  fi
+  cat "$body"
+}
+
 make_introspect_header_file() {
   local out="$TMP_DIR/introspect-header" key
   IFS= read -r key < "$INTROSPECT_KEY_FILE"
@@ -681,19 +715,21 @@ quiescence_gate() {
   # or unverifiable fleet item while intake/redispatch are paused remotely.
   OBSERVABILITY_HEADER_FILE="$(make_oob_header_file observability "$OBSERVABILITY_KEY_FILE")"
   FLEET_BUSY_HEADER_FILE="$(make_oob_header_file fleet-busy "$FLEET_BUSY_KEY_FILE")"
-  local usage fleet response status_report rc usage_http_status usage_body usage_headers
-  local pat_header_fd
-  pat_header_fd=<(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$PAT_FILE")")
+  local usage fleet response status_report rc usage_http_status usage_body usage_headers pat_header
+  pat_header="$(make_pat_header_file)" || {
+    log_usage_fetch_failure 000 "$TMP_DIR/usage.headers" http
+    return 1
+  }
   usage_body="$TMP_DIR/usage.body"; usage_headers="$TMP_DIR/usage.headers"
   : > "$usage_body"; : > "$usage_headers"; chmod 600 "$usage_body" "$usage_headers"
   set +e
   usage_http_status="$(curl -sS --connect-timeout 10 --max-time 30 \
-    --header "@$pat_header_fd" -D "$usage_headers" -o "$usage_body" -w '%{http_code}' "$USAGE_URL" 2>"$TMP_DIR/usage.err")"
+    --header "@$pat_header" -D "$usage_headers" -o "$usage_body" -w '%{http_code}' "$USAGE_URL" 2>"$TMP_DIR/usage.err")"
   rc=$?
   set -e
   scrub_file "$TMP_DIR/usage.err"
   usage="$(<"$usage_body")"
-  if [[ "$rc" != 0 ]]; then
+  if [[ "$rc" != 0 || "${usage_http_status:-000}" != 200 ]]; then
     log_usage_fetch_failure "$usage_http_status" "$usage_headers" http
     scrub_file "$usage_body"; scrub_file "$usage_headers"
     return 1
