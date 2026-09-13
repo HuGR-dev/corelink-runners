@@ -33,8 +33,14 @@ const RUN = "11111111-1111-4111-8111-111111111111";
 const BUILD = "abcdef1";
 const T0 = 1_000_000;
 const sha = (char: string) => char.repeat(64);
+const jobId = (event_id: string) => {
+  const match = event_id.match(/:(missing_key|wrong_key|store_unavailable):(\d+)$/);
+  if (!match) return "999999";
+  const phaseOffset = { missing_key: 0, wrong_key: 100, store_unavailable: 200 }[match[1] as A317ProofPhase];
+  return String(100_000 + phaseOffset + Number(match[2]));
+};
 const input = (event_id: string, body_sha256 = sha("a")) => ({
-  schema_version: 1 as const, event_id, body_sha256, job_id: event_id,
+  schema_version: 1 as const, event_id, body_sha256, job_id: jobId(event_id),
   repo: "Owner/Repo", installation_id: "42", labels: ["self-hosted"], received_at_ms: T0,
 });
 const proof = (phase: A317ProofPhase, index: number, nonce = `nonce-${phase}-${index}`): A317ProofRecord => ({
