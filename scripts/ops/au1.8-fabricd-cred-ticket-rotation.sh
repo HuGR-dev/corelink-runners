@@ -257,6 +257,7 @@ if [[ "${AU18_VALIDATE_ONLY:-0}" == 1 ]]; then
   fi
   if [[ -n "${AU18_STATUS_REPORT_JSON:-}" ]]; then
     validate_status_report "$AU18_STATUS_REPORT_JSON" || exit 1
+    status_ledger_is_safe "$AU18_STATUS_REPORT_JSON" || exit 1
   fi
   if [[ -n "${AU18_PROVIDER_STABILITY_SAMPLE_1:-}" || -n "${AU18_PROVIDER_STABILITY_SAMPLE_2:-}" ]]; then
     provider_stability_pair_ok "${AU18_PROVIDER_STABILITY_SAMPLE_1:-}" "${AU18_PROVIDER_STABILITY_SAMPLE_2:-}" || exit 1
@@ -306,6 +307,8 @@ acquire_lock() {
 release_lock() {
   [[ "$LOCK_HELD" == 1 && -f "$LOCK_PATH/owner" ]] || return 0
   rg -q "^pid=$$" "$LOCK_PATH/owner" || return 1
+  rg -q "^run_id=$RUN_ID$" "$LOCK_PATH/owner" || return 1
+  rg -q "^source_commit=$SOURCE_COMMIT$" "$LOCK_PATH/owner" || return 1
   rm -f -- "$LOCK_PATH/owner"; rmdir "$LOCK_PATH" 2>/dev/null || true
   LOCK_HELD=0
 }
@@ -351,10 +354,13 @@ REMOTE_TEMP_VAR_STATE="unknown"
 QUIESCENCE_STATE="not-checked"
 LEDGER_CROSS_INSTANCE_SAFE="not-checked"
 PROVIDER_STABILITY_STATE="not-checked"
+STABILITY_SAMPLE_1=""; STABILITY_SAMPLE_2=""
+STABILITY_SAMPLE_1_AT=""; STABILITY_SAMPLE_2_AT=""
 CAS_PAT_PROOF="not-checked"
 MINT_FIXTURE_FAILURE="not-run"
 MINT_FAILURE_DIAGNOSTIC="not-run"
 NEW_SECRET_TMP=""
+FINAL_DISARM_STATE="not-proven"
 declare -A STATE_CREATED_ON=()
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
@@ -572,6 +578,8 @@ provider_stability_gate() {
     sleep "$PROVIDER_STABILITY_SECS"
   fi
   second="$(provider_snapshot provider-stability-2)" || { log_quiescence_leaf stability; return 1; }
+  STABILITY_SAMPLE_1="$first"; STABILITY_SAMPLE_2="$second"
+  STABILITY_SAMPLE_1_AT="$(date -u +%FT%H:%M:%SZ)"; STABILITY_SAMPLE_2_AT="$(date -u +%FT%H:%M:%SZ)"
   provider_stability_pair_ok "$first" "$second" || {
     log_event "provider-stability=RED sample_mismatch"
     log_quiescence_leaf stability
@@ -1091,6 +1099,12 @@ rollback_old() {
   return "$result"
 }
 
+evidence_pass_ready() {
+  [[ -n "${BEFORE_CREATED_ON:-}" && -n "${ARMED_CREATED_ON:-}" && -n "${ROTATED_CREATED_ON:-}" && -n "${FINAL_CREATED_ON:-}" ]] || return 1
+  [[ -n "$STABILITY_SAMPLE_1" && -n "$STABILITY_SAMPLE_2" && "$STABILITY_SAMPLE_1" == "$STABILITY_SAMPLE_2" ]] || return 1
+  [[ "$FINAL_DISARM_STATE" == green && "$REMOTE_TEMP_VAR_STATE" == disarmed ]] || return 1
+}
+
 write_evidence() {
   local rc="$1" status observed elapsed out="$TMP_DIR/au1.8-evidence.json"
   observed="$(date -u +%FT%H:%M:%SZ)"
@@ -1098,15 +1112,16 @@ write_evidence() {
     [[ "$WINDOW_FINISH" != 0 ]] || WINDOW_FINISH="$(date +%s)"
     elapsed=$((WINDOW_FINISH - WINDOW_START))
   else elapsed=0; fi
-  [[ "$rc" == 0 && "$SUCCESS_CLEANUP_DONE" == 1 ]] && status=PASS || status=FAILED
+  [[ "$rc" == 0 && "$SUCCESS_CLEANUP_DONE" == 1 ]] && evidence_pass_ready && status=PASS || status=FAILED
   jq -n \
     --arg status "$status" --arg observed "$observed" --arg commit "$SOURCE_COMMIT" \
     --arg app_name "$CONTAINER_APP_NAME" --arg app_id_before "${BEFORE_APP_ID:-}" \
-    --arg worker_before "${BEFORE_WORKER_VERSION:-}" --arg worker_rotated "${ROTATED_WORKER_VERSION:-}" --arg worker_final "${FINAL_WORKER_VERSION:-}" \
+    --arg worker_before "${BEFORE_WORKER_VERSION:-}" --arg worker_armed "${ARMED_WORKER_VERSION:-}" --arg worker_rotated "${ROTATED_WORKER_VERSION:-}" --arg worker_final "${FINAL_WORKER_VERSION:-}" \
     --arg created_before "${BEFORE_CREATED_ON:-}" --arg created_armed "${ARMED_CREATED_ON:-}" --arg created_rotated "${ROTATED_CREATED_ON:-}" --arg created_final "${FINAL_CREATED_ON:-}" \
-    --arg container_before "${BEFORE_CONTAINER_VERSION:-}" --arg container_rotated "${ROTATED_CONTAINER_VERSION:-}" --arg container_final "${FINAL_CONTAINER_VERSION:-}" \
-    --arg digest_before "${BEFORE_DIGEST:-}" --arg digest_rotated "${ROTATED_DIGEST:-}" --arg digest_final "${FINAL_DIGEST:-}" \
+    --arg container_before "${BEFORE_CONTAINER_VERSION:-}" --arg container_armed "${ARMED_CONTAINER_VERSION:-}" --arg container_rotated "${ROTATED_CONTAINER_VERSION:-}" --arg container_final "${FINAL_CONTAINER_VERSION:-}" \
+    --arg digest_before "${BEFORE_DIGEST:-}" --arg digest_armed "${ARMED_DIGEST:-}" --arg digest_rotated "${ROTATED_DIGEST:-}" --arg digest_final "${FINAL_DIGEST:-}" \
     --arg baseline_sha256 "$REMOTE_BASELINE_SHA256" --arg log_path "$EVENT_LOG" \
+    --arg stability_sample_1 "$STABILITY_SAMPLE_1" --arg stability_sample_2 "$STABILITY_SAMPLE_2" --arg stability_at_1 "$STABILITY_SAMPLE_1_AT" --arg stability_at_2 "$STABILITY_SAMPLE_2_AT" \
     --arg quiescence "$QUIESCENCE_STATE" --arg ledger_safe "$LEDGER_CROSS_INSTANCE_SAFE" --arg stability "$PROVIDER_STABILITY_STATE" --arg cas_probe "$CAS_PAT_PROOF" --arg temp_state "$REMOTE_TEMP_VAR_STATE" \
     --argjson stability_interval "$PROVIDER_STABILITY_SECS" --argjson elapsed "$elapsed" \
     --argjson maximum_seconds "$OPERATIONAL_WINDOW_MAX_SECS" \
@@ -1114,10 +1129,11 @@ write_evidence() {
       source:{repository:"corelink-runners", commit_sha:$commit, path:"docs/plan/evidence/au1.8-fabricd-secret-rotation.json"},
       claims:["AU1.8","AU1.8:secret-rotation"], version:{id:$commit},
       evidence:{operation:{app_name:$app_name, app_id_before:$app_id_before, worker_versions:{before:$worker_before, rotated:$worker_rotated, final:$worker_final}, container_versions:{before:$container_before, rotated:$container_rotated, final:$container_final}, image_digests:{before:$digest_before, rotated:$digest_rotated, final:$digest_final}},
-      state_records:[{label:"before",created_on:$created_before,worker_version_id:$worker_before,container_version_id:$container_before,image_digest:$digest_before},{label:"armed",created_on:$created_armed,worker_version_id:$worker_rotated,container_version_id:$container_rotated,image_digest:$digest_rotated},{label:"rotated",created_on:$created_rotated,worker_version_id:$worker_rotated,container_version_id:$container_rotated,image_digest:$digest_rotated},{label:"final",created_on:$created_final,worker_version_id:$worker_final,container_version_id:$container_final,image_digest:$digest_final}],
+      state_records:[{label:"before",created_on:$created_before,worker_version_id:$worker_before,container_version_id:$container_before,image_digest:$digest_before,binding_state:"disarmed"},{label:"armed",created_on:$created_armed,worker_version_id:$worker_armed,container_version_id:$container_armed,image_digest:$digest_armed,binding_state:"armed"},{label:"rotated",created_on:$created_rotated,worker_version_id:$worker_rotated,container_version_id:$container_rotated,image_digest:$digest_rotated,binding_state:"armed"},{label:"final",created_on:$created_final,worker_version_id:$worker_final,container_version_id:$container_final,image_digest:$digest_final,binding_state:"disarmed"}],
       proofs:{old_hmac_prevalidated:true, old_hmac_redeem_status:401, new_hmac_redeem_status:200, replay_status:410, redeemed_cas_pat_clw:$cas_probe},
       quiescence:{gate:$quiescence, active_leases:0, active_jobs:0, fleet_busy:0, fleet_unverifiable:0, ledger_cross_instance_safe:($ledger_safe == "true"), intake_paused:true, redrive_paused:true},
       provider_stability:{gate:$stability, samples:2, interval_seconds:$stability_interval},
+      stability_records:([$stability_sample_1,$stability_sample_2] | to_entries | map({label:("sample_" + ((.key + 1)|tostring)),sampled_at:(if .key == 0 then $stability_at_1 else $stability_at_2 end),app_id:$app_id_before,created_on:$created_before,worker_version_id:(.value|split("\t")[0]),container_version_id:(.value|split("\t")[1]),image_digest:(.value|split("\t")[2]),binding_state:"baseline"})),
       remote_variables:{baseline_snapshot_sha256:$baseline_sha256, unknown_bindings_preserved:true, drift_refusal:true, temporary_tenant_binding:$temp_state, deploy_flags:["--keep-vars","--strict","--containers-rollout=immediate"]},
       secret_handling:{old_rollback_path:$ENV_OLD_SECRET_FILE, new_operational_path:$ENV_NEW_SECRET_FILE, values:"excluded", oob_mode:"0600"},
       timing:{maximum_seconds:$maximum_seconds, elapsed_seconds:$elapsed, clock_starts_before_first_test_key_put:true, clock_ends_after_final_provider_capture:true},
@@ -1240,6 +1256,7 @@ delete_test_key || exit 1
 recreate 0 || exit 1
 capture_state final || exit 1
 assert_remote_bindings final "$CURRENT_WORKER_VERSION" disarmed || exit 1
+FINAL_DISARM_STATE=green
 [[ "$FINAL_DIGEST" == "$BEFORE_DIGEST" ]] || { echo "final image digest changed" >&2; exit 1; }
 assert_test_key_absent || { echo "temporary test-mint key remained armed" >&2; exit 1; }
 WINDOW_FINISH="$(date +%s)"
