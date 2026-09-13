@@ -770,6 +770,28 @@ if ! health_wait_case pass '503,200' 3 || ! health_wait_case fail '503' 1; then
   exit 1
 fi
 
+# Mint diagnostics retain only an allowlisted code, status, and restricted
+# provider correlation id. Bodies and token-like fields must never leak.
+mint_diag_fn="$(sed -n '/^classify_mint_failure() {/,/^}$/p' "$harness")"
+mint_diag_tmp="$(mktemp -d "${TMPDIR:-/tmp}/au1.8-mint-diag.XXXXXX")"
+if ! MINT_DIAG_TMP="$mint_diag_tmp" bash -u -c '
+  set -Eeuo pipefail
+  eval "$1"
+  headers="$MINT_DIAG_TMP/headers"
+  printf "CF-Ray: abc-123/xyz\r\n" > "$headers"
+  out="$(classify_mint_failure '\''{"error":"CAS PAT mint failed","token":"token-secret-should-not-leak"}'\'' 503 "$headers")"
+  [[ "$out" == "error_code=cas_pat_mint_failed http_status=503 cf_ray=abc-123xyz" ]]
+  ! [[ "$out" == *token-secret* ]]
+  out="$(classify_mint_failure '\''{"error":"unexpected","token_plaintext":"pat-secret-should-not-leak"}'\'' 503 "$headers")"
+  [[ "$out" == "error_code=unknown http_status=503 cf_ray=abc-123xyz" ]]
+  ! [[ "$out" == *pat-secret* ]]
+' -- "$mint_diag_fn"; then
+  rm -rf -- "$mint_diag_tmp"
+  echo 'FAIL: mint diagnostics must classify safely without body/token leakage' >&2
+  exit 1
+fi
+rm -rf -- "$mint_diag_tmp"
+
 # A failed signer proof is RED, but it must never bypass temporary-key removal,
 # disarm/recreate, final capture, or final remote-binding confirmation.
 rollback_fn="$(sed -n '/^rollback_old() {/,/^}$/p' "$harness")"
