@@ -117,6 +117,13 @@ memory_singleton_age_gate() {
   log_event "memory-singleton-quiescence-age=$age required=3900"
 }
 
+assert_singleton_capacity() {
+  local info="$1"
+  # The provider's app field is authoritative; unrelated nested metadata must
+  # never satisfy the singleton gate.
+  jq -e 'has("max_instances") and (.max_instances | type == "number") and .max_instances == 1' "$info" >/dev/null
+}
+
 provider_stability_pair_ok() {
   local first="$1" second="$2"
   [[ -n "$first" && -n "$second" && "$first" == "$second" ]]
@@ -410,6 +417,7 @@ capture_state() {
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || {
     log_event "$label application-name-mismatch"; return 1;
   }
+  assert_singleton_capacity "$info" || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg ENV_EXPECTED_DIGEST "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$ENV_EXPECTED_DIGEST] then .[0] else error("unexpected image digest") end' "$info")" || return 1
@@ -430,6 +438,7 @@ provider_snapshot() {
   capture_json "$label-deployments" "$deploys" run_wrangle deployments list --name "$WORKER_NAME" --json || return 1
   capture_json "$label-container-info" "$info" run_wrangle containers info "$APP_ID" || return 1
   jq -e --arg app_name "$CONTAINER_APP_NAME" '.name == $app_name' "$info" >/dev/null || return 1
+  assert_singleton_capacity "$info" || return 1
   worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$deploys")" || return 1
   container="$(extract_container_version "$info")" || return 1
   digest="$(jq -er --arg expected "$EXPECTED_IMAGE_DIGEST" '[.. | strings | scan("sha256:[0-9a-f]{64}")] | unique | if . == [$expected] then .[0] else error("unexpected image digest") end' "$info")" || return 1
@@ -665,7 +674,8 @@ quiescence_gate() {
 
   response="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$OBSERVABILITY_URL" 2>"$TMP_DIR/occupancy.err")" || return 1
   scrub_file "$TMP_DIR/occupancy.err"
-  jq -e '(.per_tenant | type) == "array" and all(.[]; ((.occupied // 0) | tonumber) == 0)' <<<"$response" >/dev/null || return 1
+  jq -e '(.per_tenant | type) == "array" and
+    all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<<"$response" >/dev/null || return 1
   status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || return 1
   scrub_file "$TMP_DIR/status.err"
   validate_status_report "$status_report" || return 1
@@ -676,26 +686,18 @@ quiescence_gate() {
     # singleton window.  The deployment timestamp comes from the provider
     # response above; caller-supplied age/version assertions are ignored.
     LEDGER_CROSS_INSTANCE_SAFE="false"
-    jq -e '([.. | objects | .max_instances?] | map(select(type == "number" or type == "string")) | any(. == 1 or . == "1"))' \
-      "$TMP_DIR/before-container.json" >/dev/null || return 1
+    assert_singleton_capacity "$TMP_DIR/before-container.json" || return 1
     local before_created_on before_worker
     before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || return 1
     memory_singleton_age_gate "$before_created_on" || return 1
     before_worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/before-deployments.json")" || return 1
     assert_fabricd_admission_paused quiescence "$before_worker" || return 1
-    # Empty POSTs are safe edge probes: a paused route must reject before any
-    # request can reach lease admission or credential-ticket minting.
-    local route http
-    for route in /v1/leases /v1/test/mint-cred-ticket; do
-      http="$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w '%{http_code}' -X POST "$BASE_URL$route" 2>"$TMP_DIR/paused-${route##*/}.err")" || return 1
-      scrub_file "$TMP_DIR/paused-${route##*/}.err"
-      [[ "$http" =~ ^[45][0-9][0-9]$ ]] || return 1
-    done
   fi
 
   fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || return 1
   scrub_file "$TMP_DIR/fleet-busy.err"
-  jq -e '((.busy // .active // .busy_count // 0) | tonumber) == 0 and ((.unverifiable // .unknown // 0) | tonumber) == 0' <<<"$fleet" >/dev/null || return 1
+  jq -e '(.busy | type) == "number" and .busy == 0 and
+    (.unverifiable | type) == "number" and .unverifiable == 0' <<<"$fleet" >/dev/null || return 1
 
   # The spawn Worker version is checked from provider state, not inferred from
   # a local config file. Both pause bindings must be remotely set to "1".

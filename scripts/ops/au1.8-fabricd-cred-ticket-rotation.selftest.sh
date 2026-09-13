@@ -292,6 +292,31 @@ if env -u created_on bash -u -c 'set -Eeuo pipefail; log_event(){ :; }; eval "$1
   exit 1
 fi
 
+capacity_fn="$(sed -n '/^assert_singleton_capacity() {/,/^}$/p' "$harness")"
+capacity_case() {
+  local expected="$1" payload="$2" info rc
+  info="$(mktemp "${TMPDIR:-/tmp}/au1.8-capacity.XXXXXX")"
+  printf '%s\n' "$payload" > "$info"
+  set +e
+  # shellcheck disable=SC2016
+  env -u info bash -u -c 'set -Eeuo pipefail; eval "$1"; assert_singleton_capacity "$2"' -- "$capacity_fn" "$info"
+  rc=$?
+  set -e
+  rm -f -- "$info"
+  [[ "$expected" == pass && "$rc" == 0 || "$expected" == fail && "$rc" != 0 ]]
+}
+capacity_case pass '{"name":"corelink-fabricd-fabricdcontainer","max_instances":1}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","metadata":{"max_instances":1}}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer"}'
+capacity_case fail '{"name":"corelink-fabricd-fabricdcontainer","max_instances":"1"}'
+
+if jq -e '(.busy | type) == "number" and .busy == 0 and (.unverifiable | type) == "number" and .unverifiable == 0' <<< '{"unverifiable":0}' >/dev/null; then
+  echo "FAIL: missing fleet busy must fail closed" >&2; exit 1
+fi
+if jq -e '(.per_tenant | type) == "array" and all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<< '{"per_tenant":[{}]}' >/dev/null; then
+  echo "FAIL: missing occupancy must fail closed" >&2; exit 1
+fi
+
 printf 'test-mint-key\n' > "$test_mint_key"
 printf 'observability-key\n' > "$observability_key"
 chmod 600 "$test_mint_key" "$observability_key"
