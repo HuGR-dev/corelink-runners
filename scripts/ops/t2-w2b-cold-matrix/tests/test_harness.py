@@ -9,8 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -423,6 +424,46 @@ class HarnessTests(unittest.TestCase):
                 with self.assertRaisesRegex(HarnessError, expected) as raised:
                     provider._api_payload("/containers/applications")
                 self.assertNotIn("secret body", str(raised.exception))
+
+    def test_public_health_403_witness_keeps_safe_headers_and_no_body(self):
+        provider = ReadOnlyHttpProvider("account", "https://fabric.example", "token")
+        headers = Message()
+        headers["Content-Type"] = "text/html; charset=UTF-8"
+        headers["Server"] = "cloudflare"
+        headers["CF-Ray"] = "ray-403"
+        headers["X-Request-ID"] = "request-403"
+        with patch("harness.urlopen", side_effect=HTTPError(
+            "https://fabric.example/health", 403, "SECRET BODY MUST NOT ESCAPE", headers, None
+        )):
+            witness = provider.public_witness("/health", 1)
+        self.assertEqual(witness, {
+            "http": 403,
+            "content_type": "text/html; charset=UTF-8",
+            "server": "cloudflare",
+            "cf_ray": "ray-403",
+            "x_request_id": "request-403",
+        })
+        self.assertNotIn("SECRET", json.dumps(witness))
+
+    def test_public_health_200_witness_captures_metadata_without_body(self):
+        provider = ReadOnlyHttpProvider("account", "https://fabric.example", "token")
+        response = MagicMock()
+        response.status = 200
+        response.headers = {
+            "Content-Type": "text/plain",
+            "Server": "cloudflare",
+            "CF-Ray": "ray-200",
+            "X-Request-ID": "request-200",
+        }
+        response.read.return_value = b"SECRET BODY MUST NOT ESCAPE"
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with patch("harness.urlopen", return_value=response):
+            witness = provider.public_witness("/health", 1)
+        response.read.assert_called_once_with(1024)
+        self.assertEqual(witness["http"], 200)
+        self.assertEqual(witness["cf_ray"], "ray-200")
+        self.assertNotIn("SECRET", json.dumps(witness))
 
         with patch("harness.urlopen", side_effect=URLError("secret transport detail")):
             with self.assertRaisesRegex(HarnessError, "transport failed") as raised:
