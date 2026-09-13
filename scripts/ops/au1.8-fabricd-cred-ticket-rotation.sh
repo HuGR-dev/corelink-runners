@@ -102,6 +102,11 @@ status_ledger_is_safe() {
   jq -er '.ledger_cross_instance_safe == true' <<<"$1" >/dev/null
 }
 
+memory_singleton_status_ok() {
+  jq -e '(.num_shards | type == "number") and .num_shards == 1 and
+    .ledger_cross_instance_safe == false' <<<"$1" >/dev/null
+}
+
 provider_timestamp_epoch() {
   local value="$1"
   node -e 'const t=Date.parse(process.argv[1]); if (!Number.isFinite(t)) process.exit(1); process.stdout.write(String(Math.floor(t/1000)))' "$value"
@@ -686,6 +691,7 @@ quiescence_gate() {
     # singleton window.  The deployment timestamp comes from the provider
     # response above; caller-supplied age/version assertions are ignored.
     LEDGER_CROSS_INSTANCE_SAFE="false"
+    memory_singleton_status_ok "$status_report" || return 1
     assert_singleton_capacity "$TMP_DIR/before-container.json" || return 1
     local before_created_on before_worker
     before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || return 1

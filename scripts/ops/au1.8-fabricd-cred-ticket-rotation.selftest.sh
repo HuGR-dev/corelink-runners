@@ -268,6 +268,12 @@ fi
 
 validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":true}'
 validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'
+memory_status_fn="$(sed -n '/^memory_singleton_status_ok() {/,/^}$/p' "$harness")"
+# shellcheck disable=SC2016
+if env -u status_report bash -u -c 'set -Eeuo pipefail; eval "$1"; memory_singleton_status_ok "$2"' -- "$memory_status_fn" '{"num_shards":"1","ledger_cross_instance_safe":false}'; then
+  echo "FAIL: memory singleton num_shards string must fail closed" >&2
+  exit 1
+fi
 if validate "$head" '{"num_shards":1}'; then
   echo "FAIL: missing ledger_cross_instance_safe must block AU1.8" >&2
   exit 1
