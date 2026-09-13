@@ -382,7 +382,10 @@ if validate "0000000000000000000000000000000000000000"; then
 fi
 
 validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":true}'
-validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'
+if validate "$head" '{"num_shards":1,"ledger_cross_instance_safe":false}'; then
+  echo 'FAIL: unsafe ledger fixture must stop before mutation' >&2
+  exit 1
+fi
 memory_status_fn="$(sed -n '/^memory_singleton_status_ok() {/,/^}$/p' "$harness")"
 # shellcheck disable=SC2016
 if env -u status_report bash -u -c 'set -Eeuo pipefail; eval "$1"; memory_singleton_status_ok "$2"' -- "$memory_status_fn" '{"num_shards":"1","ledger_cross_instance_safe":false}'; then
@@ -845,5 +848,15 @@ rm -rf -- "$safety_lock_dir"
 rg -q 'ledger-durability' "$harness"
 rg -q 'ln "\$tmp" "\$NEW_SECRET_FILE"' "$harness"
 rg -q 'state_records:' "$harness"
+
+# Behavioral evidence validator: omitted/mismatched tuples and missing disarm
+# cannot qualify a PASS-capable result.
+evidence_fn="$(sed -n '/^evidence_pass_ready() {/,/^}/p' "$harness")"
+if bash -u -c 'set -Eeuo pipefail; eval "$1"; BEFORE_CREATED_ON=x ARMED_CREATED_ON=x ROTATED_CREATED_ON=x FINAL_CREATED_ON=x STABILITY_SAMPLE_1=a STABILITY_SAMPLE_2=b FINAL_DISARM_STATE=green REMOTE_TEMP_VAR_STATE=disarmed evidence_pass_ready' -- "$evidence_fn"; then
+  echo 'FAIL: mismatched stability tuple must fail evidence validation' >&2; exit 1
+fi
+if bash -u -c 'set -Eeuo pipefail; eval "$1"; BEFORE_CREATED_ON=x ARMED_CREATED_ON=x ROTATED_CREATED_ON=x FINAL_CREATED_ON=x STABILITY_SAMPLE_1=a STABILITY_SAMPLE_2=a FINAL_DISARM_STATE=not-proven REMOTE_TEMP_VAR_STATE=disarmed evidence_pass_ready' -- "$evidence_fn"; then
+  echo 'FAIL: absent final disarm must fail evidence validation' >&2; exit 1
+fi
 
 echo "AU1.8 focused gates: PASS"
