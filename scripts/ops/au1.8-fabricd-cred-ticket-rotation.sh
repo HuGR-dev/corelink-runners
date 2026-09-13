@@ -322,6 +322,16 @@ CAS_PAT_PROOF="not-checked"
 
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
 
+log_quiescence_leaf() { log_event "quiescence=RED leaf=$1"; }
+
+log_usage_fetch_failure() {
+  local status="$1" headers="$2" reason="$3" content_type cf_ray
+  [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+  content_type="$(sed -n 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//p' "$headers" 2>/dev/null | head -n 1 | sed -E 's/[^A-Za-z0-9._;=,+\/ -]//g' | cut -c1-80)"
+  cf_ray="$(sed -n 's/^[Cc][Ff]-[Rr]ay:[[:space:]]*//p' "$headers" 2>/dev/null | head -n 1 | sed -E 's/[^A-Za-z0-9._-]//g' | cut -c1-80)"
+  log_event "quiescence=RED leaf=usage_fetch reason=$reason http_status=$status content_type=${content_type:-absent} cf_ray=${cf_ray:-absent}"
+}
+
 scrub_file() {
   local file="$1"
   local safe="$file.safe"
@@ -454,17 +464,19 @@ provider_snapshot() {
 provider_stability_gate() {
   local expected_worker="${1:-}" expected_container="${2:-}" expected_digest="${3:-}"
   local first second
-  first="$(provider_snapshot provider-stability-1)" || return 1
+  first="$(provider_snapshot provider-stability-1)" || { log_quiescence_leaf stability; return 1; }
   if [[ "$PROVIDER_STABILITY_SECS" -gt 0 ]]; then
     sleep "$PROVIDER_STABILITY_SECS"
   fi
-  second="$(provider_snapshot provider-stability-2)" || return 1
+  second="$(provider_snapshot provider-stability-2)" || { log_quiescence_leaf stability; return 1; }
   provider_stability_pair_ok "$first" "$second" || {
     log_event "provider-stability=RED sample_mismatch"
+    log_quiescence_leaf stability
     return 1
   }
   if [[ -n "$expected_worker" && "$first" != "$expected_worker"$'\t'"$expected_container"$'\t'"$expected_digest" ]]; then
     log_event "provider-stability=RED baseline_mismatch"
+    log_quiescence_leaf stability
     return 1
   fi
   PROVIDER_STABILITY_STATE="green"
@@ -669,21 +681,37 @@ quiescence_gate() {
   # or unverifiable fleet item while intake/redispatch are paused remotely.
   OBSERVABILITY_HEADER_FILE="$(make_oob_header_file observability "$OBSERVABILITY_KEY_FILE")"
   FLEET_BUSY_HEADER_FILE="$(make_oob_header_file fleet-busy "$FLEET_BUSY_KEY_FILE")"
-  local usage fleet response status_report rc
+  local usage fleet response status_report rc usage_http_status usage_body usage_headers
   local pat_header_fd
   pat_header_fd=<(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$PAT_FILE")")
-  usage="$(curl -fsS --connect-timeout 10 --max-time 30 \
-    --header "@$pat_header_fd" "$USAGE_URL" 2>"$TMP_DIR/usage.err")" || return 1
+  usage_body="$TMP_DIR/usage.body"; usage_headers="$TMP_DIR/usage.headers"
+  : > "$usage_body"; : > "$usage_headers"; chmod 600 "$usage_body" "$usage_headers"
+  set +e
+  usage_http_status="$(curl -sS --connect-timeout 10 --max-time 30 \
+    --header "@$pat_header_fd" -D "$usage_headers" -o "$usage_body" -w '%{http_code}' "$USAGE_URL" 2>"$TMP_DIR/usage.err")"
+  rc=$?
+  set -e
   scrub_file "$TMP_DIR/usage.err"
-  jq -e --arg tenant "$TENANT" '.tenant == $tenant and ((.active_now // .activeNow) | tonumber) == 0' <<<"$usage" >/dev/null || return 1
+  usage="$(<"$usage_body")"
+  if [[ "$rc" != 0 ]]; then
+    log_usage_fetch_failure "$usage_http_status" "$usage_headers" http
+    scrub_file "$usage_body"; scrub_file "$usage_headers"
+    return 1
+  fi
+  if ! jq -e --arg tenant "$TENANT" '.tenant == $tenant and ((.active_now // .activeNow) | tonumber) == 0' <<<"$usage" >/dev/null; then
+    log_usage_fetch_failure "$usage_http_status" "$usage_headers" shape
+    scrub_file "$usage_body"; scrub_file "$usage_headers"
+    return 1
+  fi
+  scrub_file "$usage_body"; scrub_file "$usage_headers"
 
-  response="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$OBSERVABILITY_URL" 2>"$TMP_DIR/occupancy.err")" || return 1
+  response="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$OBSERVABILITY_URL" 2>"$TMP_DIR/occupancy.err")" || { log_quiescence_leaf occupancy; return 1; }
   scrub_file "$TMP_DIR/occupancy.err"
   jq -e '(.per_tenant | type) == "array" and
-    all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<<"$response" >/dev/null || return 1
-  status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || return 1
+    all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<<"$response" >/dev/null || { log_quiescence_leaf occupancy; return 1; }
+  status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || { log_quiescence_leaf status; return 1; }
   scrub_file "$TMP_DIR/status.err"
-  validate_status_report "$status_report" || return 1
+  validate_status_report "$status_report" || { log_quiescence_leaf status; return 1; }
   if status_ledger_is_safe "$status_report"; then
     LEDGER_CROSS_INSTANCE_SAFE="true"
   else
@@ -691,26 +719,26 @@ quiescence_gate() {
     # singleton window.  The deployment timestamp comes from the provider
     # response above; caller-supplied age/version assertions are ignored.
     LEDGER_CROSS_INSTANCE_SAFE="false"
-    memory_singleton_status_ok "$status_report" || return 1
-    assert_singleton_capacity "$TMP_DIR/before-container.json" || return 1
+    memory_singleton_status_ok "$status_report" || { log_quiescence_leaf stability; return 1; }
+    assert_singleton_capacity "$TMP_DIR/before-container.json" || { log_quiescence_leaf capacity; return 1; }
     local before_created_on before_worker
-    before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || return 1
-    memory_singleton_age_gate "$before_created_on" || return 1
-    before_worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/before-deployments.json")" || return 1
-    assert_fabricd_admission_paused quiescence "$before_worker" || return 1
+    before_created_on="$(jq -er 'sort_by(.created_on // "") | last | .created_on // empty' "$TMP_DIR/before-deployments.json")" || { log_quiescence_leaf age; return 1; }
+    memory_singleton_age_gate "$before_created_on" || { log_quiescence_leaf age; return 1; }
+    before_worker="$(jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/before-deployments.json")" || { log_quiescence_leaf pause; return 1; }
+    assert_fabricd_admission_paused quiescence "$before_worker" || { log_quiescence_leaf pause; return 1; }
   fi
 
-  fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || return 1
+  fleet="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$FLEET_BUSY_HEADER_FILE" "$FLEET_BUSY_URL" 2>"$TMP_DIR/fleet-busy.err")" || { log_quiescence_leaf fleet; return 1; }
   scrub_file "$TMP_DIR/fleet-busy.err"
   jq -e '(.busy | type) == "number" and .busy == 0 and
-    (.unverifiable | type) == "number" and .unverifiable == 0' <<<"$fleet" >/dev/null || return 1
+    (.unverifiable | type) == "number" and .unverifiable == 0' <<<"$fleet" >/dev/null || { log_quiescence_leaf fleet; return 1; }
 
   # The spawn Worker version is checked from provider state, not inferred from
   # a local config file. Both pause bindings must be remotely set to "1".
   local spawn_version spawn_bindings
-  spawn_version="$(capture_json spawn-deployments "$TMP_DIR/spawn-deployments.json" run_wrangle deployments list --name corelink-spawn-worker --json >/dev/null; jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/spawn-deployments.json")" || return 1
-  spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || return 1
-  jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || return 1
+  spawn_version="$(capture_json spawn-deployments "$TMP_DIR/spawn-deployments.json" run_wrangle deployments list --name corelink-spawn-worker --json >/dev/null; jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/spawn-deployments.json")" || { log_quiescence_leaf pause; return 1; }
+  spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || { log_quiescence_leaf pause; return 1; }
+  jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || { log_quiescence_leaf pause; return 1; }
   QUIESCENCE_STATE="green"
   log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 ledger_cross_instance_safe=$LEDGER_CROSS_INSTANCE_SAFE intake_paused=1 redrive_paused=1"
 }
