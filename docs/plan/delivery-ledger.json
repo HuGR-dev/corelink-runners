@@ -1643,8 +1643,8 @@
         "O-FLEETBUSY",
         "T7-W4b"
       ],
-      "next_action": "Resolve or explicitly adjudicate the unrecoverable historical Fabricd provider-v26 criterion, then capture one version-bound 10/10 independent cold-start artifact for the valid acceptance contract. Treat T2-W2b-deploy-final.json as historical/superseded/one-shot with zero current credit; the recovered Fabricd app is a new provider v1 app on digest 2e7b, and service recovery does not restore the historical v26 criterion or satisfy the one-shot/10-start gap.",
-      "blockers": ["T2-W2b harness 0/10 root cause: --containers-rollout=none skipped Fabricd container application creation", "Historical Fabricd provider-v26 criterion RED: recovery recreated the app as provider v1 on digest 2e7b", "A2.4/A2.5/A2.7/A2.10 version-bound 10/10 independent cold-start artifact absent"],
+      "next_action": "After AU1.8 or any Fabricd app recreation, resolve and record the current Fabricd app UUID; reject any pre-AU or replaced app ID even when its digest/build match. Capture a fresh version-bound production witness matrix: 10 independent cold-start candidate runs and 10 rollback runs within 300s, with every matrix input and evidence bound to that current UUID, the real deployed Worker version, immutable Fabricd digest and build SHA >= #515, running-instance digest, health, and rollback evidence. Current app identity/digest/build is an acceptance subject only if that matrix passes. The historical provider-v26 observation is incidental and non-normative, unrecoverable after app recreation, quarantined with zero credit; missing production evidence is not waived.",
+      "blockers": ["Current Fabricd app UUID must be resolved and recorded after AU1.8 or any recreation; pre-AU/replaced IDs are rejected even when digest/build match", "Fresh production version-bound witness matrix absent: 10 independent cold-start candidate runs plus 10 rollback runs within 300s, with inputs/evidence bound to the current app UUID", "A2.4/A2.5/A2.7/A2.10 require the real Worker version, immutable Fabricd digest and build SHA >= #515, running-instance digest, health, and rollback evidence; current identity/digest/build remains unadjudicated until the matrix passes", "Historical provider-v26 observation is quarantined as incidental/non-normative and unrecoverable after app recreation; no waiver or acceptance credit"],
       "commits": [
         "20d1eb5d40f10ba949e16ba72a75048ae10d61b0",
         "b610a924edaa224db46320d3993bea797bbe2504",
@@ -1671,7 +1671,7 @@
         "docs/plan/evidence/T2-W2b-deploy.json: canonical provider-lifecycle evidence previously proved A2.5 with a running fabricd instance reporting the configured immutable digest and both health routes HTTP 200. The A2.7 local gate recovered at 9273080: typecheck PASS and npm run test PASS with 90 files / 1119 tests in 26.67 seconds; its earlier 5-file/10-test RED group is retained as history.",
         "docs/plan/evidence/T2-W2b-A2.7-final-20260908.json: a prior candidate Worker 85171fd2-fc5b-49c2-b6f3-fc21d6fe8977 deployed at 100% while provider fabricd state was stopped (active=0, healthy=0, assigned=1), so rollback recovered cb704a9d-f6e0-45d7-9e68-89a263a77993 at 100%; fleet returned 0/0/0 without FORCE and references remained unchanged. This retained rollback recovery supplies A2.10 history.",
         "docs/plan/evidence/T2-W2b-deploy-final.json: historical/superseded/one-shot record (originally PASS, now UNKNOWN with claims=[] and zero credit) observed Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%, ready DevEnv d105e11f..., Fabricd v26/digest 2e7b and gates 0/0/0. It cannot establish the current app/version after recovery and does not satisfy A2.4/A2.5/A2.7/A2.10; version-bound local CI remains 90 files / 1119 tests plus typecheck PASS at product-equivalent 9273080 source.",
-        "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json: after the harness 0/10 root cause (--containers-rollout=none skipped container application creation), recovery restored Worker 1418af47 at 100%, new Fabricd app a03e645c... running at provider v1 on immutable digest 2e7b, HTTP health/attestation 200, ready DevEnv d105, fleet 0/0/0 and pauses 1/1. The historical provider-v26 criterion remains RED and no completion credit is granted."
+        "docs/plan/evidence/T2-W2b-incident-recovery-20260908.json: after the harness 0/10 root cause (--containers-rollout=none skipped container application creation), recovery restored Worker 1418af47 at 100%, new Fabricd app a03e645c... running at provider v1 on immutable digest 2e7b, HTTP health/attestation 200, ready DevEnv d105, fleet 0/0/0 and pauses 1/1. The historical provider-v26 observation is incidental/non-normative, unrecoverable after app recreation, quarantined with zero credit; no completion credit is granted."
       ],
       "historical_sprint": 2
     },
@@ -3379,6 +3379,23 @@
       "evidence": [
         "Final Worker 1418af47-d71a-488f-89a6-cbb9173402bd at 100%; ready DevEnv d105e11f...; recovered Fabricd app a03e645c-9589-401c-84a0-e023ff2b6749 provider v1 running on 2e7bcea9... with health and attestation HTTP 200.",
         "Fleet busy=0, checked=0, unverifiable=0, force=false; intake/redrive remain paused 1/1."
+      ]
+    },
+    {
+      "at": "2026-09-13T00:00:00+00:00",
+      "task": "T2-W2b provider-v26 adjudication",
+      "owner": "root",
+      "state": "adjudicated",
+      "scope": [
+        "docs/plan/execution/2026-09-13-t2-w2b-v26-adjudication.md",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W2b",
+      "role": "TechLead/PO decision record",
+      "conclusion": "Historical provider-v26 is incidental/non-normative, unrecoverable after app recreation, quarantined with zero credit. Current app identity/digest/build is an acceptance subject only after a fresh version-bound 10-candidate plus 10-rollback 300s cold witness matrix passes; no production evidence is waived and no PASS is claimed.",
+      "evidence": [
+        "Normative A2.4/A2.5/A2.7/A2.10 lines 561-567 of docs/plan/2026-08-30-golive-remediation-plan.md.",
+        "docs/plan/execution/2026-09-13-t2-w2b-v26-adjudication.md"
       ]
     }
   ],
