@@ -166,15 +166,15 @@ unset_local_regression() {
     CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
     result="$(capture_remote_bindings sample version-a)"
     test -f "$result"
-    jq -e '
+    jq -e "
       length == 3 and
-      (map(select(.name == "FABRIC_TEST_MINT_TENANTS")) | length) == 1 and
-      (map(select(.name == "AUTOSCALER_TOKEN")) | .[0].type) == "secret_text" and
-      (map(select(.name == "AUTOSCALER_TOKEN")) | .[0].temporary_value) == null and
-      (map(select(.name == "UNEXPECTED_OPAQUE")) | .[0].type) == "opaque" and
-      (map(select(.name == "UNEXPECTED_OPAQUE")) | .[0].temporary_value) == null
-    ' "$result" >/dev/null
-    ! rg -q 'secret-literal|opaque-literal' "$result"
+      (map(select(.name == \"FABRIC_TEST_MINT_TENANTS\")) | length) == 1 and
+      (map(select(.name == \"AUTOSCALER_TOKEN\")) | .[0].type) == \"secret_text\" and
+      (map(select(.name == \"AUTOSCALER_TOKEN\")) | .[0].temporary_value) == null and
+      (map(select(.name == \"UNEXPECTED_OPAQUE\")) | .[0].type) == \"opaque\" and
+      (map(select(.name == \"UNEXPECTED_OPAQUE\")) | .[0].temporary_value) == null
+    " "$result" >/dev/null
+    ! rg -q "secret-literal|opaque-literal" "$result"
     header="$(make_oob_header_file observability "$key")"
     test "$(sed -n "1p" "$header")" = "X-Corelink-Internal-Auth: mock-observability-key"
     rm -rf -- "$TMP_DIR"
@@ -670,7 +670,8 @@ if ! remote_binding_case pass armed '[
 ]' ||
    ! remote_binding_case fail disarmed '[
   {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
-  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""}
+  {"name":"FABRIC_TEST_MINT_TENANTS","type":"plain_text","temporary_value":""},
+  {"name":"UNEXPECTED_BINDING","type":"plain_text","temporary_value":null}
 ]' ||
    ! remote_binding_case fail disarmed '[
   {"name":"CORELINK_INTROSPECT_URL","type":"plain_text","temporary_value":null},
