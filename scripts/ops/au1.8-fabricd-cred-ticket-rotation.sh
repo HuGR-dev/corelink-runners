@@ -506,7 +506,7 @@ capture_remote_bindings() {
       [ .. | objects | select((.name? | type) == "string" and (.type? | type) == "string") |
         select(.type | test("^(plain_text|secret_text|json|kv_namespace|durable_object_namespace|service|wasm_module|plain_text_blob)$")) |
         {name, type, temporary_value:(if .name == $temp or (.name | startswith("AUTOSCALER_")) then (.text // .value // "") else null end)}
-      ] | unique_by([.name,.type]) | sort_by([.name,.type])
+      ] | sort_by([.name,.type])
     ' >"$out"
   local -a pipe_status=("${PIPESTATUS[@]}")
   rc="${pipe_status[0]}"; local jq_rc="${pipe_status[1]}"
@@ -744,7 +744,7 @@ quiescence_gate() {
   response="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$OBSERVABILITY_URL" 2>"$TMP_DIR/occupancy.err")" || { log_quiescence_leaf occupancy; return 1; }
   scrub_file "$TMP_DIR/occupancy.err"
   jq -e '(.per_tenant | type) == "array" and
-    all(.[]; (.occupied | type) == "number" and .occupied == 0)' <<<"$response" >/dev/null || { log_quiescence_leaf occupancy; return 1; }
+    (.per_tenant | all(.[]; ((.occupied | type) == "number" and .occupied == 0)))' <<<"$response" >/dev/null || { log_quiescence_leaf occupancy; return 1; }
   status_report="$(curl -fsS --connect-timeout 10 --max-time 30 --header "@$OBSERVABILITY_HEADER_FILE" "$STATUS_URL" 2>"$TMP_DIR/status.err")" || { log_quiescence_leaf status; return 1; }
   scrub_file "$TMP_DIR/status.err"
   validate_status_report "$status_report" || { log_quiescence_leaf status; return 1; }
@@ -774,7 +774,9 @@ quiescence_gate() {
   local spawn_version spawn_bindings
   spawn_version="$(capture_json spawn-deployments "$TMP_DIR/spawn-deployments.json" run_wrangle deployments list --name corelink-spawn-worker --json >/dev/null; jq -er 'sort_by(.created_on // "") | last | .versions[0].version_id' "$TMP_DIR/spawn-deployments.json")" || { log_quiescence_leaf pause; return 1; }
   spawn_bindings="$(capture_remote_bindings spawn-paused "$spawn_version" corelink-spawn-worker)" || { log_quiescence_leaf pause; return 1; }
-  jq -e 'all(.[]; (.name != "AUTOSCALER_REDRIVE_PAUSED" and .name != "AUTOSCALER_INTAKE_PAUSED") or (.temporary_value == "1"))' "$spawn_bindings" >/dev/null || { log_quiescence_leaf pause; return 1; }
+  jq -e '([.[] | select(.name == "AUTOSCALER_REDRIVE_PAUSED" or .name == "AUTOSCALER_INTAKE_PAUSED")] | sort_by(.name)) as $pauses |
+    ($pauses | length) == 2 and ($pauses | map(.name) | unique | length) == 2 and
+    all($pauses[]; (.type == "plain_text" and (.temporary_value | type) == "string" and .temporary_value == "1"))' "$spawn_bindings" >/dev/null || { log_quiescence_leaf pause; return 1; }
   QUIESCENCE_STATE="green"
   log_event "quiescence=GREEN active_now=0 fabric_occupied=0 fleet_busy=0 fleet_unverifiable=0 ledger_cross_instance_safe=$LEDGER_CROSS_INSTANCE_SAFE intake_paused=1 redrive_paused=1"
 }
