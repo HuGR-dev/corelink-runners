@@ -48,7 +48,10 @@ class FakeStorage {
   }
   async transaction<T>(fn: (storage: TxnStorage) => Promise<T>): Promise<T> {
     const run = this.tail.then(async () => {
-      const snapshot = new Map([...this.map].map(([key, value]) => [key, clone(value)]));
+      // Values are cloned at the TxnStorage boundary; copying the map itself
+      // keeps each serialized transaction isolated without repeatedly cloning
+      // the entire growing proof ledger on every request.
+      const snapshot = new Map(this.map);
       const result = await fn(new TxnStorage(snapshot));
       this.map.clear();
       for (const [key, value] of snapshot) this.map.set(key, value);
@@ -98,15 +101,29 @@ function makeMetrics() {
   return { instance, binding: namespace(instance, "singleton") };
 }
 
+const testHmacKeys = new Map<string, Promise<CryptoKey>>();
+function hmacKey(secret: string): Promise<CryptoKey> {
+  let key = testHmacKeys.get(secret);
+  if (!key) {
+    key = crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    testHmacKeys.set(secret, key);
+  }
+  return key;
+}
 function hmac(secret: string, body: Uint8Array): Promise<string> {
-  return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
-    .then((key) => crypto.subtle.sign("HMAC", key, body))
+  return hmacKey(secret).then((key) => crypto.subtle.sign("HMAC", key, body))
     .then((mac) => `sha256=${[...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("")}`);
 }
 
+const testA317Keys = new Map<string, Promise<CryptoKey>>();
 async function a317ProofHeader(claim: Record<string, unknown>, key = A317_PROOF_TEST_KEY) {
   const encoded = btoa(JSON.stringify(claim)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-  const signing = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  let signingPromise = testA317Keys.get(key);
+  if (!signingPromise) {
+    signingPromise = crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    testA317Keys.set(key, signingPromise);
+  }
+  const signing = await signingPromise;
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", signing, new TextEncoder().encode(`a317:v1\n${encoded}`)));
   return `${encoded}.${btoa(String.fromCharCode(...mac)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
 }
