@@ -48,6 +48,9 @@ LIFECYCLE_AUTH_TOKEN_FILE="${CORELINK_LIFECYCLE_AUTH_TOKEN_FILE}"
 [[ "$(stat -f '%Lp' "${LIFECYCLE_AUTH_TOKEN_FILE}")" == 600 ]] ||
   die "CoreLink lifecycle token file must have mode 600"
 [[ -s "${LIFECYCLE_AUTH_TOKEN_FILE}" ]] || die "CoreLink lifecycle token file is empty"
+if cmp -s "${SPAWN_AUTH_TOKEN_FILE}" "${LIFECYCLE_AUTH_TOKEN_FILE}"; then
+  die "CoreLink spawn and lifecycle token files must contain distinct credentials"
+fi
 umask 077
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/a28-manual-canary.XXXXXXXX")" ||
   die "unable to create secure temporary directory"
@@ -56,6 +59,7 @@ SPAWN_AUTH_HEADER_FILE="${TMP_DIR}/spawn-auth.header"
 LIFECYCLE_AUTH_HEADER_FILE="${TMP_DIR}/lifecycle-auth.header"
 SPAWN_BODY_FILE="${TMP_DIR}/spawn.json"
 TEARDOWN_BODY_FILE="${TMP_DIR}/teardown.json"
+JIT_FILE="${TMP_DIR}/jitconfig"
 RUNNER_ID=""
 HANDLE=""
 trap cleanup EXIT INT TERM
@@ -107,6 +111,8 @@ JIT_JSON="$(gh api --method POST \
   die "GitHub JIT mint failed"
 JIT="$(jq -er '.encoded_jit_config' <<<"${JIT_JSON}")" || die "JIT response missing encoded_jit_config"
 RUNNER_ID="$(jq -r '.runner.id // empty' <<<"${JIT_JSON}")"
+printf '%s' "${JIT}" >"${JIT_FILE}"
+chmod 600 "${JIT_FILE}"
 
 gh workflow run a28-manual-runner-canary.yml --repo "${GH_REPO}" --ref "${CANARY_REF:-main}" \
   -f "label=${LABEL}"
@@ -134,7 +140,7 @@ for _ in $(seq 1 30); do
 done
 [[ -n "${RUN_ID}" && -n "${JOB_ID}" ]] || die "dispatched workflow job with exact canary label did not appear"
 
-if ! jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --arg jit "${JIT}" \
+if ! jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --rawfile jit "${JIT_FILE}" \
     --arg label "${LABEL}" --argjson expiry "${CANARY_EXPIRY_MS:-900000}" \
     '{image_digest:$image,jitconfig:$jit,env:{CORELINK_RUNNER_JITCONFIG:$jit},labels:[$label],expiry_ms:$expiry}' \
     >"${SPAWN_BODY_FILE}"; then
