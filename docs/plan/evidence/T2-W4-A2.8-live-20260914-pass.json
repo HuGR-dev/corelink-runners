@@ -1,0 +1,67 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w4-a2.8-live-20260914-pass",
+  "kind": "probe",
+  "status": "PASS",
+  "observed_at": "2026-09-14T17:06:43Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "900fe1d88a51c83b1e9ab52c410b326d99dcbc7d",
+    "path": "docs/plan/evidence/T2-W4-A2.8-live-20260914-pass.json"
+  },
+  "claims": ["T2-W4:A2.8", "T2-W4:runner-container-boot"],
+  "version": {
+    "id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4/version-27",
+    "digest": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330"
+  },
+  "evidence": {
+    "campaign": {
+      "attempted": 10,
+      "succeeded": 10,
+      "failed": 0,
+      "retry_count": 0,
+      "repository": "personal private disposable repository",
+      "launcher_commit": "c663f94a4593e42480809a809d56dbea9c5c29bf",
+      "default_branch": "main",
+      "independent_cold_audit": "APPROVE"
+    },
+    "attempts": [
+      {"attempt": 1, "run_id": "34868678628", "job_id": "104058871644", "observed_at": "2026-09-14T16:27:17Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 2, "run_id": "34871163021", "job_id": "104067117917", "observed_at": "2026-09-14T16:52:40.254691Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 3, "run_id": "34871492731", "job_id": "104068208656", "observed_at": "2026-09-14T16:54:52Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 4, "run_id": "34871549463", "job_id": "104068390526", "observed_at": "2026-09-14T16:55:23Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 5, "run_id": "34871603902", "job_id": "104068579571", "observed_at": "2026-09-14T16:56:03Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 6, "run_id": "34871667554", "job_id": "104068799606", "observed_at": "2026-09-14T16:56:41Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 7, "run_id": "34871728637", "job_id": "104069004620", "observed_at": "2026-09-14T16:57:13Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 8, "run_id": "34871784172", "job_id": "104069186116", "observed_at": "2026-09-14T16:57:53Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 9, "run_id": "34871859793", "job_id": "104069451147", "observed_at": "2026-09-14T16:58:44Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"},
+      {"attempt": 10, "run_id": "34871941902", "job_id": "104069733559", "observed_at": "2026-09-14T16:59:34Z", "runner_container_version": 27, "teardown_http": 204, "status_http": 404, "result": "success"}
+    ],
+    "deployed_runner_container": {
+      "application_id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+      "version": 27,
+      "image_digest": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330"
+    },
+    "per_attempt_invariants": {
+      "fresh_unique_uuid_jit_label": true,
+      "real_runner_boot": true,
+      "image_digest_match": true,
+      "teardown_http": 204,
+      "status_http": 404,
+      "status_body": {"status": "gone"},
+      "repository_runner_inventory": 0
+    },
+    "post_campaign": {
+      "disposable_repository_deleted": true,
+      "production_admission_pauses_changed": false,
+      "unrelated_workload_changed": false,
+      "fleet_and_leases_idle": true
+    },
+    "provenance": [
+      "~/.codex/corelink-b2-ci/evidence/a28-cold-campaign-verified-matrix-20260914.json",
+      "~/.codex/corelink-b2-ci/evidence/a28-cold-campaign-10of10-20260914.md",
+      "Independent cold audit: APPROVE"
+    ],
+    "scope_note": "A2.8 runner image publication and real job boot are PASS. A2.9 remains pending its separate 3/3 timing proof; F008 W3 remains open."
+  }
+}

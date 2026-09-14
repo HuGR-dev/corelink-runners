@@ -3403,6 +3403,25 @@
         "Normative A2.4/A2.5/A2.7/A2.10 lines 561-567 of docs/plan/2026-08-30-golive-remediation-plan.md.",
         "docs/plan/execution/2026-09-13-t2-w2b-v26-adjudication.md"
       ]
+    },
+    {
+      "at": "2026-09-14T17:06:43+00:00",
+      "task": "T2-W4 A2.8 live 10/10 cold campaign",
+      "owner": "root",
+      "state": "integrated",
+      "scope": [
+        "docs/plan/evidence/T2-W4-A2.8-live-20260914-pass.json",
+        "docs/plan/delivery-ledger.json"
+      ],
+      "wp": "T2-W4",
+      "role": "integrator",
+      "source_commit": "900fe1d88a51c83b1e9ab52c410b326d99dcbc7d",
+      "conclusion": "A2.8 PASS: ten independent cold starts booted jobs on RunnerContainer version 27 at the expected immutable digest, with per-attempt teardown and exact-handle gone proof. A2.9 remains pending; F008 W3 remains open.",
+      "evidence": [
+        "docs/plan/evidence/T2-W4-A2.8-live-20260914-pass.json",
+        "Independent cold audit APPROVE",
+        "10/10 successful runs, zero failures and zero retries"
+      ]
     }
   ],
   "execution_plan": "docs/plan/execution/2026-09-06-closeout-three-bundles.md",
