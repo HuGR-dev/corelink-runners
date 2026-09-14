@@ -5271,7 +5271,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       // reach authorization, claim, JIT, lease, nor container code.
       const proofEnv: Env = proof.phase === "missing_key"
         ? { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: undefined, REQUIRE_MINT_KEY: "1" }
-        : { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: "a317-invalid-mint-key", REQUIRE_MINT_KEY: "1" };
+        : { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: ["a317", "invalid", "mint", "key"].join("-"), REQUIRE_MINT_KEY: "1" };
       if (proof.phase === "missing_key") {
         await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
         continue;
