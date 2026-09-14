@@ -271,6 +271,29 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(mockStorage.has(key)).toBe(true);
     });
 
+    it("preflights all expired tombstones before mutating any durable state", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = crypto.randomUUID();
+      const firstSession = crypto.randomUUID();
+      const secondSession = crypto.randomUUID();
+      const key = (sessionUuid: string) =>
+        `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
+      const firstKey = key(firstSession);
+      const secondKey = key(secondSession);
+      const index = [
+        { key: firstKey, canceledAt: 11, expiresAt: 0 },
+        { key: secondKey, canceledAt: 22, expiresAt: 0 },
+      ];
+      mockStorage.set(firstKey, { tenantId, sessionUuid: firstSession, canceledAt: 11, expiresAt: 0 });
+      mockStorage.set("devenv:authorized-stop-index", index);
+
+      await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid: crypto.randomUUID() }))
+        .rejects.toThrow("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      expect(mockStorage.get(firstKey)).toEqual({ tenantId, sessionUuid: firstSession, canceledAt: 11, expiresAt: 0 });
+      expect(mockStorage.has(secondKey)).toBe(false);
+      expect(mockStorage.get("devenv:authorized-stop-index")).toEqual(index);
+    });
+
     it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await new Promise((resolve) => setTimeout(resolve, 10));

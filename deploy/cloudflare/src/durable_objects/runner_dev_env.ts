@@ -321,12 +321,15 @@ export class RunnerDevEnvDO extends Container<any> {
     const index = raw ?? [];
     this.validateStopTombstoneIndex(index);
     const live = index.filter((entry) => entry && typeof entry.key === "string" && entry.expiresAt > now);
-    for (const expired of index) {
-      if (!live.includes(expired)) {
-        const stored = await this.ctx.storage.get<{ canceledAt: number }>(expired.key);
-        if (!stored || stored.canceledAt !== expired.canceledAt) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
-        await this.ctx.storage.delete(expired.key);
-      }
+    const expired = index.filter((entry) => !live.includes(entry));
+    // Preflight every expired entry before mutating any tombstone or index. A
+    // later corrupt owner must not leave an earlier valid entry deleted.
+    for (const entry of expired) {
+      const stored = await this.ctx.storage.get<{ canceledAt: number }>(entry.key);
+      if (!stored || stored.canceledAt !== entry.canceledAt) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+    }
+    for (const entry of expired) {
+      await this.ctx.storage.delete(entry.key);
     }
     if (live.length !== index.length) {
       if (live.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, live);
