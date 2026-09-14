@@ -325,6 +325,7 @@ usage_fetch_case() {
   mock="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-curl.XXXXXX")"
   args="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-args.XXXXXX")"
   log="$(mktemp "${TMPDIR:-/tmp}/au1.8-usage-log.XXXXXX")"
+  # shellcheck disable=SC2016 # mock script text must retain literal runtime expansions.
   printf '%s\n' '#!/bin/bash' \
     'printf "%s\n" "$*" > "${MOCK_ARGS:?}"' \
     'out=""; headers=""; while (($#)); do case "$1" in -o) out="${2:?}"; shift 2 ;; -D) headers="${2:?}"; shift 2 ;; -w) shift 2 ;; *) shift ;; esac; done' \
@@ -547,6 +548,7 @@ for fixture in \
   fi
 done
 
+# shellcheck disable=SC2016 # jq program is data consumed later by jq, not shell text.
 pause_filter='([.[] | select(.name == "AUTOSCALER_REDRIVE_PAUSED" or .name == "AUTOSCALER_INTAKE_PAUSED")] | sort_by(.name)) as $pauses | ($pauses | length) == 2 and ($pauses | map(.name) | unique | length) == 2 and all($pauses[]; (.type == "plain_text" and (.temporary_value | type) == "string" and .temporary_value == "1"))'
 if ! jq -e "$pause_filter" <<< '[{"name":"AUTOSCALER_REDRIVE_PAUSED","type":"plain_text","temporary_value":"1"},{"name":"AUTOSCALER_INTAKE_PAUSED","type":"plain_text","temporary_value":"1"}]' >/dev/null; then
   echo "FAIL: both pause bindings set to string 1 must pass" >&2; exit 1
