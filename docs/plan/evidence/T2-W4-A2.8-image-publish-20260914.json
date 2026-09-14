@@ -1,0 +1,27 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w4-a2.8-image-publish-20260914",
+  "kind": "probe",
+  "status": "PASS",
+  "observed_at": "2026-09-14T06:45:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f",
+    "path": "docs/plan/evidence/T2-W4-A2.8-image-publish-20260914.json"
+  },
+  "claims": ["T2-W4:image-push"],
+  "version": {"id": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f"},
+  "evidence": {
+    "source_revision": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f",
+    "tree": "23317",
+    "platform": "linux/amd64",
+    "local_image_id": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330",
+    "registry_tag": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer:8f9a317",
+    "remote_ref": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330",
+    "remote_digest": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330",
+    "push_client": "wrangler containers push",
+    "push_result": "success",
+    "mutations": {"registry_push": true, "worker_config": false, "worker_deploy": false, "container_rollout": false},
+    "scope_note": "Sanitized local pipeline substitute proof only; pin, deploy, rollout, and live job qualification remain separate gates."
+  }
+}
