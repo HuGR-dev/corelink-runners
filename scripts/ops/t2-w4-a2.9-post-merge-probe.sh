@@ -23,6 +23,8 @@ readonly FABRICD_URL_DEFAULT="https://corelink-fabricd.gmhelmold.workers.dev"
 readonly FREEZE_FIX="99d5e39e66a69d44226dc9eed0faf0f7b384156f"
 readonly FABRICD_FREEZE_FIX="8571f3cf38f11cca9b1f0752bf028e3dd982bb52"
 readonly FABRIC_FIX="70a880e1ba7902546931f2d615859b3a632912b5"
+readonly FABRICD_IMAGE_BUILD="543fa5f253580056eb5f526d3f6d8694839e9c7c"
+readonly FABRICD_HISTORICAL_IMAGE_BUILD="01560b697c87b92bf1572ceec175d5350034aebb"
 readonly MAX_SECONDS=900
 readonly REQUIRED_COUNTERS=(webhook_spawn_claimed jit_minted runner_spawned)
 
@@ -34,7 +36,7 @@ SPAWN_TOKEN_FILE="$OOB_DIR/cf-spawn-token" FLEET_KEY_FILE="$OOB_DIR/fleet-busy-r
 FABRICD_APP_ID='' CANARY_IMAGE='alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' VERIFY_BIN="$ROOT_DEFAULT/scripts/rotation/corelink-b2/bin/verify-close-attestation.mjs"
 POLL_INTERVAL=2 POLL_LIMIT=5 TAIL_SECONDS=8 FABRICD_DEPLOY_TIMEOUT=60 THAW_ACK=''
 RUN_ID=''
-TMP_DIR='' START_EPOCH=0 DEADLINE_EPOCH=0 SELFTEST=0 OBSERVED_VERSION='' OBSERVED_DEPLOYMENT_ID='' OBSERVED_DEPLOYED_AT='' OBSERVED_FABRICD_VERSION='' OBSERVED_FABRICD_DEPLOYMENT_ID='' OBSERVED_FABRICD_AT='' OBSERVED_FABRICD_DIGEST='' OBSERVED_FABRICD_APP_ID='' CANARY_LEASE='' CANARY_RELEASED=0 THAW_INTENT=0 FINAL_FABRICD_FROZEN=0 SPAWN_REMAINED_FROZEN=false THAW_DEPLOYMENT='null' REFREEZE_DEPLOYMENT='null' SPAWN_FINAL_FREEZE_FACTS='null' FABRICD_FREEZE_PROVENANCE='null'
+TMP_DIR='' START_EPOCH=0 DEADLINE_EPOCH=0 SELFTEST=0 OBSERVED_VERSION='' OBSERVED_DEPLOYMENT_ID='' OBSERVED_DEPLOYED_AT='' OBSERVED_FABRICD_VERSION='' OBSERVED_FABRICD_DEPLOYMENT_ID='' OBSERVED_FABRICD_AT='' OBSERVED_FABRICD_DIGEST='' OBSERVED_FABRICD_APP_ID='' CANARY_LEASE='' CANARY_RELEASED=0 THAW_INTENT=0 FINAL_FABRICD_FROZEN=0 SPAWN_REMAINED_FROZEN=false THAW_DEPLOYMENT='null' REFREEZE_DEPLOYMENT='null' EMERGENCY_REFREEZE_DEPLOYMENT='null' SPAWN_FINAL_FREEZE_FACTS='null' FABRICD_FREEZE_PROVENANCE='null'
 ROW_METRICS_BEFORE='null' ROW_METRICS_AFTER='null'
 
 die() { printf 'A2.9 REFUSED: %s\n' "$*" >&2; exit 2; }
@@ -268,14 +270,14 @@ emit_evidence() {
     --arg merge_ts "$MERGE_TS" --arg worker "$WORKER" --arg version "$EXPECTED_VERSION" --arg observed "$OBSERVED_VERSION" --arg deployment_id "$OBSERVED_DEPLOYMENT_ID" --arg observed_at "$OBSERVED_DEPLOYED_AT" \
     --arg fabricd "$FABRICD" --arg fabricd_version "$FABRICD_VERSION" --arg fabricd_observed "$OBSERVED_FABRICD_VERSION" --arg fabricd_deployment_id "$OBSERVED_FABRICD_DEPLOYMENT_ID" --arg fabricd_app_id "$OBSERVED_FABRICD_APP_ID" --arg fabricd_expected_digest "$FABRICD_DIGEST" --arg fabricd_observed_digest "$OBSERVED_FABRICD_DIGEST" --arg fabricd_at "$OBSERVED_FABRICD_AT" \
     --arg note "$note" --argjson live_qualification "$live_qualification" --argjson started "$START_EPOCH" --argjson elapsed "$elapsed" \
-    --argjson rows "$json_rows" --arg fabric_sha "$FABRIC_FIX" --argjson thaw "$THAW_DEPLOYMENT" --argjson refreeze "$REFREEZE_DEPLOYMENT" --argjson spawn_final "$SPAWN_FINAL_FREEZE_FACTS" --argjson provenance "$FABRICD_FREEZE_PROVENANCE" --argjson spawn_frozen "$SPAWN_REMAINED_FROZEN" \
+    --argjson rows "$json_rows" --arg fabric_sha "$FABRIC_FIX" --argjson thaw "$THAW_DEPLOYMENT" --argjson refreeze "$REFREEZE_DEPLOYMENT" --argjson emergency_refreeze "$EMERGENCY_REFREEZE_DEPLOYMENT" --argjson spawn_final "$SPAWN_FINAL_FREEZE_FACTS" --argjson provenance "$FABRICD_FREEZE_PROVENANCE" --argjson spawn_frozen "$SPAWN_REMAINED_FROZEN" \
     '{schema_version:$schema,artifact_id:$artifact,mode:$mode,status:$status,promotion:$promotion,live_qualification:$live_qualification,
       source:{repository:"corelink-runners",pull_request:563,merge_sha:$sha,merge_timestamp:$merge_ts},
       worker:{name:$worker,expected_deployed_version:$version,observed_deployed_version:$observed,observed_deployment_id:$deployment_id,observed_deployed_at:$observed_at},
       fabricd:{name:$fabricd,expected_deployed_version:$fabricd_version,observed_deployed_version:$fabricd_observed,observed_deployment_id:$fabricd_deployment_id,observed_app_id:$fabricd_app_id,expected_digest:$fabricd_expected_digest,observed_digest:$fabricd_observed_digest,observed_deployed_at:$fabricd_at},
       bounds:{max_elapsed_s:900,elapsed_s:$elapsed,started_epoch:$started},rows:$rows,
       fabric_fix:([$rows[] | select(.fix == $fabric_sha)] | if length == 1 then {sha:$fabric_sha,status:(if .[0].pass then "PASS" else "FAIL" end),close_response:(if .[0].pass then "signed_v1_v2_verified" else "not_verified" end)} else {sha:$fabric_sha,status:"FAIL",close_response:"not_verified"} end),
-      operational_transition:{fabricd_thaw:$thaw,fabricd_refreeze:$refreeze,spawn_final_freeze_facts:$spawn_final,spawn_remained_frozen:$spawn_frozen,final_fabricd_frozen:($refreeze != null)},
+      operational_transition:{fabricd_thaw:$thaw,fabricd_refreeze:$refreeze,emergency_fabricd_refreeze:$emergency_refreeze,spawn_final_freeze_facts:$spawn_final,spawn_remained_frozen:$spawn_frozen,final_fabricd_frozen:(($refreeze != null) or ($emergency_refreeze != null))},
       fabricd_freeze_provenance:$provenance,
       secrets:"excluded",response_bodies:"excluded",notes:$note,actions:"not invoked",deploy:"controlled_fabricd_thaw_refreeze_only",merge:"not invoked"}' \
     > "$destination.tmp"
@@ -448,27 +450,37 @@ metrics_equal() {
   jq -e --argjson before "$(metric_values "$before")" --argjson after "$(metric_values "$after")" '$before == $after' >/dev/null
 }
 
+fabricd_snapshot_epoch_valid() {
+  local epoch=$1 emergency=${2:-0}
+  (( epoch >= MERGE_EPOCH )) || return 1
+  [[ "$emergency" == 1 ]] || (( epoch <= MERGE_EPOCH + MAX_SECONDS ))
+}
+
 assert_fabricd_freeze_provenance() {
   local config="$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc" config_sha
-  git -C "$ROOT" merge-base --is-ancestor "$FABRICD_FREEZE_FIX" 01560b697c87b92bf1572ceec175d5350034aebb || die 'Fabricd freeze fix is not an ancestor of exact 01560b image build source'
+  git -C "$ROOT" merge-base --is-ancestor "$FABRICD_FREEZE_FIX" "$FABRICD_HISTORICAL_IMAGE_BUILD" || die 'Fabricd freeze fix is not an ancestor of historical 01560b image build source'
+  git -C "$ROOT" cat-file -e "$FABRICD_IMAGE_BUILD^{commit}" || die 'published Fabricd image source commit is unavailable for provenance proof'
   git -C "$ROOT" merge-base --is-ancestor "$FABRICD_FREEZE_FIX" "$MERGE_SHA" || die 'Fabricd freeze fix is not an ancestor of authoritative merge SHA'
   [[ -f "$config" && ! -L "$config" ]] || die 'Fabricd Wrangler configuration is missing for provenance proof'
   grep -Fq "$FABRICD_DIGEST" "$config" || die 'Fabricd configuration does not bind expected immutable digest'
   config_sha="$(shasum -a 256 "$config" | awk '{print $1}')" || die 'unable to hash Fabricd configuration provenance'
   [[ "$config_sha" =~ ^[0-9a-f]{64}$ ]] || die 'Fabricd configuration hash malformed'
-  FABRICD_FREEZE_PROVENANCE="$(jq -nc --arg fix "$FABRICD_FREEZE_FIX" --arg image_build 01560b697c87b92bf1572ceec175d5350034aebb --arg merge "$MERGE_SHA" --arg digest "$FABRICD_DIGEST" --arg config_sha256 "$config_sha" '{freeze_fix:$fix,image_build_commit:$image_build,merge_sha:$merge,digest:$digest,config_sha256:$config_sha256}')"
+  FABRICD_FREEZE_PROVENANCE="$(jq -nc --arg fix "$FABRICD_FREEZE_FIX" --arg image_build "$FABRICD_IMAGE_BUILD" --arg merge "$MERGE_SHA" --arg digest "$FABRICD_DIGEST" --arg config_sha256 "$config_sha" '{freeze_fix:$fix,image_build_commit:$image_build,merge_sha:$merge,digest:$digest,config_sha256:$config_sha256}')"
 }
 
 fabricd_provider_snapshot() {
-  local phase=$1 deployments latest version deployment_id created epoch info
+  local phase=$1 emergency=${2:-0} deployments latest version deployment_id created epoch info
   deployments="$(run_wrangler_cmd deployments list --name "$FABRICD" --json)" || return 1
   latest="$(jq -ce 'def rows: if type == "array" then . elif .items? then .items elif .result? then .result elif .deployments? then .deployments else [] end; [rows[] | {deployment_id:(.id // .deployment_id // ""),version:(.version_id // .version // .versions[0].version_id // ""),created:(.created_on // .created_at // .deployment_triggered_at // "")} | select(.deployment_id != "" and .version != "" and .created != "")] | sort_by(.created) | last' <<<"$deployments")" || return 1
   version="$(jq -r '.version' <<<"$latest")"; deployment_id="$(jq -r '.deployment_id' <<<"$latest")"; created="$(jq -r '.created' <<<"$latest")"
   epoch="$(parse_epoch "$created")" || return 1
-  (( epoch >= MERGE_EPOCH && epoch <= MERGE_EPOCH + MAX_SECONDS )) || return 1
+  fabricd_snapshot_epoch_valid "$epoch" "$emergency" || return 1
   info="$(run_wrangler_cmd containers info "$FABRICD_APP_ID")" || return 1
   jq -e --arg digest "$FABRICD_DIGEST" '.name == "corelink-fabricd-fabricdcontainer" and ([.. | strings | scan("sha256:[0-9a-f]{64}")] | unique) == [$digest]' <<<"$info" >/dev/null || return 1
-  jq -nc --arg phase "$phase" --arg version "$version" --arg deployment_id "$deployment_id" --arg deployed_at "$created" --arg digest "$FABRICD_DIGEST" '{phase:$phase,version:$version,deployment_id:$deployment_id,deployed_at:$deployed_at,digest:$digest}'
+  if [[ "$emergency" == 1 ]]; then
+    jq -e 'any(.. | objects; ((.FABRIC_ADMISSION_PAUSED? // .fabric_admission_paused? // "") == "1") or ((.name? // "") == "FABRIC_ADMISSION_PAUSED" and (.value? // .current? // "") == "1"))' <<<"$info" >/dev/null || return 1
+  fi
+  jq -nc --arg phase "$phase" --arg version "$version" --arg deployment_id "$deployment_id" --arg deployed_at "$created" --arg digest "$FABRICD_DIGEST" --arg emergency "$emergency" '{phase:$phase,version:$version,deployment_id:$deployment_id,deployed_at:$deployed_at,digest:$digest} + (if $emergency == "1" then {emergency:true,admission_paused:"1"} else {} end)'
 }
 
 fabricd_deploy_phase() {
@@ -476,14 +488,15 @@ fabricd_deploy_phase() {
   output="$TMP_DIR/fabricd-${phase}.out"; error="$TMP_DIR/fabricd-${phase}.err"
   if [[ "$emergency" == 1 ]]; then limit=$FABRICD_DEPLOY_TIMEOUT; else remaining="$(remaining_seconds)"; (( remaining > 0 )) || return 124; limit=$FABRICD_DEPLOY_TIMEOUT; (( limit < remaining )) || limit=$remaining; fi
   : > "$output"; : > "$error"; chmod 600 "$output" "$error"
-  launch_group "$output" "$error" "$WRANGLER_BIN" deploy --config "$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc" --keep-vars --var "FABRIC_ADMISSION_PAUSED:$paused" --containers-rollout=immediate & pid=$!
+  launch_group "$output" "$error" "$WRANGLER_BIN" deploy --config "$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc" --keep-vars --strict --var "FABRIC_ADMISSION_PAUSED:$paused" --containers-rollout=immediate & pid=$!
   ( sleep "$limit"; kill -TERM -- "-$pid" 2>/dev/null || true; sleep 1; kill -KILL -- "-$pid" 2>/dev/null || true ) & watchdog=$!
   set +e; wait "$pid"; rc=$?; set -e
   kill "$watchdog" 2>/dev/null || true; wait "$watchdog" 2>/dev/null || true
   scrub_file "$error"
   [[ "$rc" == 0 ]] || return "$rc"
-  snapshot="$(fabricd_provider_snapshot "$phase")" || return 1
-  if [[ "$phase" == thaw ]]; then THAW_DEPLOYMENT="$snapshot"; else REFREEZE_DEPLOYMENT="$snapshot"; FINAL_FABRICD_FROZEN=1; fi
+  snapshot="$(fabricd_provider_snapshot "$phase" "$emergency")" || return 1
+  if [[ "$emergency" == 1 ]]; then EMERGENCY_REFREEZE_DEPLOYMENT="$snapshot"; FINAL_FABRICD_FROZEN=1
+  elif [[ "$phase" == thaw ]]; then THAW_DEPLOYMENT="$snapshot"; else REFREEZE_DEPLOYMENT="$snapshot"; FINAL_FABRICD_FROZEN=1; fi
 }
 
 controlled_thaw() { THAW_INTENT=1; fabricd_deploy_phase thaw 0; }
@@ -712,7 +725,7 @@ mock() {
   THAW_DEPLOYMENT="$(jq -nc --arg timestamp "$MERGE_TS" --arg digest "$FABRICD_DIGEST" '{phase:"thaw",version:"mock-fabricd-thaw",deployment_id:"mock-thaw",deployed_at:$timestamp,digest:$digest}')"
   REFREEZE_DEPLOYMENT="$(jq -nc --arg timestamp "$MERGE_TS" --arg digest "$FABRICD_DIGEST" '{phase:"refreeze",version:"mock-fabricd-refreeze",deployment_id:"mock-refreeze",deployed_at:$timestamp,digest:$digest}')"
   SPAWN_FINAL_FREEZE_FACTS='{"before":{"webhook_spawn_claimed":0,"jit_minted":0,"runner_spawned":0},"after":{"webhook_spawn_claimed":0,"jit_minted":0,"runner_spawned":0}}'; SPAWN_REMAINED_FROZEN=true
-  FABRICD_FREEZE_PROVENANCE="$(jq -nc --arg fix "$FABRICD_FREEZE_FIX" --arg digest "$FABRICD_DIGEST" '{freeze_fix:$fix,image_build_commit:"01560b697c87b92bf1572ceec175d5350034aebb",digest:$digest,config_sha256:"mock"}')"
+  FABRICD_FREEZE_PROVENANCE="$(jq -nc --arg fix "$FABRICD_FREEZE_FIX" --arg image_build "$FABRICD_IMAGE_BUILD" --arg digest "$FABRICD_DIGEST" '{freeze_fix:$fix,image_build_commit:$image_build,digest:$digest,config_sha256:"mock"}')"
   record_row "$FREEZE_FIX" admission-freeze true 503 'mock authenticated spawn request -> exact frozen-admission response with no allocation' 0
   record_row "$FABRICD_FREEZE_FIX" fabricd-admission-freeze true 503 'mock authenticated Fabricd lease acquire -> exact frozen-admission response with no allocation' 0
   record_row "$FABRIC_FIX" standalone-jobclose true 200 'mock HTTP 200 signed CloseResponse released=true capture_incomplete=false; v1/v2 verified; GET released; latency 12ms' 0
@@ -732,7 +745,7 @@ selftest() {
   rc=$?
   set -e
   [[ "$rc" == 0 ]] || die "mock selftest expected exit 0, got $rc"
-  jq -e '.schema_version == "a2.9/post-merge/v1" and .mode == "mock" and .status == "NON_PROMOTABLE" and .promotion == "never" and .live_qualification == false and (.rows|length) == 3 and all(.rows[]; .pass == true) and ([.rows[].fix]|sort) == (["99d5e39e66a69d44226dc9eed0faf0f7b384156f","8571f3cf38f11cca9b1f0752bf028e3dd982bb52","70a880e1ba7902546931f2d615859b3a632912b5"]|sort) and .fabric_fix.status == "PASS" and .operational_transition.spawn_remained_frozen == true and .operational_transition.spawn_final_freeze_facts.before == .operational_transition.spawn_final_freeze_facts.after and .operational_transition.fabricd_thaw.phase == "thaw" and .operational_transition.fabricd_refreeze.phase == "refreeze" and .fabricd_freeze_provenance.freeze_fix == "8571f3cf38f11cca9b1f0752bf028e3dd982bb52" and .fabricd_freeze_provenance.image_build_commit == "01560b697c87b92bf1572ceec175d5350034aebb" and .secrets == "excluded" and .bounds.elapsed_s <= .bounds.max_elapsed_s' "$out" >/dev/null || die 'mock evidence schema/non-promotable assertion failed'
+  jq -e '.schema_version == "a2.9/post-merge/v1" and .mode == "mock" and .status == "NON_PROMOTABLE" and .promotion == "never" and .live_qualification == false and (.rows|length) == 3 and all(.rows[]; .pass == true) and ([.rows[].fix]|sort) == (["99d5e39e66a69d44226dc9eed0faf0f7b384156f","8571f3cf38f11cca9b1f0752bf028e3dd982bb52","70a880e1ba7902546931f2d615859b3a632912b5"]|sort) and .fabric_fix.status == "PASS" and .operational_transition.spawn_remained_frozen == true and .operational_transition.spawn_final_freeze_facts.before == .operational_transition.spawn_final_freeze_facts.after and .operational_transition.fabricd_thaw.phase == "thaw" and .operational_transition.fabricd_refreeze.phase == "refreeze" and .fabricd_freeze_provenance.freeze_fix == "8571f3cf38f11cca9b1f0752bf028e3dd982bb52" and .fabricd_freeze_provenance.image_build_commit == "543fa5f253580056eb5f526d3f6d8694839e9c7c" and .secrets == "excluded" and .bounds.elapsed_s <= .bounds.max_elapsed_s' "$out" >/dev/null || die 'mock evidence schema/non-promotable assertion failed'
   ! grep -Eqi '(Bearer[[:space:]]+[A-Za-z0-9._~-]{12,}|corelink_[A-Za-z0-9._~-]{12,}|pat_[A-Za-z0-9._~-]{12,}|-----BEGIN|sha256=[0-9a-f]{64})' "$out" || die 'mock evidence contains secret-shaped material'
 
   MERGE_SHA=0123456789012345678901234567890123456789
@@ -792,6 +805,10 @@ selftest() {
   ! refreeze_required || die 'verified refreeze still required EXIT refreeze'
   FINAL_FABRICD_FROZEN=0; THAW_INTENT=0
   ! refreeze_required || die 'pre-thaw state incorrectly required refreeze'
+  MERGE_EPOCH=100
+  fabricd_snapshot_epoch_valid 1001 1 || die 'late emergency refreeze proof was rejected'
+  ! fabricd_snapshot_epoch_valid 1001 0 || die 'late normal deployment was accepted as promotable'
+  MERGE_EPOCH=0
 
   printf '%s\n' '#!/bin/sh' 'exit 99' > "$d/setsid"
   chmod 700 "$d/setsid"
