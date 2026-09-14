@@ -353,8 +353,6 @@ MINT_FIXTURE_FAILURE="not-run"
 MINT_FAILURE_DIAGNOSTIC="not-run"
 NEW_SECRET_TMP=""
 FINAL_DISARM_STATE="not-proven"
-declare -A STATE_CREATED_ON=()
-
 log_event() { printf '%s %s\n' "$(date -u +%FT%H:%M:%SZ)" "$*" >> "$EVENT_LOG"; }
 
 log_quiescence_leaf() { log_event "quiescence=RED leaf=$1"; }
