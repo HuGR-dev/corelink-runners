@@ -157,11 +157,29 @@ describe("tenant suspension credential consumer", () => {
 
   it("matches the paired close-generation validator for canonical identity", async () => {
     const fetchSpy = vi.fn(); vi.stubGlobal("fetch", fetchSpy);
-    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, tenant_id: INPUT.tenant_id.toUpperCase() }, deps())).rejects.toThrow("invalid tenant suspension input");
-    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: ` ${INPUT.event_id}` }, deps())).rejects.toThrow("invalid tenant suspension input");
-    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: "x".repeat(257) }, deps())).rejects.toThrow("invalid tenant suspension input");
-    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: "bad\u0001event" }, deps())).rejects.toThrow("invalid tenant suspension input");
+    const begin = vi.fn(async () => ({ complete: false, cursor: undefined }));
+    const authority = { ...deps().authority, beginTenantSuspension: begin } as never;
+    const invalid = [
+      { ...INPUT, tenant_id: INPUT.tenant_id.toUpperCase() },
+      { ...INPUT, event_id: ` ${INPUT.event_id}` },
+      { ...INPUT, event_id: "x".repeat(257) },
+      { ...INPUT, event_id: "bad\u0001event" },
+      // 128 astral characters are 512 UTF-8 bytes despite only 256 UTF-16 units.
+      { ...INPUT, event_id: "💥".repeat(128) },
+    ];
+    for (const input of invalid) await expect(consumeTenantSuspensionCredentials(ENV, input, { authority, revokeCredential: vi.fn() })).rejects.toThrow("invalid tenant suspension input");
+    expect(begin).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
+
+    const accepted = "x".repeat(256);
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...INPUT, event_id: accepted })));
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: accepted }, { authority, revokeCredential: vi.fn() })).resolves.toEqual({ complete: true });
+    expect(begin).toHaveBeenCalledTimes(1);
+
+    const acceptedAstral = "💥".repeat(64); // exactly 256 UTF-8 bytes
+    vi.stubGlobal("fetch", vi.fn(async () => response(200, { ...INPUT, event_id: acceptedAstral })));
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: acceptedAstral }, { authority, revokeCredential: vi.fn() })).resolves.toEqual({ complete: true });
+    expect(begin).toHaveBeenCalledTimes(2);
   });
 
   it("bounds a streaming body without content-length and cancels the reader", async () => {

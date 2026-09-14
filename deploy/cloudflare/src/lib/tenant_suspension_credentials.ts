@@ -27,10 +27,11 @@ const MAX_PAGE_RECORDS = 101;
 const MAX_RESPONSE_BYTES = 4096;
 const MAX_GENERATION = 9_223_372_036_854_775_807n;
 const UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UTF8_ENCODER = new TextEncoder();
 
 function validInput(input: TenantSuspensionInput): boolean {
   if (!input || typeof input !== "object") return false;
-  if (typeof input.event_id !== "string" || input.event_id.length === 0 || input.event_id.length > MAX_EVENT_ID || input.event_id.trim() !== input.event_id || /[\u0000-\u001f\u007f]/u.test(input.event_id)) return false;
+  if (typeof input.event_id !== "string" || input.event_id.length === 0 || UTF8_ENCODER.encode(input.event_id).byteLength > MAX_EVENT_ID || input.event_id.trim() !== input.event_id || /[\u0000-\u001f\u007f]/u.test(input.event_id)) return false;
   if (typeof input.tenant_id !== "string" || !UUID.test(input.tenant_id) || input.tenant_id !== input.tenant_id.toLowerCase()) return false;
   if (typeof input.lifecycle_generation !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(input.lifecycle_generation)) return false;
   try { return BigInt(input.lifecycle_generation) <= MAX_GENERATION; } catch { return false; }
