@@ -26,6 +26,8 @@ need CANARY_IMAGE_DIGEST
   die "CANARY_IMAGE_DIGEST must be a full @sha256:-pinned image reference"
 [[ "${CANARY_EXPIRY_MS:-900000}" =~ ^[1-9][0-9]*$ ]] ||
   die "CANARY_EXPIRY_MS must be a positive integer"
+[[ "${GH_REPO}" == "HuGR-Labs/corelink-runners" ]] ||
+  die "GH_REPO must be HuGR-Labs/corelink-runners for the A2.8 canary"
 
 command -v gh >/dev/null || die "gh is required"
 command -v jq >/dev/null || die "jq is required"
@@ -93,13 +95,14 @@ if [[ -z "${LEASE_ID}" ]]; then
   # malformed body after admission, recover only an unambiguous newly-created
   # held lease before failing; never leave a lease silently unreleased.
   now_ms=$(( $(date +%s) * 1000 ))
-  candidates="$(curl --silent --show-error --fail-with-body \
+  mapfile -t candidate_ids < <(curl --silent --show-error --fail-with-body \
     "${FABRIC_URL}/v1/leases" -H "Authorization: Bearer ${FABRIC_PAT}" |
     jq -r --argjson start "${ACQUIRE_STARTED_MS}" --argjson now "${now_ms}" \
       --argjson ttl "${CANARY_EXPIRY_MS:-900000}" \
-      '.leases[] | select(.state == "held" and .created_at_ms >= $start and .created_at_ms <= $now and .deadline_ms != null and .deadline_ms >= ($start + $ttl - 10000) and .deadline_ms <= ($now + $ttl + 10000)) | .lease_id')" || true
-  [[ "$(wc -l <<<"${candidates}")" -eq 1 ]] || die "acquire response missing lease id; no unambiguous lease to cancel"
-  LEASE_ID="${candidates}"
+      '.leases[] | select(.state == "held" and .created_at_ms >= $start and .created_at_ms <= $now and .deadline_ms != null and .deadline_ms >= ($start + $ttl - 10000) and .deadline_ms <= ($now + $ttl + 10000)) | .lease_id | select(type == "string" and length > 0)') || true
+  [[ "${#candidate_ids[@]}" -eq 1 && "${candidate_ids[0]}" =~ ^[^[:space:]]+$ ]] ||
+    die "acquire response missing lease id; possible lease is unresolved—ESCALATE for manual lease review"
+  LEASE_ID="${candidate_ids[0]}"
   die "acquire response missing lease id; recovered and cancelled lease"
 fi
 
