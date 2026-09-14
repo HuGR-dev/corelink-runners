@@ -19,7 +19,10 @@ export interface TenantSuspensionConsumerDependencies {
   revokeCredential(identity: CredentialIdentity): Promise<void>;
 }
 
-const MAX_EVENT_ID = 512;
+// Keep the dispatcher-side envelope validator identical to the paired
+// close-generation endpoint. A looser local check would turn malformed input
+// into a remote 400 after the durable receipt has already been created.
+const MAX_EVENT_ID = 256;
 const MAX_PAGE_RECORDS = 101;
 const MAX_RESPONSE_BYTES = 4096;
 const MAX_GENERATION = 9_223_372_036_854_775_807n;
@@ -27,8 +30,8 @@ const UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-
 
 function validInput(input: TenantSuspensionInput): boolean {
   if (!input || typeof input !== "object") return false;
-  if (typeof input.event_id !== "string" || input.event_id.length === 0 || input.event_id.length > MAX_EVENT_ID) return false;
-  if (typeof input.tenant_id !== "string" || !UUID.test(input.tenant_id)) return false;
+  if (typeof input.event_id !== "string" || input.event_id.length === 0 || input.event_id.length > MAX_EVENT_ID || input.event_id.trim() !== input.event_id || /[\u0000-\u001f\u007f]/u.test(input.event_id)) return false;
+  if (typeof input.tenant_id !== "string" || !UUID.test(input.tenant_id) || input.tenant_id !== input.tenant_id.toLowerCase()) return false;
   if (typeof input.lifecycle_generation !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(input.lifecycle_generation)) return false;
   try { return BigInt(input.lifecycle_generation) <= MAX_GENERATION; } catch { return false; }
 }
