@@ -1,19 +1,19 @@
-import { ComputeBudgetClient } from "./lib/fixture-placeholder";
-import { ComputeObligations, type ComputeBinding } from "./lib/fixture-placeholder";
-import { NormalIntakeInbox, fixture-placeholder, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
-import { fixture-placeholder } from "./lib/fixture-placeholder";
-import { fixture-placeholder } from "./lib/fixture-placeholder";
-import { RetryEpochAuthority } from "./lib/fixture-placeholder";
-import { retryEpochClient, type fixture-placeholder } from "./lib/retry_epoch_client";
+import { ComputeBudgetClient } from "./lib/compute_budget_client";
+import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
+import { NormalIntakeInbox, acquireInstallationFenceInTransaction, installationFenceKey, installationTombstoneKey, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { JobAttributionAuthority } from "./lib/job_attribution_authority";
+import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
+import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
+import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
-import { authorizeRunner, fixture-placeholder, fixture-placeholder } from "./lib/fixture-placeholder";
-import { fixture-placeholder } from "./lib/fixture-placeholder";
-import { fixture-placeholder } from "./lib/fixture-placeholder";
-import { fixture-placeholder } from "./lib/fixture-placeholder";
+import { authorizeRunner, inspectRunnerAuthorization, RunnerAuthorizationError } from "./lib/runner_authorization";
+import { adoptIssuedRunnerCredential } from "./lib/runner_credential_adoption";
+import { runnerCredentialLeaseId } from "./lib/runner_credential_lease";
+import { ConcurrencyAuthority } from "./lib/concurrency_authority";
 // CoreLink spawn-Worker + Container DO (ADR-0008).
 //
-// Cloudflare side of the frozen seam (docs/spec/fixture-placeholder.md).
-// The Rust `CloudflareEngine` (fixture-placeholder) calls these endpoints:
+// Cloudflare side of the frozen seam (docs/spec/cloudflare-spawn-worker-contract.md).
+// The Rust `CloudflareEngine` (corelink-cloud-engine) calls these endpoints:
 // runner spawn (/webhook, /v1/spawn), check-host spawn (/v1/spawn mode:"check"),
 // check-exec (/v1/exec, rota A), status/teardown/egress-cutoff, and the env-0
 // cred-ticket route (/v1/leases/{id}/cas-cred).
@@ -24,10 +24,10 @@ import { fixture-placeholder } from "./lib/fixture-placeholder";
 // remaining gate is a LIVE-account smoke (SDK behavior against real Containers),
 // owner-gated at deploy — the mocks assert our contract, not Cloudflare's runtime.
 
-import { fixture-placeholder, expireCredential, stashCredential, wipeCredential } from "./lib/fixture-placeholder.js";
+import { CRED_STASH_CLOSED_KEY, expireCredential, stashCredential, wipeCredential } from "./lib/cred_stash_lifecycle.js";
 import { Container, getContainer } from "@cloudflare/containers";
 import { DurableObject } from "cloudflare:workers";
-import { fixture-placeholder } from "./lib/clw";
+import { EXEC_SERVER_AUTH_TOKEN_FILE } from "./lib/clw";
 export { RunnerDevEnvDO } from "./durable_objects/runner_dev_env";
 
 // ── G2 metadata-exposure denylist (O7 hardening) — BEST-EFFORT, NOT G2-closing ─
@@ -40,7 +40,7 @@ export { RunnerDevEnvDO } from "./durable_objects/runner_dev_env";
 // with `simpleGlobMatch`: pure literal / `*`-glob string matching, with NO CIDR
 // math. So only EXACT-HOST entries below actually block anything, and only for
 // egress that traverses the SDK's outbound proxy — RAW SOCKETS bypass it. Real
-// IMDS / link-local blocking needs fixture-placeholder filtering, not this.
+// IMDS / link-local blocking needs platform-network-layer filtering, not this.
 // See docs/adr/0009 (G2 is tracked as best-effort / not-yet-verified).
 //   • 169.254.169.254            — canonical AWS/GCP/Azure IMDS address (EXACT —
 //                                  matches, proxied egress only).
@@ -73,10 +73,10 @@ import {
   SPAWN_CLAIM_TTL_S,
   claimCompletion,
   SLOT_TTL_S,
-  fixture-placeholder,
+  FLEET_MAX_CONCURRENCY,
   COLD_REPO_CAP,
   decideRedeem,
-  fixture-placeholder,
+  parseReconcilerRepos,
   vcpuCeilingKey,
   vcpuUsageKey,
   vcpuWarnedKey,
@@ -84,32 +84,32 @@ import {
   billingPeriod,
   RUNNER_BOX_VCPU,
   VCPU_KEY_TTL_S,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
+  VCPU_WARN_THRESHOLDS,
+  canonicalInstallationId,
+  installationIdForRepo,
+  tenantPatSecretForRepo,
+  installationAllowlistArmed,
+  isInstallationAllowlisted,
   matchManagedLabels,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
+  unservedCapabilityClaims,
+  SERVED_INSTANCE_TYPE,
+  listOrphanRunnerJobs,
+  reconcileCompletedJobBilling,
+  RECONCILE_MIN_AGE_MS,
   orphanRetryStep,
   orphanRefusalStep,
   SpawnRefusedError,
   ORPHAN_TTL_S,
   MAX_ORPHAN_ATTEMPTS,
-  fixture-placeholder,
+  placementConfirmStep,
   jobPlacementVerdict,
-  fixture-placeholder,
+  PLACEMENT_CONFIRM_GRACE_MS,
   encodeRunnerBinding,
   runnerGoneVerdict,
   strandedJobVerdict,
   type JobObservation,
   parseRunnerBinding,
-  fixture-placeholder,
+  runnerActivityVerdict,
   type RunnerBinding,
   type RunnerObservation,
   type RunnerActivity,
@@ -120,116 +120,116 @@ import {
   type CredStashLike,
   type OrphanRecord,
 } from "./lib";
-import { fixture-placeholder } from "./billing_recovery";
-import { fixture-placeholder, type fixture-placeholder } from "./lib/admission_budget";
+import { flushBillingUsageBacklog } from "./billing_recovery";
+import { spendAdmissionBudget, type AdmissionBudgetVerdict } from "./lib/admission_budget";
 import { bumpMetrics, snapshotMetrics, MetricsDO } from "./metrics";
 import {
-  fixture-placeholder as fixture-placeholder,
-  revokeCompletedJob as fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder as fixture-placeholder,
+  dispatchTenantSuspensionRevocations as dispatchTenantSuspensionRevocationsOwned,
+  revokeCompletedJob as revokeCompletedJobOwned,
+  revokeIssuedCredential,
+  retryFailedRevocations as retryFailedRevocationsOwned,
 } from "./lib/revocation_outbox.js";
-import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/fixture-placeholder.js";
-import { fixture-placeholder, type fixture-placeholder } from "./lib/fixture-placeholder.js";
-import { fixture-placeholder, type fixture-placeholder } from "./lib/fixture-placeholder.js";
+import type { CredentialIdentity, CredentialPage, CredentialSelection } from "./lib/credential_authority_contract.js";
+import { TenantSuspensionAuthority, type TenantSuspensionInput } from "./lib/tenant_suspension_authority.js";
+import { consumeTenantSuspensionCredentials, type TenantSuspensionConsumerDependencies } from "./lib/tenant_suspension_credentials.js";
 import { installationToken } from "./github_app";
 import {
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  type fixture-placeholder,
+  claimReconcileHandoff,
+  discoverAuthorizationCandidates,
+  releaseReconcileHandoff,
+  type ReconcilerRepository,
 } from "./reconciler";
-import { fixture-placeholder } from "./fixture-placeholder";
+import { confirmInstallationRepositories } from "./reconciler_membership";
 import {
-  fixture-placeholder,
-  fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
+  ContainmentEffectLedger,
+  containmentEffectPointerKey,
+  type ContainmentEffectAttempt,
+  type ContainmentEffectBinding,
+  type ContainmentEffectIdentity,
+  type ContainmentEffectPermit,
+  type ContainmentEffectPrepareInput,
+  type ContainmentEffectReapInput,
+  type ContainmentEffectReceipt,
+  type ContainmentEffectResult,
+  type ContainmentEffectTransition,
   type OwnerResult,
   type SpawnOwnerRequest,
-  type fixture-placeholder,
-} from "./fixture-placeholder";
-import { fixture-placeholder } from "./fixture-placeholder";
-import { drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect, type fixture-placeholder } from "./fixture-placeholder";
+  type SpawnMirrorObservation,
+} from "./containment_effect_ledger";
+import { admitDrainOwnerInTransaction } from "./containment_drain_owner_reap";
+import { drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect, type ProviderDriveReceipt } from "./containment_effect_route";
 import {
   containmentEventKey,
-  fixture-placeholder,
-  fixture-placeholder,
+  containmentJobIndexKey,
+  containmentJobIndexMarkerKey,
   containmentPauseKey,
-  fixture-placeholder,
-  fixture-placeholder,
+  containmentReservationKey,
+  emptyContainmentMeta,
   isValidJobIndex,
   isValidJobIndexMeta,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
+  isValidJobIndexMarker,
+  MAX_ACTIVE_INDEX_EVENTS,
+  normalizeRedriveIdentity,
   redriveEffectId,
   reservationPermit,
-  fixture-placeholder,
+  reservationTupleMatches,
   type ContainmentJobIndex,
-  type fixture-placeholder,
-  type fixture-placeholder,
-} from "./fixture-placeholder";
+  type ContainmentJobIndexMarker,
+  type ContainmentJobIndexMeta,
+} from "./containment_authority_helpers";
 import {
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
+  acknowledgeInvalidConfigInStorage,
+  canonicalContainmentEvidence,
+  CONTAINMENT_EFFECT_WITNESS_KINDS,
+  containmentEffectEvidenceKey,
+  containmentEffectJobKey,
+  CONTAINMENT_INDEX_META_KEY,
+  CONTAINMENT_META_KEY,
   DRAIN_LEASE_TTL_MS,
-  fixture-placeholder,
+  DRAIN_RENEW_THRESHOLD_MS,
   isCurrentHead,
   leaseMatches,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder, fixture-placeholder, fixture-placeholder,
-  type fixture-placeholder,
-  type fixture-placeholder,
+  markInvalidConfigAttemptInStorage,
+  pendingInvalidConfigInStorage,
+  recordInvalidConfigInStorage, REDRIVE_RESERVATION_TTL_MS, validateInvalidConfigIdentity,
+  type ContainmentEffectEvidence,
+  type ContainmentEffectWitnessKind,
   type ContainmentEvent,
   type ContainmentMeta,
-  type fixture-placeholder,
+  type ContainmentOutboxRecord,
   type ContainmentPause,
-  type fixture-placeholder,
-  type fixture-placeholder,
-} from "./fixture-placeholder";
-import { fixture-placeholder } from "./workflow_job_id";
+  type ContainmentRedrivePermit,
+  type ContainmentRedriveReservation,
+} from "./containment_authority_records";
+import { canonicalWorkflowJobIdFromRaw } from "./workflow_job_id";
 import {
-  fixture-placeholder,
+  persistJobAttribution,
   readJobAttribution,
   type JobAttribution,
   type JobAttributionStore,
 } from "./lib/job_attribution.js";
 export {
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-} from "./fixture-placeholder";
+  ContainmentEffectLedger,
+  containmentEffectMirrorFromAttempt,
+  containmentEffectMirrorKey,
+  containmentEffectPointerKey,
+  readContainmentEffectMirror,
+} from "./containment_effect_ledger";
 export type {
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-  fixture-placeholder,
-} from "./fixture-placeholder";
-export type { fixture-placeholder, fixture-placeholder, ContainmentEvent, ContainmentMeta,
-  fixture-placeholder, ContainmentPause, fixture-placeholder, fixture-placeholder, ContainmentState, InvalidConfigRecord } from "./fixture-placeholder";
-export { DRAIN_LEASE_TTL_MS, fixture-placeholder };
+  ContainmentEffectAttempt,
+  ContainmentEffectBinding,
+  ContainmentEffectIdentity,
+  ContainmentEffectPermit,
+  ContainmentEffectPrepareInput,
+  ContainmentEffectReapInput,
+  ContainmentEffectReceipt,
+  ContainmentEffectResult,
+  ContainmentEffectState,
+  ContainmentEffectTransition,
+} from "./containment_effect_ledger";
+export type { ContainmentEffectEvidence, ContainmentEffectWitnessKind, ContainmentEvent, ContainmentMeta,
+  ContainmentOutboxRecord, ContainmentPause, ContainmentRedrivePermit, ContainmentRedriveReservation, ContainmentState, InvalidConfigRecord } from "./containment_authority_records";
+export { DRAIN_LEASE_TTL_MS, REDRIVE_RESERVATION_TTL_MS };
 
 // Re-export the counter Durable Object so wrangler resolves `MetricsDO` from
 // this main module (its class + migration are in wrangler.jsonc). Defined in
@@ -241,44 +241,44 @@ export { MetricsDO };
 
 export interface Env {
   FABRIC_COMPUTE_URL?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  RUNNER_CONTAINER: fixture-placeholder<RunnerContainer>;
+  FABRIC_COMPUTE_TERMINAL_AUTHORITY?: string;
+  FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY?: string;
+  FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION?: string;
+  FABRIC_COMPUTE_TERMINAL_KEY_ID?: string;
+  RUNNER_CONTAINER: DurableObjectNamespace<RunnerContainer>;
   // The Container DO for a check-host lease (CF-native check-host, campaign B).
   // A `mode:"check"` /v1/spawn routes HERE (not RUNNER_CONTAINER); /v1/exec dials
-  // its in-container exec-server on port 8080. See docs/spec/fixture-placeholder.md.
-  fixture-placeholder: fixture-placeholder<CheckHostContainer>;
+  // its in-container exec-server on port 8080. See docs/spec/cf-check-host-contract.md.
+  CHECK_HOST_CONTAINER: DurableObjectNamespace<CheckHostContainer>;
   // Worker secret (`wrangler secret put`). Must match the fabric's
-  // fixture-placeholder. Missing/mismatch ⇒ 401.
-  fixture-placeholder: string;
+  // CLOUDFLARE_SPAWN_AUTH_TOKEN. Missing/mismatch ⇒ 401.
+  CLOUDFLARE_SPAWN_AUTH_TOKEN: string;
   // Independent control domains; all three keys must differ. No shared-key fallback.
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
+  CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
+  CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
   // Shared emergency edge freeze. Absent or exact "0" is fail-open; every
   // other value pauses new admission/spawn work (fail-closed on bad config).
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
+  FABRIC_ADMISSION_PAUSED?: string;
+  AUTOSCALER_INTAKE_PAUSED?: string;
+  AUTOSCALER_REDRIVE_PAUSED?: string;
   /** Default-off A3.17 qualification capability. Never an operational control. */
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  CONTAINMENT?: fixture-placeholder<ContainmentDO>;
+  A317_LIVE_PROOF_HMAC_KEY?: string;
+  A317_LIVE_PROOF_BUILD_SHA?: string;
+  A317_LIVE_PROOF_REPO?: string;
+  CONTAINMENT_ADMIN_KEY?: string;
+  CONTAINMENT?: DurableObjectNamespace<ContainmentDO>;
   // Track-C C2b: the bearer the in-container check-host exec-server requires on
   // /exec. Provider ingress is passed only to the short-lived entrypoint; the
-  // entrypoint writes fixture-placeholder and unsets this variable
+  // entrypoint writes EXEC_SERVER_AUTH_TOKEN_FILE and unsets this variable
   // before starting the durable server. The Worker presents the same bearer on
   // the /v1/exec containerFetch. Set via `wrangler secret put`.
   //
   // O7: now REQUIRED for a mode==="check" spawn — an unset secret FAILS CLOSED
-  // (503), mirroring the fixture-placeholder fail-closed discipline
+  // (503), mirroring the CLOUDFLARE_SPAWN_AUTH_TOKEN fail-closed discipline
   // (controlAuthed() refuses missing or overlapping domain tokens). Previously optional
-  // (fixture-placeholder back-compat); that default is removed so a check-host
+  // (serve-unauthenticated back-compat); that default is removed so a check-host
   // exec-server is never spawned without its auth gate.
-  fixture-placeholder?: string;
+  EXEC_SERVER_AUTH_TOKEN?: string;
   // The deploy-time pinned image digest (README wrinkle #1): a RUNNER-mode spawn
   // request's image_digest must equal this, else 409. OPTIONAL by construction:
   // when unset, the runner-mode assertion at the spawn handler is INERT (the
@@ -295,20 +295,20 @@ export interface Env {
   // ── Autoscaler (POST /webhook) — all-Cloudflare, no external fabric ──
   // GitHub webhook HMAC secret (X-Hub-Signature-256). Absent ⇒ /webhook is
   // disabled (the route returns 503), so the autoscaler is opt-in.
-  fixture-placeholder?: string;
-  // Optional repository-hook secret. The CoreLink App uses fixture-placeholder;
+  GITHUB_WEBHOOK_SECRET?: string;
+  // Optional repository-hook secret. The CoreLink App uses GITHUB_WEBHOOK_SECRET;
   // a first-party repository hook may use this separate secret so rotating or
   // restoring the repo delivery path never changes the App's credential.
-  fixture-placeholder?: string;
+  GITHUB_WEBHOOK_REPO_SECRET?: string;
   // A GitHub token with repo Administration:write — used to mint the JIT runner
   // config (POST generate-jitconfig). Worker secret. Absent ⇒ /webhook 503.
   // This is the STATIC first-party dogfood credential: it only has rights on
   // HuGR-Labs repos. A CUSTOMER repo's mint uses a GitHub-App installation
-  // token instead (GITHUB_APP_ID + fixture-placeholder below); this stays the
+  // token instead (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY below); this stays the
   // fallback when App creds are absent (byte-identical to the pre-App behaviour).
   GITHUB_MINT_TOKEN?: string;
   // Per-installation token used only for the authoritative reconciler scan.
-  fixture-placeholder?: string;
+  GITHUB_RECONCILER_TOKEN?: string;
   // ── GitHub-App installation-token minting (external customer repos) ──────────
   // The App's numeric id + PKCS#8 RSA private-key PEM. When BOTH are set AND a
   // spawn has an installation_id, `mintJit` mints a per-installation access token
@@ -316,16 +316,16 @@ export interface Env {
   // Absent ⇒ the App path is INERT and every mint uses GITHUB_MINT_TOKEN exactly
   // as before (default-safe). `wrangler secret put`. See src/github_app.ts.
   GITHUB_APP_ID?: string;
-  fixture-placeholder?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   // Label a queued workflow_job must carry to be served (default corelink-dogfood).
   AUTOSCALER_LABEL?: string;
   // Per-spawn rate limit (native CF binding) — caps the autoscaler blast radius
   // if the webhook secret is ever leaked. Enforced when bound (see wrangler).
   WEBHOOK_LIMITER?: RateLimit;
   // ── Warm moat (cache-warm) — mint a per-job CAS PAT (D-9) + inject CLW_* ──
-  // D-9 internal-auth key (`fixture-placeholder`). Worker secret. Required
+  // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Required
   // spawn preparation refuses missing authorization before JIT/provider work.
-  fixture-placeholder?: string;
+  CORELINK_RUNNER_MINT_AUTH_KEY?: string;
   REQUIRE_MINT_KEY?: string;
   // D-9 mint base URL (default the public on-net hostname; Option B).
   CORELINK_MINT_URL?: string;
@@ -333,7 +333,7 @@ export interface Env {
   CLW_ENDPOINT?: string;
   // The owner tenant the per-job CAS PAT + CLW_TENANT are scoped to (dogfood ee30f7ba).
   CLW_TENANT?: string;
-  // Compatibility projections and lifecycle indexes. fixture-placeholder
+  // Compatibility projections and lifecycle indexes. CredentialObligationAuthority
   // owns exact-PAT revocation. Bare job→PAT metadata expires by TTL; a KV
   // read/delete cannot safely remove a concurrent replacement. See kv_namespaces.
   RUNNER_JOB_PATS?: KVNamespace;
@@ -341,9 +341,9 @@ export interface Env {
   // corelink-billing ingest endpoint (e.g. .../internal/v1/billing/usage).
   // Absent ⇒ no usage-push (fail-open; billing simply not captured).
   BILLING_INGEST_URL?: string;
-  // Dedicated `fixture-placeholder` for billing ingest (NEVER the shared
+  // Dedicated `x-corelink-internal-auth` for billing ingest (NEVER the shared
   // key, NEVER the runner_mint key). Worker secret. Absent ⇒ no usage-push.
-  fixture-placeholder?: string;
+  BILLING_INGEST_AUTH_KEY?: string;
   // 3-char region stamped on the event; defaults to the request's CF colo.
   BILLING_REGION?: string;
   // ── Re-drive reconciler (scheduled) — recover spawn-orphaned jobs ──────────
@@ -353,42 +353,42 @@ export interface Env {
   RECONCILER_REPOS?: string;
   // Authoritative external-repo registry. When armed, this replaces the static
   // first-party list for recovery and fails closed if its snapshot is unclear.
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
+  RECONCILER_REGISTRY_URL?: string;
+  RECONCILER_REGISTRY_AUTH_KEY?: string;
   // repo_full_name → installation_id JSON map. A plain *repo* webhook payload has
   // no `installation.id` (only a GitHub *App* webhook does), so the server-derived
   // mint (#283) can't derive the tenant and the runner spawns COLD. For known
   // first-party repos we inject the installation_id from this map so the mint runs
   // WARM (server derives the tenant) without requiring an App webhook. e.g.
   // {"HuGR-Labs/corelink-runners":"150584374"}. Absent/unmatched ⇒ COLD.
-  fixture-placeholder?: string;
+  REPO_INSTALLATION_MAP?: string;
   // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ───────
   // JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }` mapping a repo to the NAME of the
   // secret binding holding that tenant's acquiring PAT. When a workflow_job repo
   // matches AND that secret is bound, the mint resolves the tenant by INTROSPECTING
   // the PAT (installation_id omitted) instead of deriving it from the installation.
   // The GitHub JIT/box still registers via the installation — only the CAS-tenant
-  // changes. Absent/unmatched/unbound ⇒ default fixture-placeholder mint (no-op).
-  // e.g. {"HuGR-Labs/fixture-placeholder":"fixture-placeholder"}.
+  // changes. Absent/unmatched/unbound ⇒ default installation-derived mint (no-op).
+  // e.g. {"HuGR-Labs/corelink-cold-organic-e2e":"COLD_ORGANIC_TENANT_PAT"}.
   REPO_TENANT_PAT_MAP?: string;
   // The acquiring PAT secret(s) referenced by REPO_TENANT_PAT_MAP (bound via
   // `wrangler secret put`; never in wrangler.jsonc). Indexed by name at runtime.
-  fixture-placeholder?: string;
+  COLD_ORGANIC_TENANT_PAT?: string;
   // ── External-GA installation allowlist (WP-D) — the pre-mint identity gate ────
-  // A comma/fixture-placeholder list of GitHub App installation ids permitted to
-  // drive a spawn. OPT-IN + fixture-placeholder: unset/blank ⇒ NOT armed ⇒
+  // A comma/whitespace-separated list of GitHub App installation ids permitted to
+  // drive a spawn. OPT-IN + FAIL-CLOSED-WHEN-ARMED: unset/blank ⇒ NOT armed ⇒
   // today's exact behavior is preserved (never breaks the live deploy). When
   // armed (≥1 id), a webhook whose resolved installation id is not in the list is
   // refused at the Worker edge BEFORE any mint / spawn / spawn-claim / COLD_REPO_CAP
   // slot / dead-letter orphan — closing the hole where a foreign App-installed but
-  // un-entitled repo can churn/DoS the shared fixture-placeholder before the
+  // un-entitled repo can churn/DoS the shared FLEET_MAX_CONCURRENCY before the
   // server's post-cold-spawn 403 ever fires. Arm for GA with:
-  //   fixture-placeholder="150584374,<customer-install-id>"
+  //   INSTALLATION_ALLOWLIST="150584374,<customer-install-id>"
   // where 150584374 is the dogfood installation (MUST stay served).
-  fixture-placeholder?: string;
+  INSTALLATION_ALLOWLIST?: string;
   // ── env-0 (cred-ticket) — keep the CAS PAT OUT of the untrusted container env ──
   // The single-use stash latch (one DO instance per lease_id = GH jobId).
-  CRED_STASH: fixture-placeholder<CredStashDO>;
+  CRED_STASH: DurableObjectNamespace<CredStashDO>;
   // ── Concurrency slots (W7/F7) — the ATOMIC per-key + fleet concurrency cap ──
   // A SINGLETON DO (always addressed by the fixed id "global") holds the one
   // authoritative in-flight slot list; its single-threaded input-gating makes the
@@ -396,20 +396,20 @@ export interface Env {
   // entitlement (clamped to FLEET), cold spawns on COLD_REPO_CAP per repo; both
   // under the global FLEET cap. Always present (bound in wrangler); the acquire is
   // FAIL-OPEN only on a THROWN DO/infra error, never on a clean at-capacity refusal.
-  CONCURRENCY_SLOTS: fixture-placeholder<ConcurrencySlotsDO>;
+  CONCURRENCY_SLOTS: DurableObjectNamespace<ConcurrencySlotsDO>;
   // Golden-signal counters for the direct fleet (src/metrics.ts). Optional:
   // absent ⇒ bumpMetrics is a no-op + GET /internal/v1/metrics returns {} (the
   // counters are additive/default-safe).
-  METRICS?: fixture-placeholder<MetricsDO>;
+  METRICS?: DurableObjectNamespace<MetricsDO>;
   // Dedicated observability key gating GET /internal/v1/metrics (X-Corelink-
   // Internal-Auth). Default-off: unset ⇒ the route 404s. Separate from the
-  // spawn-control fixture-placeholder. `wrangler secret put`.
-  fixture-placeholder?: string;
+  // spawn-control CLOUDFLARE_SPAWN_AUTH_TOKEN. `wrangler secret put`.
+  METRICS_OBSERVABILITY_KEY?: string;
   // Dedicated ops-READ key gating GET /internal/v1/fleet/busy (X-Corelink-
   // Internal-Auth) — the pre-roll deploy gate's only authority on "is a box
   // executing customer work". Deliberately its OWN credential: ops-READ is a
-  // separate domain from spawn-CONTROL (fixture-placeholder) and from
-  // observability (fixture-placeholder), so it can be rotated — or leaked
+  // separate domain from spawn-CONTROL (CLOUDFLARE_SPAWN_AUTH_TOKEN) and from
+  // observability (METRICS_OBSERVABILITY_KEY), so it can be rotated — or leaked
   // and revoked — without breaking spawn or the canary. It is held by a GitHub
   // Actions secret, which is a wider blast radius than either of those, and that
   // is precisely why it must not be shared. Default-off: unset ⇒ the route 404s.
@@ -419,38 +419,38 @@ export interface Env {
   // CLW_FABRIC_ENDPOINT so clw redeems its cred-ticket here at boot. Its PRESENCE
   // enables env-0 (a single-use ticket is injected instead of CLW_TOKEN — the raw
   // PAT never enters the untrusted env). Absent ⇒ FAIL-CLOSED (spawn COLD, no PAT)
-  // unless fixture-placeholder="1" is explicitly set (non-prod escape hatch). Set
+  // unless ALLOW_LEGACY_PAT_ENV="1" is explicitly set (non-prod escape hatch). Set
   // this to arm env-0. wrangler var.
-  fixture-placeholder?: string;
-  // Explicit non-prod escape hatch — see MintEnv.fixture-placeholder. Never in prod.
-  fixture-placeholder?: string;
+  SPAWN_WORKER_PUBLIC_URL?: string;
+  // Explicit non-prod escape hatch — see MintEnv.ALLOW_LEGACY_PAT_ENV. Never in prod.
+  ALLOW_LEGACY_PAT_ENV?: string;
   // ── Orphan-box reconciliation (platform-truth sweep, B-002) ──────────────────
-  // The ENABLE flag for `fixture-placeholder`. Default-OFF + FAIL-SAFE: unset/
+  // The ENABLE flag for `reconcileOrphanBoxes`. Default-OFF + FAIL-SAFE: unset/
   // blank/"0"/"false" ⇒ the sweep is a NO-OP (it does not even enumerate the
   // platform), so this whole feature lands INERT — no behaviour change on any live
-  // path — mirroring the opt-in `fixture-placeholder` posture. Set to a
+  // path — mirroring the opt-in `crash_probe_config_from_env` posture. Set to a
   // truthy value ("1"/"true") to turn on OBSERVE-ONLY reconciliation. Enabling the
   // reconciler alone NEVER destroys anything; it only logs orphan candidates and
   // bumps `orphan_box_detected`. `wrangler var` / `wrangler secret put`.
-  fixture-placeholder?: string;
+  RECONCILE_ORPHAN_BOXES?: string;
   // The SEPARATE, owner-gated teardown flag. Default-OFF ⇒ pure dry-run. Declared
   // now so the Env shape is stable, but the teardown path itself is NOT wired in
   // this landing (B-002 is observe-only): flipping it today changes nothing. When
   // the teardown half lands (like the B-038 audit lease), it will re-read the
   // `sbox:` set immediately before each destroy (TOCTOU guard) and bump
   // `orphan_box_reaped`. Never enable before the join key is confirmed live.
-  fixture-placeholder?: string;
+  RECONCILE_ORPHAN_TEARDOWN?: string;
   // ── Cloudflare Containers API creds — the "platform truth" enumeration ────────
-  // Needed by `fixture-placeholder` to enumerate the ACTUAL running instances
+  // Needed by `reconcileOrphanBoxes` to enumerate the ACTUAL running instances
   // per-app (the account-level /containers/instances endpoint is dead — it returns
   // {instances:[]} unconditionally — so enumeration MUST be per-application). BOTH
   // the account id AND a containers-read token must be bound or the sweep no-ops
   // (this is what keeps it inert until an owner wires the creds via `wrangler
   // secret put`). Token precedence mirrors scripts/container-instances.sh:
-  // fixture-placeholder preferred, plain fixture-placeholder accepted.
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
-  fixture-placeholder?: string;
+  // CLOUDFLARE_CONTAINERS_API_TOKEN preferred, plain CLOUDFLARE_API_TOKEN accepted.
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_CONTAINERS_API_TOKEN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
 }
 
 export interface SpawnClaimRecord {
@@ -492,14 +492,14 @@ export interface ActiveSpawnAttempt {
   /** Written before start; retained until exact teardown is confirmed. */
   teardownIntent: true;
   /** Exact handle was observed down; capacity cleanup may still be pending. */
-  fixture-placeholder?: number;
+  teardownConfirmedAtMs?: number;
 }
 
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
 // One instance per lease_id (= GH jobId). The autoscaler stashes the per-job CAS
 // PAT here and injects only a CLW_CRED_TICKET into the untrusted container; clw
 // redeems it ONCE at boot via POST /v1/leases/{id}/cas-cred. Mirrors fabricd's
-// in-process pending_cred + take_cred latch (crates/fixture-placeholder), so
+// in-process pending_cred + take_cred latch (crates/corelink-fabric-server), so
 // clw's CredentialSource redeems against the Worker byte-identically. Storage is
 // the DO's own strongly-consistent store — the take is atomic (no CLW_TOKEN race).
 export class CredStashDO extends DurableObject<Env> {
@@ -510,7 +510,7 @@ export class CredStashDO extends DurableObject<Env> {
   // the EFFECTIVE ticket to inject, so whichever container actually registers
   // redeems a ticket the DO still recognizes.
   async stash(ticket: string, cred: StashedCred, ttlMs: number, absoluteExpiresAtMs?: number): Promise<string> {
-    return this.ctx.fixture-placeholder(() => stashCredential(this.ctx.storage, ticket, cred, ttlMs, absoluteExpiresAtMs));
+    return this.ctx.blockConcurrencyWhile(() => stashCredential(this.ctx.storage, ticket, cred, ttlMs, absoluteExpiresAtMs));
   }
 
   // MULTI-USE redeem (lease-scoped). `{status, cred?}`: 200 (live + correct ticket,
@@ -521,8 +521,8 @@ export class CredStashDO extends DurableObject<Env> {
   // decision is the PURE `decideRedeem` (lib, unit-tested), this wrapper only
   // applies the `wipe` at expiry to strongly-consistent DO storage.
   async redeem(ticket: string): Promise<{ status: number; cred?: StashedCred }> {
-    return this.ctx.fixture-placeholder(async () => {
-      if (await this.ctx.storage.get(fixture-placeholder) !== undefined) return { status: 404 };
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (await this.ctx.storage.get(CRED_STASH_CLOSED_KEY) !== undefined) return { status: 404 };
       const rec = await this.ctx.storage.get<StashRecord>("rec");
       const d = decideRedeem(rec, false, Date.now(), ticket);
       if (d.wipe) await this.ctx.storage.deleteAll();
@@ -532,14 +532,14 @@ export class CredStashDO extends DurableObject<Env> {
 
   // Keep DevEnv closure tombstones until expiry, including on a stale queued alarm.
   async alarm(): Promise<void> {
-    await this.ctx.fixture-placeholder(() => expireCredential(this.ctx.storage));
+    await this.ctx.blockConcurrencyWhile(() => expireCredential(this.ctx.storage));
   }
 
   // Normal job completion wipes the stash and alarm. DevEnv passes the absolute
   // PAT deadline to retain a closure tombstone: a delayed stash RPC cannot make
   // a credential redeemable after cleanup was confirmed. Both forms are idempotent.
   async wipe(absoluteExpiresAtMs?: number): Promise<void> {
-    await this.ctx.fixture-placeholder(() => wipeCredential(this.ctx.storage, absoluteExpiresAtMs));
+    await this.ctx.blockConcurrencyWhile(() => wipeCredential(this.ctx.storage, absoluteExpiresAtMs));
   }
 }
 
@@ -552,8 +552,8 @@ export class CredStashDO extends DurableObject<Env> {
 // The DECISION is the pure `decideSlotAcquire`/`releaseSlotByJob` (lib, unit-
 // tested); this wrapper only persists the resulting slot list.
 export class ConcurrencySlotsDO extends DurableObject<Env> {
-  private authority(): fixture-placeholder { return new fixture-placeholder(this.ctx.storage); }
-  private async spawnClaimTx<T>(fn: (storage: fixture-placeholder) => Promise<T>): Promise<T> {
+  private authority(): ConcurrencyAuthority { return new ConcurrencyAuthority(this.ctx.storage); }
+  private async spawnClaimTx<T>(fn: (storage: DurableObjectTransaction) => Promise<T>): Promise<T> {
     return this.ctx.storage.transaction(fn);
   }
 
@@ -572,7 +572,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       // Keep a monotonic counter after release. Reusing generation 1 after a
       // completed/failed attempt makes audits ambiguous and weakens the exact
       // attempt proof carried into completion.
-      const generationKey = `fixture-placeholder:${jobId}`;
+      const generationKey = `spawn-claim-generation:${jobId}`;
       const generation = ((await storage.get<number>(generationKey)) ?? 0) + 1;
       const record: SpawnClaimRecord = {
         jobId,
@@ -598,7 +598,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     });
   }
 
-  async fixture-placeholder(jobId: string, generation: number, ownerToken: string): Promise<boolean> {
+  async markSpawnClaimActive(jobId: string, generation: number, ownerToken: string): Promise<boolean> {
     return this.spawnClaimTx(async storage => {
       const key = `spawn-claim:${jobId}`;
       const current = await storage.get<SpawnClaimRecord>(key);
@@ -615,7 +615,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
    * Bind the provider identity after dispatch. Completion supplies this value,
    * so it can release only the exact attempt that actually owned that runner.
    */
-  async fixture-placeholder(jobId: string, generation: number, ownerToken: string, providerIdentity: string): Promise<boolean> {
+  async bindSpawnClaimProvider(jobId: string, generation: number, ownerToken: string, providerIdentity: string): Promise<boolean> {
     if (!providerIdentity) return false;
     return this.spawnClaimTx(async storage => {
       const key = `spawn-claim:${jobId}`;
@@ -627,19 +627,19 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     });
   }
 
-  private attemptKey(jobId: string): string { return `fixture-placeholder:v1:${jobId}`; }
+  private attemptKey(jobId: string): string { return `spawn-active-attempt:v1:${jobId}`; }
 
   /**
    * Commit the exact handle, JIT runner identity and cleanup intent before the
    * provider start RPC.  A second delivery can only see this durable record and
    * cannot mint another JIT/slot/start after KV has expired.
    */
-  async fixture-placeholder(
+  async persistActiveAttempt(
     jobId: string, handle: string, runnerName: string, runnerId: number | undefined,
     jitAttempt: number, repo: string, installationId: string, preparationId?: string,
   ): Promise<boolean> {
     if (!jobId || !handle || !runnerName || !Number.isSafeInteger(jitAttempt) || jitAttempt < 1
-      || (installationId !== "" && fixture-placeholder(installationId) !== installationId)) return false;
+      || (installationId !== "" && canonicalInstallationId(installationId) !== installationId)) return false;
     return this.spawnClaimTx(async storage => {
       const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
       if (!claim || claim.phase !== "active" || claim.providerIdentity !== runnerName) return false;
@@ -662,8 +662,8 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
     return (await this.ctx.storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) ?? null;
   }
 
-  async fixture-placeholder(limit = 25): Promise<ActiveSpawnAttempt[]> {
-    const page = await this.ctx.storage.list<ActiveSpawnAttempt>({ prefix: "fixture-placeholder:v1:", limit });
+  async pendingActiveAttempts(limit = 25): Promise<ActiveSpawnAttempt[]> {
+    const page = await this.ctx.storage.list<ActiveSpawnAttempt>({ prefix: "spawn-active-attempt:v1:", limit });
     return [...page.values()];
   }
 
@@ -672,20 +672,20 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
    * A retry after a slot-release outage therefore never issues a second destroy,
    * while a replacement generation still fences this stale callback completely.
    */
-  async fixture-placeholder(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+  async markAttemptTeardownConfirmed(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
     return this.spawnClaimTx(async storage => {
       const key = this.attemptKey(jobId);
       const attempt = await storage.get<ActiveSpawnAttempt>(key);
       if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return false;
       const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
       if (claim && (claim.generation !== generation || claim.ownerToken !== ownerToken)) return false;
-      if (!attempt.fixture-placeholder) await storage.put(key, { ...attempt, fixture-placeholder: Date.now() });
+      if (!attempt.teardownConfirmedAtMs) await storage.put(key, { ...attempt, teardownConfirmedAtMs: Date.now() });
       return true;
     });
   }
 
   /** Terminalize only the generation that owns this exact provider handle. */
-  async fixture-placeholder(jobId: string, generation: number, ownerToken: string, handle: string): Promise<ActiveSpawnAttempt | null> {
+  async confirmAttemptTeardown(jobId: string, generation: number, ownerToken: string, handle: string): Promise<ActiveSpawnAttempt | null> {
     return this.spawnClaimTx(async storage => {
       const key = this.attemptKey(jobId);
       const attempt = await storage.get<ActiveSpawnAttempt>(key);
@@ -704,7 +704,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
    * JIT runner and retry. The slot and claim belong to the workflow job; the
    * provider identity belongs only to the single-use runner just destroyed.
    */
-  async fixture-placeholder(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+  async retireActiveAttemptForRetry(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
     return this.spawnClaimTx(async storage => {
       const key = this.attemptKey(jobId);
       const attempt = await storage.get<ActiveSpawnAttempt>(key);
@@ -725,7 +725,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
    * job id. A stale completion for runner A therefore cannot release a later
    * generation B for the same job.
    */
-  async fixture-placeholder(jobId: string, providerIdentity: string): Promise<SpawnClaimRelease> {
+  async releaseSpawnClaimForCompletion(jobId: string, providerIdentity: string): Promise<SpawnClaimRelease> {
     if (!providerIdentity) return "stale";
     return this.spawnClaimTx(async storage => {
       const key = `spawn-claim:${jobId}`;
@@ -750,7 +750,7 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
       const current = await storage.get<SpawnClaimRecord>(key);
       if (!current) return "missing";
       if (current.generation !== generation || current.ownerToken !== ownerToken) return "stale";
-      // An active provider attempt is released only by fixture-placeholder.
+      // An active provider attempt is released only by confirmAttemptTeardown.
       // This permits pre-start preparation failures to release normally while
       // making a post-start projection failure durable and retryable.
       if (await storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) return "stale";
@@ -814,32 +814,32 @@ export class ConcurrencySlotsDO extends DurableObject<Env> {
 export class ContainmentDO extends DurableObject<Env> {
   private computeObligations(): ComputeObligations {
     const terminalConfig = {
-      terminalAuthority: this.env.fixture-placeholder ?? "",
-      terminalPublicKey: this.env.fixture-placeholder ?? "",
-      receiptVersion: this.env.fixture-placeholder ?? "",
-      terminalKeyId: this.env.fixture-placeholder ?? "",
+      terminalAuthority: this.env.FABRIC_COMPUTE_TERMINAL_AUTHORITY ?? "",
+      terminalPublicKey: this.env.FABRIC_COMPUTE_TERMINAL_PUBLIC_KEY ?? "",
+      receiptVersion: this.env.FABRIC_COMPUTE_TERMINAL_RECEIPT_VERSION ?? "",
+      terminalKeyId: this.env.FABRIC_COMPUTE_TERMINAL_KEY_ID ?? "",
     };
     return new ComputeObligations(this.ctx.storage, new ComputeBudgetClient(this.env.FABRIC_COMPUTE_URL ?? "", fetch, terminalConfig), terminalConfig);
   }
 
   async prepareCompute(binding: ComputeBinding): Promise<void> {
     if (binding.workloadKind !== "spawn_worker_runner" || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
-      throw new Error("fixture-placeholder");
+      throw new Error("COMPUTE_BINDING_INVALID");
     }
-    return this.ctx.fixture-placeholder(() => this.computeObligations().prepare(binding, Date.now()));
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().prepare(binding, Date.now()));
   }
 
-  async fixture-placeholder(reservationId: string, jobId: string): Promise<void> {
-    return this.ctx.fixture-placeholder(() => this.computeObligations().claimProvider(reservationId, jobId, Date.now()));
+  async claimComputeProvider(reservationId: string, jobId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().claimProvider(reservationId, jobId, Date.now()));
   }
 
-  async fixture-placeholder(reservationId: string): Promise<void> {
-    return this.ctx.fixture-placeholder(() => this.computeObligations().abandonUnused(reservationId));
+  async abandonUnusedCompute(reservationId: string): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(() => this.computeObligations().abandonUnused(reservationId));
   }
 
   async drainUnusedCompute(): Promise<void> {
     if (!this.env.FABRIC_COMPUTE_URL) return;
-    return this.ctx.fixture-placeholder(async () => {
+    return this.ctx.blockConcurrencyWhile(async () => {
       const durableState = await this.ctx.storage.get<{ cursor?: string; retryRequired: boolean }>("compute:drain-state");
       const cursor = durableState?.cursor ?? await this.ctx.storage.get<string>("compute:drain-cursor");
       const result = await this.computeObligations().drainUnused(Date.now(), cursor);
@@ -871,32 +871,32 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   /**
-   * Spend the bounded fixture-placeholder budget in the same durable
+   * Spend the bounded exceptional-admission budget in the same durable
    * authority that serializes all callers. A missing or unreadable authority
    * is a refusal; a healthy missing record is a fresh budget.
    */
-  async fixture-placeholder(): Promise<fixture-placeholder> {
+  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
     const nowMs = Date.now();
-    return this.tx((storage) => fixture-placeholder(storage, nowMs));
+    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
   }
 
   async snapshot(): Promise<ContainmentMeta> {
-    return (await this.ctx.storage.get<ContainmentMeta>(fixture-placeholder)) ?? fixture-placeholder();
+    return (await this.ctx.storage.get<ContainmentMeta>(CONTAINMENT_META_KEY)) ?? emptyContainmentMeta();
   }
 
   async normalIntakeEnqueue(input: NormalIntakeInput, delayMs = 0) {
     return new NormalIntakeInbox(this.ctx.storage).enqueue(input, Date.now(), delayMs);
   }
 
-  async fixture-placeholder(input: NormalIntakeInput, proof: A317ProofRecord, unavailable = false) {
+  async normalIntakeA317ProofEnqueue(input: NormalIntakeInput, proof: A317ProofRecord, unavailable = false) {
     return new NormalIntakeInbox(this.ctx.storage).enqueueA317Proof(input, proof, Date.now(), unavailable);
   }
-  async fixture-placeholder(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Proof(eventId, Date.now()); }
-  async fixture-placeholder(limit = 25) { return new NormalIntakeInbox(this.ctx.storage).a317Pending(undefined, undefined, Date.now(), limit); }
-  async fixture-placeholder(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).fixture-placeholder(eventId); }
-  async fixture-placeholder(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown") { return new NormalIntakeInbox(this.ctx.storage).fixture-placeholder(eventId, status); }
-  async fixture-placeholder(runId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Snapshot(runId, Date.now()); }
-  async fixture-placeholder() { return new NormalIntakeInbox(this.ctx.storage).fixture-placeholder(Date.now()); }
+  async normalIntakeA317Proof(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Proof(eventId, Date.now()); }
+  async normalIntakeA317Pending(limit = 25) { return new NormalIntakeInbox(this.ctx.storage).a317Pending(undefined, undefined, Date.now(), limit); }
+  async beginA317Authorization(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).beginA317Authorization(eventId); }
+  async finishA317Authorization(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown") { return new NormalIntakeInbox(this.ctx.storage).finishA317Authorization(eventId, status); }
+  async normalIntakeA317Snapshot(runId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Snapshot(runId, Date.now()); }
+  async cleanupExpiredA317Proofs() { return new NormalIntakeInbox(this.ctx.storage).cleanupExpiredA317Proofs(Date.now()); }
 
   async normalIntakePending(limit = 25): Promise<NormalIntakeRecord[]> {
     return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
@@ -906,27 +906,35 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
 
-  async fixture-placeholder(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict"> {
-    return new NormalIntakeInbox(this.ctx.storage).fixture-placeholder(installationId, eventId, bodySha, Date.now());
+  async normalIntakeAdmit(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admit(eventId);
+  }
+  async normalIntakeAdmissionFence(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admissionFence(eventId);
+  }
+  async normalIntakeReleaseFence(eventId: string): Promise<void> { return new NormalIntakeInbox(this.ctx.storage).releaseAdmissionFence(eventId); }
+
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict" | "busy"> {
+    return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
   }
 
-  async fixture-placeholder(installationId: string): Promise<boolean> {
-    return new NormalIntakeInbox(this.ctx.storage).fixture-placeholder(installationId);
+  async installationTombstoned(installationId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).installationTombstoned(installationId);
   }
 
   async getEvent(eventId: string): Promise<ContainmentEvent | null> {
     return (await this.ctx.storage.get<ContainmentEvent>(containmentEventKey(eventId))) ?? null;
   }
 
-  private effectLedger(): fixture-placeholder {
-    return new fixture-placeholder(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
+  private effectLedger(): ContainmentEffectLedger {
+    return new ContainmentEffectLedger(this.ctx.storage as never, this.env.RUNNER_JOB_PATS);
   }
 
-  async readJobAttribution(key: string): Promise<string | null> { return new fixture-placeholder(this.ctx.storage).readJobAttribution(key); }
+  async readJobAttribution(key: string): Promise<string | null> { return new JobAttributionAuthority(this.ctx.storage).readJobAttribution(key); }
 
-  async fixture-placeholder(key: string, value: string): Promise<string> { return new fixture-placeholder(this.ctx.storage).fixture-placeholder(key, value); }
+  async putJobAttributionIfAbsent(key: string, value: string): Promise<string> { return new JobAttributionAuthority(this.ctx.storage).putJobAttributionIfAbsent(key, value); }
 
-  async fixture-placeholder(key: string): Promise<void> { return new fixture-placeholder(this.ctx.storage).fixture-placeholder(key); }
+  async deleteJobAttribution(key: string): Promise<void> { return new JobAttributionAuthority(this.ctx.storage).deleteJobAttribution(key); }
 
   /**
    * Enumerate durable ownership for settlement/reconciliation. The scan reads
@@ -937,58 +945,58 @@ export class ContainmentDO extends DurableObject<Env> {
   async listJobAttributions(
     tenantId: string,
     cursor?: string,
-  ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> { return new fixture-placeholder(this.ctx.storage).listJobAttributions(tenantId, cursor); }
+  ): Promise<{ records: JobAttribution[]; cursor?: string; complete: boolean }> { return new JobAttributionAuthority(this.ctx.storage).listJobAttributions(tenantId, cursor); }
 
-  async registerCredential(identity: CredentialIdentity): Promise<void> { return new fixture-placeholder(this.ctx.storage).registerCredential(identity); }
+  async registerCredential(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).registerCredential(identity); }
 
-  async fixture-placeholder(identity: CredentialIdentity): Promise<void> { return new fixture-placeholder(this.ctx.storage).fixture-placeholder(identity); }
+  async requestCredentialRevocation(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).requestCredentialRevocation(identity); }
 
-  async fixture-placeholder(cursor?: string): Promise<CredentialPage> { return new fixture-placeholder(this.ctx.storage).fixture-placeholder(cursor); }
+  async revocationRequestedCredentials(cursor?: string): Promise<CredentialPage> { return new CredentialObligationAuthority(this.ctx.storage).revocationRequestedCredentials(cursor); }
 
-  async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> { return new fixture-placeholder(this.ctx.storage).pendingCredentials(selection, cursor, requestedStatus); }
+  async pendingCredentials(selection: CredentialSelection, cursor?: string, requestedStatus?: string): Promise<CredentialPage> { return new CredentialObligationAuthority(this.ctx.storage).pendingCredentials(selection, cursor, requestedStatus); }
 
-  async fixture-placeholder(identity: CredentialIdentity): Promise<void> { return new fixture-placeholder(this.ctx.storage).fixture-placeholder(identity); }
+  async confirmCredentialRevoked(identity: CredentialIdentity): Promise<void> { return new CredentialObligationAuthority(this.ctx.storage).confirmCredentialRevoked(identity); }
 
-  async closeJobCredentials(jobId: string): Promise<{ known: boolean }> { return new fixture-placeholder(this.ctx.storage).closeJobCredentials(jobId); }
-  async fixture-placeholder(tenant: string, throughGeneration: string): Promise<void> {
-    return new fixture-placeholder(this.ctx.storage).fixture-placeholder(tenant, throughGeneration);
+  async closeJobCredentials(jobId: string): Promise<{ known: boolean }> { return new CredentialObligationAuthority(this.ctx.storage).closeJobCredentials(jobId); }
+  async closeTenantCredentials(tenant: string, throughGeneration: string): Promise<void> {
+    return new CredentialObligationAuthority(this.ctx.storage).closeTenantCredentials(tenant, throughGeneration);
   }
-  async fixture-placeholder(input: fixture-placeholder): Promise<{ complete: boolean; cursor?: string }> {
-    return new fixture-placeholder(this.ctx.storage as never).begin(input);
+  async beginTenantSuspension(input: TenantSuspensionInput): Promise<{ complete: boolean; cursor?: string }> {
+    return new TenantSuspensionAuthority(this.ctx.storage as never).begin(input);
   }
-  async fixture-placeholder(input: fixture-placeholder, expectedCursor: string | undefined, nextCursor: string | undefined, complete: boolean): Promise<boolean> {
-    return new fixture-placeholder(this.ctx.storage as never).checkpoint(input, expectedCursor, nextCursor, complete);
+  async checkpointTenantSuspension(input: TenantSuspensionInput, expectedCursor: string | undefined, nextCursor: string | undefined, complete: boolean): Promise<boolean> {
+    return new TenantSuspensionAuthority(this.ctx.storage as never).checkpoint(input, expectedCursor, nextCursor, complete);
   }
 
-  async getEffectAttempt(identity: fixture-placeholder, nonce: string): Promise<fixture-placeholder | null> {
+  async getEffectAttempt(identity: ContainmentEffectIdentity, nonce: string): Promise<ContainmentEffectAttempt | null> {
     return this.effectLedger().getEffectAttempt(identity, nonce);
   }
-  async prepareEffect(input: fixture-placeholder): Promise<fixture-placeholder> {
+  async prepareEffect(input: ContainmentEffectPrepareInput): Promise<ContainmentEffectResult> {
     return this.effectLedger().prepareEffect(input);
   }
-  async acquireEffectClaim(input: fixture-placeholder): Promise<fixture-placeholder> {
+  async acquireEffectClaim(input: ContainmentEffectTransition): Promise<ContainmentEffectResult> {
     return this.effectLedger().acquireEffectClaim(input);
   }
-  async issueEffectPermit(input: fixture-placeholder): Promise<fixture-placeholder> {
+  async issueEffectPermit(input: ContainmentEffectTransition): Promise<ContainmentEffectResult> {
     return this.effectLedger().issueEffectPermit(input);
   }
-  async bindEffect(input: fixture-placeholder & { permit_id: string; binding: fixture-placeholder }): Promise<fixture-placeholder> {
+  async bindEffect(input: ContainmentEffectTransition & { permit_id: string; binding: ContainmentEffectBinding }): Promise<ContainmentEffectResult> {
     return this.effectLedger().bindEffect(input);
   }
-  async beginEffectDrive(input: fixture-placeholder & { permit_id: string }): Promise<fixture-placeholder> {
+  async beginEffectDrive(input: ContainmentEffectTransition & { permit_id: string }): Promise<ContainmentEffectResult> {
     return this.effectLedger().beginEffectDrive(input);
   }
-  async commitEffect(input: fixture-placeholder & { permit_id: string; receipt: fixture-placeholder }): Promise<fixture-placeholder>;
-  async commitEffect(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: fixture-placeholder): Promise<OwnerResult>;
-  async commitEffect(input: SpawnOwnerRequest | (fixture-placeholder & { permit_id: string; receipt: fixture-placeholder }), permitId?: string, proofId?: string, receipt?: fixture-placeholder): Promise<OwnerResult | fixture-placeholder> {
+  async commitEffect(input: ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }): Promise<ContainmentEffectResult>;
+  async commitEffect(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult>;
+  async commitEffect(input: SpawnOwnerRequest | (ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt }), permitId?: string, proofId?: string, receipt?: ContainmentEffectReceipt): Promise<OwnerResult | ContainmentEffectResult> {
     return permitId && proofId && receipt
       ? this.effectLedger().commitEffect(input as SpawnOwnerRequest, permitId, proofId, receipt)
-      : this.effectLedger().commitEffect(input as fixture-placeholder & { permit_id: string; receipt: fixture-placeholder });
+      : this.effectLedger().commitEffect(input as ContainmentEffectTransition & { permit_id: string; receipt: ContainmentEffectReceipt });
   }
-  async abortEffect(input: fixture-placeholder): Promise<fixture-placeholder> {
+  async abortEffect(input: ContainmentEffectTransition): Promise<ContainmentEffectResult> {
     return this.effectLedger().abortEffect(input);
   }
-  async reapEffect(input: fixture-placeholder): Promise<fixture-placeholder> {
+  async reapEffect(input: ContainmentEffectReapInput): Promise<ContainmentEffectResult> {
     return this.effectLedger().reapEffect(input);
   }
 
@@ -997,17 +1005,24 @@ export class ContainmentDO extends DurableObject<Env> {
   // canonical SpawnOwnerRequest by accident.
   async ownerPrepare(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().prepare(input); }
   async ownerAcquire(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().acquire(input); }
-  async ownerMirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<fixture-placeholder> { return this.effectLedger().mirror(input, result); }
+  async ownerMirror(input: SpawnOwnerRequest, result?: "acquired" | "owned"): Promise<SpawnMirrorObservation> { return this.effectLedger().mirror(input, result); }
   async ownerConfirm(input: SpawnOwnerRequest, mirrorDigest: string, readbackDigest: string, permitId?: string): Promise<OwnerResult> { return this.effectLedger().confirm(input, mirrorDigest, readbackDigest, permitId); }
   async ownerBegin(input: SpawnOwnerRequest, permitId: string): Promise<OwnerResult> { return this.effectLedger().beginEffect(input, permitId); }
-  async ownerBind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: fixture-placeholder): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
+  async ownerBind(input: SpawnOwnerRequest, permitId: string, proofId: string, binding: ContainmentEffectBinding): Promise<OwnerResult> { return this.effectLedger().bind(input, permitId, proofId, binding); }
   async ownerMarkDriving(input: SpawnOwnerRequest, permitId: string, proofId: string): Promise<OwnerResult> { return this.effectLedger().markDriving(input, permitId, proofId); }
-  async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: fixture-placeholder): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
+  async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
   async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
   async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
-  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> { return this.tx(s => fixture-placeholder(s, eventId, tuple, now)); }
+  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> {
+    return this.tx(async s => {
+      if (!await admitDrainOwnerInTransaction(s, eventId, tuple, now)) return false;
+      const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
+      return !!event && await acquireInstallationFenceInTransaction(s, event.installation_id, event.effect_id);
+    });
+  }
+  async releaseInstallationFence(installationId: string, effectId: string): Promise<void> { await this.ctx.storage.delete(installationFenceKey(installationId, effectId)); }
   async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
-    return this.fixture-placeholder(eventId, owner, epoch, now, permitId);
+    return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
 
   private async ensureJobIndex(
@@ -1015,74 +1030,74 @@ export class ContainmentDO extends DurableObject<Env> {
     repo: string,
     jobId: string,
   ): Promise<ContainmentJobIndex> {
-    const meta = await s.get(fixture-placeholder);
+    const meta = await s.get(CONTAINMENT_INDEX_META_KEY);
     if (meta === undefined) throw new Error("containment job index missing");
     if (!isValidJobIndexMeta(meta)) throw new Error("containment job index meta divergent");
-    const key = fixture-placeholder(repo, jobId);
+    const key = containmentJobIndexKey(repo, jobId);
     const existing = await s.get(key) as ContainmentJobIndex | undefined;
     if (existing === undefined) throw new Error("containment job index missing");
     if (!isValidJobIndex(existing, repo, jobId)) throw new Error("containment job index divergent");
-    if (!fixture-placeholder(await s.get(fixture-placeholder(repo, jobId)), repo, jobId)) throw new Error("containment job index marker divergent");
+    if (!isValidJobIndexMarker(await s.get(containmentJobIndexMarkerKey(repo, jobId)), repo, jobId)) throw new Error("containment job index marker divergent");
     return existing;
   }
 
-  async fixture-placeholder(
+  async bootstrapContainedEventIndex(
     repoInput: string,
     jobIdInput: string,
     now = Date.now(),
   ): Promise<{ status: "bootstrapped" | "already_present" | "blocked" | "invalid" }> {
-    const identity = fixture-placeholder(repoInput, jobIdInput);
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity) return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
     return this.tx(async (s) => {
-      const meta = await s.get(fixture-placeholder);
+      const meta = await s.get(CONTAINMENT_INDEX_META_KEY);
       if (meta !== undefined && !isValidJobIndexMeta(meta)) return { status: "blocked" as const };
-      const key = fixture-placeholder(repo, jobId);
+      const key = containmentJobIndexKey(repo, jobId);
       const existing = await s.get(key) as ContainmentJobIndex | undefined;
-      const marker = await s.get(fixture-placeholder(repo, jobId));
-      if (existing !== undefined) return isValidJobIndex(existing, repo, jobId) && fixture-placeholder(marker, repo, jobId) ? { status: "already_present" as const } : { status: "blocked" as const };
+      const marker = await s.get(containmentJobIndexMarkerKey(repo, jobId));
+      if (existing !== undefined) return isValidJobIndex(existing, repo, jobId) && isValidJobIndexMarker(marker, repo, jobId) ? { status: "already_present" as const } : { status: "blocked" as const };
       if (marker !== undefined) return { status: "blocked" as const };
       // The pair can only be initialized when the authority proves that no
       // active queue or reservation owns it. Never scan broad event/owner
-      // namespaces: an fixture-placeholder pair remains fail-closed.
-      const reservation = await s.get(fixture-placeholder(repo, jobId));
-      const pointer = await s.get(fixture-placeholder({ repo, job_id: jobId, effect_id: redriveEffectId(repo, jobId) }));
-      const legacyJobState = await s.get(fixture-placeholder(jobId));
+      // namespaces: an initialized-but-missing pair remains fail-closed.
+      const reservation = await s.get(containmentReservationKey(repo, jobId));
+      const pointer = await s.get(containmentEffectPointerKey({ repo, job_id: jobId, effect_id: redriveEffectId(repo, jobId) }));
+      const legacyJobState = await s.get(containmentEffectJobKey(jobId));
       const legacyIndex = await s.get(`containment:v1:job-index:${repo}/${jobId}`);
       if (reservation !== undefined || pointer !== undefined || legacyJobState !== undefined || legacyIndex !== undefined) return { status: "blocked" as const };
-      if (meta === undefined) await s.put(fixture-placeholder, { schema_version: 1, initialized: true } satisfies fixture-placeholder);
+      if (meta === undefined) await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
       await s.put(key, { schema_version: 1, repo, job_id: jobId, active_event_ids: [], active_count: 0, updated_at_ms: now } satisfies ContainmentJobIndex);
-      await s.put(fixture-placeholder(repo, jobId), { schema_version: 1, repo, job_id: jobId, bootstrapped_at_ms: now } satisfies fixture-placeholder);
+      await s.put(containmentJobIndexMarkerKey(repo, jobId), { schema_version: 1, repo, job_id: jobId, bootstrapped_at_ms: now } satisfies ContainmentJobIndexMarker);
       return { status: "bootstrapped" as const };
     });
   }
 
-  private async fixture-placeholder(s: any, repo: string, jobId: string): Promise<boolean> {
+  private async containedEventExists(s: any, repo: string, jobId: string): Promise<boolean> {
     const index = await this.ensureJobIndex(s, repo, jobId);
     for (const eventId of index.active_event_ids) {
       const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
       if (!event) throw new Error("containment job index references missing event");
-      const identity = fixture-placeholder(event.repo, event.job_id);
+      const identity = normalizeRedriveIdentity(event.repo, event.job_id);
       if (!identity || identity.repo !== repo || identity.job_id !== jobId) throw new Error("containment job index identity divergent");
     }
     return index.active_count > 0;
   }
 
-  async fixture-placeholder(
+  async reserveRedriveCandidate(
     repoInput: string,
     jobIdInput: string,
     now = Date.now(),
-  ): Promise<{ status: "reserved" | "contained" | "busy" | "effect_eligible" | "completed" | "invalid"; reservation?: fixture-placeholder }> {
-    const identity = fixture-placeholder(repoInput, jobIdInput);
+  ): Promise<{ status: "reserved" | "contained" | "busy" | "effect_eligible" | "completed" | "invalid"; reservation?: ContainmentRedriveReservation }> {
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity) return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
-    const key = fixture-placeholder(repo, jobId);
+    const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
       // An unacknowledged contained intake owns the job before a redrive can
       // enter its first mutable seam. The direct index is inside the deciding
       // DO tx; never scan the full event collection per candidate.
-      if (await this.fixture-placeholder(s, repo, jobId)) return { status: "contained" as const };
-      const prior = (await s.get(key)) as fixture-placeholder | undefined;
+      if (await this.containedEventExists(s, repo, jobId)) return { status: "contained" as const };
+      const prior = (await s.get(key)) as ContainmentRedriveReservation | undefined;
       if (prior) {
         if (prior.schema_version !== 1 || prior.repo !== repo || prior.job_id !== jobId || typeof prior.owner !== "string" || typeof prior.token !== "string" || prior.path !== "redrive" || prior.effect_id !== redriveEffectId(repo, jobId) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 1 || !Number.isFinite(prior.expires_ms) || !["HELD", "EFFECT_ELIGIBLE", "COMPLETED"].includes(prior.state) || (prior.event_id !== null && typeof prior.event_id !== "string") || typeof prior.completion_observed !== "boolean") return { status: "busy" as const };
         if (prior.state === "EFFECT_ELIGIBLE") return { status: "effect_eligible" as const, reservation: prior };
@@ -1090,20 +1105,20 @@ export class ContainmentDO extends DurableObject<Env> {
         if (prior.state !== "HELD" || prior.expires_ms > now) return { status: "busy" as const, reservation: prior };
         // Only this exact HELD state may be reclaimed. EFFECT_ELIGIBLE has no
         // timer/reset path, so no existing effect can ever be reissued.
-        const reclaimed: fixture-placeholder = {
+        const reclaimed: ContainmentRedriveReservation = {
           ...prior,
           owner: crypto.randomUUID(),
           token: crypto.randomUUID(),
           epoch: prior.epoch + 1,
           state: "HELD",
-          expires_ms: now + fixture-placeholder,
+          expires_ms: now + REDRIVE_RESERVATION_TTL_MS,
           event_id: null,
           completion_observed: false,
         };
         await s.put(key, reclaimed);
         return { status: "reserved" as const, reservation: reclaimed };
       }
-      const reservation: fixture-placeholder = {
+      const reservation: ContainmentRedriveReservation = {
         schema_version: 1,
         repo,
         job_id: jobId,
@@ -1112,7 +1127,7 @@ export class ContainmentDO extends DurableObject<Env> {
         epoch: 1,
         path: "redrive",
         state: "HELD",
-        expires_ms: now + fixture-placeholder,
+        expires_ms: now + REDRIVE_RESERVATION_TTL_MS,
         event_id: null,
         effect_id: redriveEffectId(repo, jobId),
         completion_observed: false,
@@ -1131,21 +1146,27 @@ export class ContainmentDO extends DurableObject<Env> {
     path: "redrive" = "redrive",
     effectId?: string,
     now = Date.now(),
-  ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: fixture-placeholder }> {
-    const identity = fixture-placeholder(repoInput, jobIdInput);
+    installationId?: string,
+  ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: ContainmentRedrivePermit }> {
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || path !== "redrive") return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
     const expectedEffectId = redriveEffectId(repo, jobId);
     if (effectId !== undefined && effectId !== expectedEffectId) return { status: "invalid" };
     return this.tx(async (s) => {
-      const reservation = (await s.get(fixture-placeholder(repo, jobId))) as fixture-placeholder | undefined;
-      if (!reservation || !fixture-placeholder(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
+      if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      // Eligibility is decided before acquiring the deletion fence. An expired
+      // or already-promoted tuple has no external effect to protect and must
+      // never leave a durable fence behind.
+      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
+      if (installationId && await s.get(installationTombstoneKey(installationId)) !== undefined) return { status: "ineligible" as const };
+      if (installationId && !await acquireInstallationFenceInTransaction(s, installationId, expectedEffectId)) return { status: "ineligible" as const };
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
-      // a fresh tuple through fixture-placeholder first.
-      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
-      const eligible: fixture-placeholder = { ...reservation, state: "EFFECT_ELIGIBLE" };
-      await s.put(fixture-placeholder(repo, jobId), eligible);
+      // a fresh tuple through reserveRedriveCandidate first.
+      const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
+      await s.put(containmentReservationKey(repo, jobId), eligible);
       return { status: "eligible" as const, permit: reservationPermit(eligible) };
     });
   }
@@ -1157,14 +1178,14 @@ export class ContainmentDO extends DurableObject<Env> {
     token: string,
     epoch: number,
     effectId: string,
-  ): Promise<{ status: "completed" | "fixture-placeholder" | "stale" | "incomplete" | "invalid" }> {
-    const identity = fixture-placeholder(repoInput, jobIdInput);
+  ): Promise<{ status: "completed" | "cleared_after_completion" | "stale" | "incomplete" | "invalid" }> {
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || effectId !== redriveEffectId(identity.repo, identity.job_id)) return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
-    const key = fixture-placeholder(repo, jobId);
+    const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
-      const reservation = (await s.get(key)) as fixture-placeholder | undefined;
-      if (!reservation || !fixture-placeholder(reservation, repo, jobId, owner, token, epoch, "redrive", effectId)) return { status: "stale" as const };
+      const reservation = (await s.get(key)) as ContainmentRedriveReservation | undefined;
+      if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, "redrive", effectId)) return { status: "stale" as const };
       if (reservation.state === "HELD") return { status: "incomplete" as const };
       if (reservation.state === "COMPLETED") return { status: "completed" as const };
       if (reservation.state !== "EFFECT_ELIGIBLE") return { status: "stale" as const };
@@ -1173,24 +1194,24 @@ export class ContainmentDO extends DurableObject<Env> {
       // resolves the latched terminal transition without leaking a tombstone.
       if (reservation.completion_observed) {
         await s.delete(key);
-        return { status: "fixture-placeholder" as const };
+        return { status: "cleared_after_completion" as const };
       }
       await s.put(key, { ...reservation, state: "COMPLETED" });
       return { status: "completed" as const };
     });
   }
 
-  async fixture-placeholder(
+  async clearCompletedRedrive(
     repoInput: string,
     jobIdInput: string,
     effectId: string,
   ): Promise<{ status: "cleared" | "latched" | "terminal" | "not_completed" | "invalid" }> {
-    const identity = fixture-placeholder(repoInput, jobIdInput);
+    const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || effectId !== redriveEffectId(identity.repo, identity.job_id)) return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
-    const key = fixture-placeholder(repo, jobId);
+    const key = containmentReservationKey(repo, jobId);
     return this.tx(async (s) => {
-      const reservation = (await s.get(key)) as fixture-placeholder | undefined;
+      const reservation = (await s.get(key)) as ContainmentRedriveReservation | undefined;
       if (!reservation || reservation.schema_version !== 1 || reservation.repo !== repo || reservation.job_id !== jobId || reservation.path !== "redrive" || reservation.effect_id !== effectId || !Number.isFinite(reservation.expires_ms) || typeof reservation.completion_observed !== "boolean") return { status: "not_completed" as const };
       if (reservation.state === "COMPLETED") {
         await s.delete(key);
@@ -1241,21 +1262,21 @@ export class ContainmentDO extends DurableObject<Env> {
       effect_permit: null,
     };
     const pause: ContainmentPause = { schema_version: 1, event_id: event.event_id, pause_seq: next.pause_seq };
-    if (index.active_count >= fixture-placeholder) throw new Error("containment job index bound exceeded");
+    if (index.active_count >= MAX_ACTIVE_INDEX_EVENTS) throw new Error("containment job index bound exceeded");
     await s.put(key, next);
     await s.put(containmentPauseKey(next.pause_seq), pause);
-    await s.put(fixture-placeholder(event.repo, event.job_id), { ...index, active_event_ids: [...index.active_event_ids, event.event_id], active_count: index.active_count + 1, updated_at_ms: Date.now() });
-    await s.put(fixture-placeholder, { ...meta, next_pause_seq: next.pause_seq + 1, backlog_count: meta.backlog_count + 1 });
+    await s.put(containmentJobIndexKey(event.repo, event.job_id), { ...index, active_event_ids: [...index.active_event_ids, event.event_id], active_count: index.active_count + 1, updated_at_ms: Date.now() });
+    await s.put(CONTAINMENT_META_KEY, { ...meta, next_pause_seq: next.pause_seq + 1, backlog_count: meta.backlog_count + 1 });
     return { status: "appended", event: next };
   }
 
   async append(event: Omit<ContainmentEvent, "pause_seq" | "state" | "claim" | "effect_permit">): Promise<{ status: "appended" | "duplicate" | "conflict"; event?: ContainmentEvent }> {
-    const identity = fixture-placeholder(event.repo, event.job_id);
+    const identity = normalizeRedriveIdentity(event.repo, event.job_id);
     if (!identity) throw new TypeError("invalid containment repo/job identity");
     const normalizedEvent = { ...event, repo: identity.repo, job_id: identity.job_id };
     return this.tx(async (s) => {
-      const rawMeta = await s.get(fixture-placeholder) as ContainmentMeta | undefined;
-      return this.appendInTransaction(s, normalizedEvent, rawMeta ?? fixture-placeholder());
+      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
+      return this.appendInTransaction(s, normalizedEvent, rawMeta ?? emptyContainmentMeta());
     });
   }
 
@@ -1267,18 +1288,18 @@ export class ContainmentDO extends DurableObject<Env> {
     // access. This leaves the normal/empty-backlog path outside reservation
     // arbitration while refusing malformed identities before a DO read could
     // accidentally give them a durable interpretation.
-    const identity = fixture-placeholder(event.repo, event.job_id);
+    const identity = normalizeRedriveIdentity(event.repo, event.job_id);
     if (!identity) return { status: "authority-busy" };
     const normalizedEvent = { ...event, repo: identity.repo, job_id: identity.job_id };
     return this.tx(async (s) => {
-      const rawMeta = await s.get(fixture-placeholder) as ContainmentMeta | undefined;
-      const meta = rawMeta ?? fixture-placeholder();
+      const rawMeta = await s.get(CONTAINMENT_META_KEY) as ContainmentMeta | undefined;
+      const meta = rawMeta ?? emptyContainmentMeta();
       if (intakeState === "normal" && meta.backlog_count === 0) return { status: "continued" as const };
       // A duplicate is already durable and never needs reservation arbitration.
       const prior = (await s.get(containmentEventKey(event.event_id))) as ContainmentEvent | undefined;
       if (prior) return prior.body_sha256 === event.body_sha256 ? { status: "duplicate" as const, event: prior } : { status: "conflict" as const };
-      const reservationKey = fixture-placeholder(identity.repo, identity.job_id);
-      const reservation = (await s.get(reservationKey)) as fixture-placeholder | undefined;
+      const reservationKey = containmentReservationKey(identity.repo, identity.job_id);
+      const reservation = (await s.get(reservationKey)) as ContainmentRedriveReservation | undefined;
       if (reservation) {
         // The intake write takes over an expired *pre-effect* hold atomically:
         // deleting it and appending below leave no interval in which its old
@@ -1302,68 +1323,68 @@ export class ContainmentDO extends DurableObject<Env> {
     });
   }
 
-  async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<fixture-placeholder> {
-    const signalId = await fixture-placeholder(switchName, rawValue, rawValueSha256, sha256Hex);
-    return this.tx((storage) => fixture-placeholder(storage, switchName, rawValueSha256, signalId));
+  async recordInvalidConfig(switchName: string, rawValue: string, rawValueSha256: string): Promise<ContainmentOutboxRecord> {
+    const signalId = await validateInvalidConfigIdentity(switchName, rawValue, rawValueSha256, sha256Hex);
+    return this.tx((storage) => recordInvalidConfigInStorage(storage, switchName, rawValueSha256, signalId));
   }
 
-  async fixture-placeholder(): Promise<fixture-placeholder[]> {
-    return fixture-placeholder(this.ctx.storage, sha256Hex);
+  async pendingInvalidConfig(): Promise<ContainmentOutboxRecord[]> {
+    return pendingInvalidConfigInStorage(this.ctx.storage, sha256Hex);
   }
 
-  async fixture-placeholder(signalId: string): Promise<void> {
-    await this.tx((storage) => fixture-placeholder(storage, signalId));
+  async markInvalidConfigAttempt(signalId: string): Promise<void> {
+    await this.tx((storage) => markInvalidConfigAttemptInStorage(storage, signalId));
   }
 
-  async fixture-placeholder(signalId: string): Promise<void> {
-    await this.tx((storage) => fixture-placeholder(storage, signalId));
+  async acknowledgeInvalidConfig(signalId: string): Promise<void> {
+    await this.tx((storage) => acknowledgeInvalidConfigInStorage(storage, signalId));
   }
 
   async requestDrain(): Promise<ContainmentMeta> {
     return this.tx(async (s) => {
-      const meta = ((await s.get(fixture-placeholder)) as ContainmentMeta | undefined) ?? fixture-placeholder();
-      const indexMeta = await s.get(fixture-placeholder);
-      if (indexMeta === undefined) await s.put(fixture-placeholder, { schema_version: 1, initialized: true } satisfies fixture-placeholder);
+      const meta = ((await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined) ?? emptyContainmentMeta();
+      const indexMeta = await s.get(CONTAINMENT_INDEX_META_KEY);
+      if (indexMeta === undefined) await s.put(CONTAINMENT_INDEX_META_KEY, { schema_version: 1, initialized: true } satisfies ContainmentJobIndexMeta);
       else if (!isValidJobIndexMeta(indexMeta)) throw new Error("containment job index meta divergent");
       const next = { ...meta, drain_requested: meta.backlog_count > 0 };
-      await s.put(fixture-placeholder, next);
+      await s.put(CONTAINMENT_META_KEY, next);
       return next;
     });
   }
 
   async acquireLease(owner: string, now = Date.now()): Promise<{ owner: string; epoch: number; expires_ms: number } | null> {
     return this.tx(async (s) => {
-      const meta = ((await s.get(fixture-placeholder)) as ContainmentMeta | undefined) ?? fixture-placeholder();
+      const meta = ((await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined) ?? emptyContainmentMeta();
       const old = meta.lease;
       if (old && old.expires_ms > now) {
         if (old.owner !== owner) return null;
-        if (old.expires_ms - now > fixture-placeholder) return old;
+        if (old.expires_ms - now > DRAIN_RENEW_THRESHOLD_MS) return old;
         const renewed = { ...old, expires_ms: now + DRAIN_LEASE_TTL_MS };
-        await s.put(fixture-placeholder, { ...meta, lease: renewed });
+        await s.put(CONTAINMENT_META_KEY, { ...meta, lease: renewed });
         return renewed;
       }
       // An expired lease is a reclaim even if the random owner happens to be
       // the same string. Reusing its epoch would let an old fenced holder race
       // the new lease, so every acquire/reclaim advances the fence.
       const next = { owner, epoch: meta.lease_epoch + 1, expires_ms: now + DRAIN_LEASE_TTL_MS };
-      await s.put(fixture-placeholder, { ...meta, lease_epoch: next.epoch, lease: next });
+      await s.put(CONTAINMENT_META_KEY, { ...meta, lease_epoch: next.epoch, lease: next });
       return next;
     });
   }
 
   async renewLease(owner: string, epoch: number, now = Date.now()): Promise<boolean> {
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       if (!meta || !leaseMatches(meta, owner, epoch, now)) return false;
-      if (meta.lease!.expires_ms - now > fixture-placeholder) return true;
-      await s.put(fixture-placeholder, { ...meta, lease: { ...meta.lease!, expires_ms: now + DRAIN_LEASE_TTL_MS } });
+      if (meta.lease!.expires_ms - now > DRAIN_RENEW_THRESHOLD_MS) return true;
+      await s.put(CONTAINMENT_META_KEY, { ...meta, lease: { ...meta.lease!, expires_ms: now + DRAIN_LEASE_TTL_MS } });
       return true;
     });
   }
 
   async claimNext(owner: string, epoch: number, now = Date.now()): Promise<{ event: ContainmentEvent; committed: boolean } | null> {
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       if (!meta || !leaseMatches(meta, owner, epoch, now) || meta.backlog_count === 0) return null;
       const pause = (await s.get(containmentPauseKey(meta.drain_cursor + 1))) as ContainmentPause | undefined;
       if (!pause) return null;
@@ -1383,9 +1404,9 @@ export class ContainmentDO extends DurableObject<Env> {
     });
   }
 
-  private async fixture-placeholder(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
+  private async beginContainmentEventEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
       if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, now) || event.state !== "CLAIMED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch) return null;
       // The permit is one-shot and is never handed to a new owner. A reclaiming
@@ -1401,27 +1422,27 @@ export class ContainmentDO extends DurableObject<Env> {
     });
   }
 
-  private async fixture-placeholder(event: ContainmentEvent): Promise<string | null> {
+  private async validatedEffectProof(event: ContainmentEvent): Promise<string | null> {
     const kv = this.env.RUNNER_JOB_PATS;
     const permit = event.effect_permit;
     if (!kv || !permit) return null;
     try {
-      const rawEvidence = await Promise.all(fixture-placeholder.map((kind) => kv.get(fixture-placeholder(event.effect_id, kind))));
+      const rawEvidence = await Promise.all(CONTAINMENT_EFFECT_WITNESS_KINDS.map((kind) => kv.get(containmentEffectEvidenceKey(event.effect_id, kind))));
       const evidence = rawEvidence.map((raw) => {
         if (!raw) return null;
         try {
-          const parsed = JSON.parse(raw) as fixture-placeholder;
-          return fixture-placeholder(parsed) === raw ? parsed : null;
+          const parsed = JSON.parse(raw) as ContainmentEffectEvidence;
+          return canonicalContainmentEvidence(parsed) === raw ? parsed : null;
         } catch {
           return null;
         }
       });
       if (evidence.some((item) => !item)) return null;
-      const records = evidence as fixture-placeholder[];
+      const records = evidence as ContainmentEffectEvidence[];
       const sourceHashes = await Promise.all(records.map((rec) => sha256Hex(rec.source_value)));
       for (let i = 0; i < records.length; i++) {
         const rec = records[i];
-        if (rec.schema_version !== 1 || rec.kind !== fixture-placeholder[i] || rec.effect_id !== event.effect_id || rec.event_id !== event.event_id || rec.job_id !== event.job_id || rec.permit_id !== permit.permit_id || typeof rec.source_value !== "string" || !/^[0-9a-f]{64}$/.test(rec.source_sha256) || rec.source_sha256 !== sourceHashes[i]) return null;
+        if (rec.schema_version !== 1 || rec.kind !== CONTAINMENT_EFFECT_WITNESS_KINDS[i] || rec.effect_id !== event.effect_id || rec.event_id !== event.event_id || rec.job_id !== event.job_id || rec.permit_id !== permit.permit_id || typeof rec.source_value !== "string" || !/^[0-9a-f]{64}$/.test(rec.source_sha256) || rec.source_sha256 !== sourceHashes[i]) return null;
       }
       const [claim, attempt, placement, lease, result] = records;
       if (claim.source_key !== `spawn:${event.job_id}` || attempt.source_key !== "github:generate-jitconfig" || placement.source_key !== orphanKey(event.job_id) || lease.source_key !== jobHandleKey(event.job_id) || result.source_key !== "result" || !Number.isSafeInteger(attempt.attempt_count) || attempt.attempt_count! < 1 || result.terminal !== "DELIVERED" || result.attempt_count !== attempt.attempt_count) return null;
@@ -1439,7 +1460,7 @@ export class ContainmentDO extends DurableObject<Env> {
         return null;
       }
       if (!attemptValue || typeof attemptValue.runner_name !== "string" || attemptValue.runner_name.length === 0 || !Number.isSafeInteger(attemptValue.runner_id) || attemptValue.attempt !== attempt.attempt_count || JSON.stringify({ runner_name: attemptValue.runner_name, runner_id: attemptValue.runner_id, attempt: attemptValue.attempt }) !== attempt.source_value || !placementValue || placementValue.effect_id !== event.effect_id || !Number.isFinite(placementValue.placedMs) || JSON.stringify(placementValue) !== placement.source_value) return null;
-      const fixture-placeholder = JSON.stringify({
+      const expectedResultSource = JSON.stringify({
         terminal: "DELIVERED",
         attempt_count: attempt.attempt_count,
         spawn_claim_sha256: claim.source_sha256,
@@ -1447,25 +1468,25 @@ export class ContainmentDO extends DurableObject<Env> {
         placement_sha256: placement.source_sha256,
         lease_sha256: lease.source_sha256,
       });
-      if (result.source_value !== fixture-placeholder) return null;
-      return sha256Hex(JSON.stringify(records.map(fixture-placeholder)));
+      if (result.source_value !== expectedResultSource) return null;
+      return sha256Hex(JSON.stringify(records.map(canonicalContainmentEvidence)));
     } catch {
       return null;
     }
   }
 
-  private async fixture-placeholder(eventId: string): Promise<{ meta: ContainmentMeta; event: ContainmentEvent } | null> {
+  private async readEffectCommitSnapshot(eventId: string): Promise<{ meta: ContainmentMeta; event: ContainmentEvent } | null> {
     // Do not issue KV reads while a storage transaction is open. Durable Object
     // input gates may yield around non-storage I/O, so witness validation is an
     // optimistic phase whose storage view is fenced and rechecked below.
     const [meta, event] = await Promise.all([
-      this.ctx.storage.get<ContainmentMeta>(fixture-placeholder),
+      this.ctx.storage.get<ContainmentMeta>(CONTAINMENT_META_KEY),
       this.ctx.storage.get<ContainmentEvent>(containmentEventKey(eventId)),
     ]);
     return meta && event ? { meta, event } : null;
   }
 
-  private fixture-placeholder(
+  private matchesEffectCommitSnapshot(
     meta: ContainmentMeta,
     event: ContainmentEvent,
     snapshot: { meta: ContainmentMeta; event: ContainmentEvent },
@@ -1497,14 +1518,14 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async markEffectCommitted(eventId: string, owner: string, epoch: number): Promise<boolean> {
-    const snapshot = await this.fixture-placeholder(eventId);
+    const snapshot = await this.readEffectCommitSnapshot(eventId);
     if (!snapshot || !this.canCommitEffect(snapshot.meta, snapshot.event, owner, epoch, false)) return false;
-    const proofDigest = await this.fixture-placeholder(snapshot.event);
+    const proofDigest = await this.validatedEffectProof(snapshot.event);
     if (!proofDigest) return false;
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
-      if (!meta || !event || !this.fixture-placeholder(meta, event, snapshot) || !this.canCommitEffect(meta, event, owner, epoch, false)) return false;
+      if (!meta || !event || !this.matchesEffectCommitSnapshot(meta, event, snapshot) || !this.canCommitEffect(meta, event, owner, epoch, false)) return false;
       // `proofDigest` was recomputed by this DO from immutable, effect-bound KV
       // records. The rechecked event includes the exact permit those records
       // name, so no caller-supplied evidence can cross the transaction fence.
@@ -1514,18 +1535,18 @@ export class ContainmentDO extends DurableObject<Env> {
     });
   }
 
-  async fixture-placeholder(effectId: string, owner: string, epoch: number, proofDigest: string): Promise<boolean> {
+  async recoverEffectCommitted(effectId: string, owner: string, epoch: number, proofDigest: string): Promise<boolean> {
     const prefix = "containment:v1:";
     if (!effectId.startsWith(prefix)) return false;
     const eventId = effectId.slice(prefix.length);
-    const snapshot = await this.fixture-placeholder(eventId);
+    const snapshot = await this.readEffectCommitSnapshot(eventId);
     if (!snapshot || snapshot.event.effect_id !== effectId || !this.canCommitEffect(snapshot.meta, snapshot.event, owner, epoch, true)) return false;
-    const actualProof = await this.fixture-placeholder(snapshot.event);
+    const actualProof = await this.validatedEffectProof(snapshot.event);
     if (!actualProof || proofDigest !== actualProof) return false;
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
-      if (!meta || !event || !this.fixture-placeholder(meta, event, snapshot) || !this.canCommitEffect(meta, event, owner, epoch, true)) return false;
+      if (!meta || !event || !this.matchesEffectCommitSnapshot(meta, event, snapshot) || !this.canCommitEffect(meta, event, owner, epoch, true)) return false;
       // The caller may supply only the digest it observed. This DO performed
       // the authoritative five-record validation and requires exact equality.
       if (proofDigest !== actualProof) return false;
@@ -1536,23 +1557,23 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async acknowledge(eventId: string, owner: string, epoch: number): Promise<boolean> {
     const acknowledged = await this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
       if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, Date.now()) || event.state !== "EFFECT_COMMITTED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch) return null;
       if (!Number.isSafeInteger(meta.backlog_count) || meta.backlog_count < 1) return null;
       const pause = (await s.get(containmentPauseKey(event.pause_seq))) as ContainmentPause | undefined;
       if (!pause || pause.event_id !== event.event_id || pause.pause_seq !== event.pause_seq) return null;
-      const indexKey = fixture-placeholder(event.repo, event.job_id);
+      const indexKey = containmentJobIndexKey(event.repo, event.job_id);
       const index = await s.get(indexKey) as ContainmentJobIndex | undefined;
-      const marker = await s.get(fixture-placeholder(event.repo, event.job_id));
-      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !fixture-placeholder(marker, event.repo, event.job_id) || !index.active_event_ids.includes(event.event_id)) return null;
+      const marker = await s.get(containmentJobIndexMarkerKey(event.repo, event.job_id));
+      if (!index || !isValidJobIndex(index, event.repo, event.job_id) || !isValidJobIndexMarker(marker, event.repo, event.job_id) || !index.active_event_ids.includes(event.event_id)) return null;
       const backlog = meta.backlog_count - 1;
       await s.delete(containmentEventKey(eventId));
       await s.delete(containmentPauseKey(event.pause_seq));
       const remaining = index.active_event_ids.filter((id) => id !== event.event_id);
       if (remaining.length === 0) await s.delete(indexKey);
       else await s.put(indexKey, { ...index, active_event_ids: remaining, active_count: remaining.length, updated_at_ms: Date.now() });
-      await s.put(fixture-placeholder, { ...meta, drain_cursor: event.pause_seq, backlog_count: backlog, drain_requested: backlog > 0 });
+      await s.put(CONTAINMENT_META_KEY, { ...meta, drain_cursor: event.pause_seq, backlog_count: backlog, drain_requested: backlog > 0 });
       return event;
     });
     if (!acknowledged) return false;
@@ -1564,12 +1585,12 @@ export class ContainmentDO extends DurableObject<Env> {
     if (kv) {
       try {
         await Promise.all([
-          kv.delete(fixture-placeholder(acknowledged.job_id)),
-          ...fixture-placeholder.map((kind) => kv.delete(fixture-placeholder(acknowledged.effect_id, kind))),
+          kv.delete(containmentEffectJobKey(acknowledged.job_id)),
+          ...CONTAINMENT_EFFECT_WITNESS_KINDS.map((kind) => kv.delete(containmentEffectEvidenceKey(acknowledged.effect_id, kind))),
         ]);
       } catch {
         // Lazy cleanup on a later operational pass is safe; never roll back an
-        // fixture-placeholder DO head because external cleanup was unavailable.
+        // already-acknowledged DO head because external cleanup was unavailable.
       }
     }
     return true;
@@ -1580,14 +1601,14 @@ export class ContainmentDO extends DurableObject<Env> {
    * an effect permit.  The same EFFECT_COMMITTED → acknowledge recovery path
    * makes a crash between these two writes deterministic without issuing work.
    */
-  async fixture-placeholder(eventId: string, owner: string, epoch: number): Promise<boolean> {
+  async terminalizeTombstonedEvent(eventId: string, owner: string, epoch: number): Promise<boolean> {
     return this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
       const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
       if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, Date.now())
         || event.state !== "CLAIMED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch
-        || event.effect_permit !== null || fixture-placeholder(event.installation_id) !== event.installation_id) return false;
-      if ((await s.get(fixture-placeholder(event.installation_id))) === undefined) return false;
+        || event.effect_permit !== null || canonicalInstallationId(event.installation_id) !== event.installation_id) return false;
+      if ((await s.get(installationTombstoneKey(event.installation_id))) === undefined) return false;
       await s.put(containmentEventKey(eventId), { ...event, state: "EFFECT_COMMITTED" });
       return true;
     });
@@ -1595,8 +1616,8 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async releaseLease(owner: string, epoch: number): Promise<void> {
     await this.tx(async (s) => {
-      const meta = (await s.get(fixture-placeholder)) as ContainmentMeta | undefined;
-      if (meta?.lease?.owner === owner && meta.lease.epoch === epoch) await s.put(fixture-placeholder, { ...meta, lease: null });
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
+      if (meta?.lease?.owner === owner && meta.lease.epoch === epoch) await s.put(CONTAINMENT_META_KEY, { ...meta, lease: null });
     });
   }
 }
@@ -1604,8 +1625,8 @@ export class ContainmentDO extends DurableObject<Env> {
 // ── Durable idle backstop (2026-08-23 incident) ──────────────────────────────
 // The SDK's own idle deadline cannot be trusted to expire. `sleepAfterMs` is a
 // bare in-memory field (@cloudflare/containers 0.3.7 container.js:1024) and the
-// Container constructor calls `fixture-placeholder()` UNCONDITIONALLY inside
-// `fixture-placeholder` (container.js:348-360). So any re-instantiation of the
+// Container constructor calls `renewActivityTimeout()` UNCONDITIONALLY inside
+// `blockConcurrencyWhile` (container.js:348-360). So any re-instantiation of the
 // DO — an eviction, a Worker redeploy, or merely a `/v1/status` poll touching a
 // cold stub — silently rearms the full window with zero real activity. The alarm
 // TIME is durable (`ctx.storage.setAlarm`); the DEADLINE is not, so the two can
@@ -1620,7 +1641,7 @@ export class ContainmentDO extends DurableObject<Env> {
 // Hence the deliberately generous window: it must never be the thing that ends a
 // legitimate job. A cron outage that stopped renewals would take this long to
 // bite, by which point a stuck box has cost more than a late one.
-const fixture-placeholder = 45 * 60 * 1000;
+const DURABLE_IDLE_BACKSTOP_MS = 45 * 60 * 1000;
 // Key names are namespaced so they cannot collide with SDK-owned storage keys.
 const LAST_ACTIVITY_KEY = "corelink:lastActivityAt";
 const SOFT_STOP_COUNT_KEY = "corelink:softStopCount";
@@ -1628,7 +1649,7 @@ const SOFT_STOP_COUNT_KEY = "corelink:softStopCount";
 // running, stop asking politely. `stop()` is SIGTERM-only and never escalates on
 // its own, so without a ceiling here a stop()-defeating bug has no cost bound —
 // exactly the shape of the incident this came from.
-const fixture-placeholder = 2;
+const MAX_SOFT_STOPS_BEFORE_DESTROY = 2;
 
 // Per-job runner container. One DO instance per spawned runner (keyed by handle).
 export class RunnerContainer extends Container<Env> {
@@ -1646,7 +1667,7 @@ export class RunnerContainer extends Container<Env> {
   // hard 15-minute cap on job DURATION rather than an idle timeout.
   //
   // In @cloudflare/containers 0.3.x, `sleepAfterMs` only moves forward via
-  // `fixture-placeholder()`, and `isActivityExpired()` renews only while
+  // `renewActivityTimeout()`, and `isActivityExpired()` renews only while
   // `inflightRequests > 0` — a counter incremented SOLELY inside `containerFetch`.
   // This container has no `defaultPort` and is never `containerFetch`ed (the GH
   // Actions agent is the image entrypoint and dials OUT; nothing dials in). So
@@ -1656,7 +1677,7 @@ export class RunnerContainer extends Container<Env> {
   //
   // The SDK's own contract for that method is "Call this method whenever there is
   // activity on the container", so the cron supplies the activity signal (see
-  // `fixture-placeholder`) and this stays a real IDLE window rather than becoming
+  // `keepAliveLiveRunners`) and this stays a real IDLE window rather than becoming
   // a lifetime cap. Raising the number instead would have turned every stuck box
   // into a multi-hour hold on `max_instances` — trading a job-killer for a
   // fleet-starver.
@@ -1691,8 +1712,8 @@ export class RunnerContainer extends Container<Env> {
    * SDK can see, because there is no inbound traffic to see.
    */
   keepAlive(): { ok: true } {
-    this.fixture-placeholder();
-    // Also record the activity DURABLY. `fixture-placeholder()` writes only to
+    this.renewActivityTimeout();
+    // Also record the activity DURABLY. `renewActivityTimeout()` writes only to
     // the SDK's in-memory field, which does not survive re-instantiation; this is
     // what the backstop below reads, and it is deliberately the same call site so
     // the two can never drift apart.
@@ -1728,7 +1749,7 @@ export class RunnerContainer extends Container<Env> {
    * running job, so every uncertain branch leaves the box alone and lets the
    * normal paths handle it.
    */
-  async fixture-placeholder(): Promise<void> {
+  async enforceDurableIdleBackstop(): Promise<void> {
     const last = await this.ctx.storage.get<number>(LAST_ACTIVITY_KEY);
     if (typeof last !== "number") {
       // First alarm on a box spawned before this shipped, or before any activity
@@ -1738,7 +1759,7 @@ export class RunnerContainer extends Container<Env> {
       return;
     }
     const idleMs = Date.now() - last;
-    if (idleMs < fixture-placeholder) return;
+    if (idleMs < DURABLE_IDLE_BACKSTOP_MS) return;
 
     let running = false;
     try {
@@ -1746,14 +1767,14 @@ export class RunnerContainer extends Container<Env> {
       running = state.status === "running" || state.status === "healthy";
     } catch (e) {
       // Cannot see the container ⇒ cannot justify killing it.
-      logEvent("error", "fixture-placeholder", { error: String(e) });
+      logEvent("error", "idle_backstop_state_unreadable", { error: String(e) });
       return;
     }
     if (!running) return;
 
     const softStops = (await this.ctx.storage.get<number>(SOFT_STOP_COUNT_KEY)) ?? 0;
-    if (softStops >= fixture-placeholder) {
-      logEvent("error", "fixture-placeholder", {
+    if (softStops >= MAX_SOFT_STOPS_BEFORE_DESTROY) {
+      logEvent("error", "idle_backstop_destroy", {
         idle_minutes: String(Math.round(idleMs / 60000)),
         soft_stops: String(softStops),
         note: "stop() did not end this container; escalating to destroy()",
@@ -1773,7 +1794,7 @@ export class RunnerContainer extends Container<Env> {
       await this.stop();
     } catch (e) {
       // A stop() throw must not swallow the alarm; the next tick escalates.
-      logEvent("error", "fixture-placeholder", { error: String(e) });
+      logEvent("error", "idle_backstop_stop_threw", { error: String(e) });
     }
   }
 
@@ -1787,7 +1808,7 @@ export class RunnerContainer extends Container<Env> {
    */
   async alarm(alarmProps?: Parameters<Container<Env>["alarm"]>[0]): Promise<void> {
     try {
-      await this.fixture-placeholder();
+      await this.enforceDurableIdleBackstop();
     } catch (e) {
       logEvent("error", "idle_backstop_threw", { error: String(e) });
     }
@@ -1844,7 +1865,7 @@ export class RunnerContainer extends Container<Env> {
 // instance per check-host lease (keyed by handle). UNLIKE RunnerContainer, this
 // container exposes an HTTP exec-server on port 8080 (C4) that /v1/exec dials via
 // `containerFetch`; the toolchain is hydrated once at start from the injected
-// TOOLCHAIN_DIGEST (C2/C5). See docs/spec/fixture-placeholder.md.
+// TOOLCHAIN_DIGEST (C2/C5). See docs/spec/cf-check-host-contract.md.
 export class CheckHostContainer extends Container<Env> {
   // The in-container exec-server listens here (C4); `containerFetch(req, 8080)`
   // and this default both target it.
@@ -1890,7 +1911,7 @@ interface SpawnBody {
   labels: string[];
   expiry_ms: number;
   // CF-native check-host (C2): "runner" (default, back-compat) | "check". When
-  // "check" the spawn routes to fixture-placeholder and toolchain_digest is
+  // "check" the spawn routes to CHECK_HOST_CONTAINER and toolchain_digest is
   // required. Absent ⇒ the runner path, byte-unchanged.
   mode?: "runner" | "check";
   // The clw snapshot manifest digest of the toolchain to hydrate at start (C2).
@@ -1927,7 +1948,7 @@ function hexBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-async function fixture-placeholder(secret: string, signature: string, body: ArrayBuffer): Promise<boolean> {
+async function verifyGithubHmacBytes(secret: string, signature: string, body: ArrayBuffer): Promise<boolean> {
   const match = /^sha256=([0-9a-f]{64})$/i.exec(signature.trim());
   if (!match) return false;
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
@@ -1935,7 +1956,7 @@ async function fixture-placeholder(secret: string, signature: string, body: Arra
 }
 
 type ContainmentSwitch = "normal" | "paused" | "invalid";
-export function fixture-placeholder(raw: string | undefined): ContainmentSwitch {
+export function parseContainmentSwitch(raw: string | undefined): ContainmentSwitch {
   if (raw === undefined || raw === "0") return "normal";
   if (raw === "1") return "paused";
   return "invalid";
@@ -1950,15 +1971,15 @@ export function admissionPaused(raw: string | undefined): boolean {
   return raw !== undefined && raw !== "0";
 }
 
-const fixture-placeholder = "60";
+const ADMISSION_PAUSE_RETRY_AFTER_SECONDS = "60";
 
-function fixture-placeholder(): Response {
+function admissionPausedResponse(): Response {
   return new Response(JSON.stringify({ error: "fabric admission paused" }), {
     status: 503,
     headers: {
       "content-type": "application/json",
       "cache-control": "no-store",
-      "retry-after": fixture-placeholder,
+      "retry-after": ADMISSION_PAUSE_RETRY_AFTER_SECONDS,
     },
   });
 }
@@ -1967,37 +1988,37 @@ function trimAsciiWhitespace(value: string): string {
   // JavaScript's `\\s` would hide among non-ASCII whitespace we must preserve.
   return value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
 }
-function fixture-placeholder(env: Env): DurableObjectStub<ContainmentDO> {
+function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
   if (!env.CONTAINMENT) throw new Error("containment authority unavailable");
   return env.CONTAINMENT.get(env.CONTAINMENT.idFromName("global"));
 }
 
-async function fixture-placeholder(env: Env, installationId: string): Promise<boolean> {
-  if (fixture-placeholder(installationId) !== installationId || !env.CONTAINMENT) return false;
-  return fixture-placeholder(env).fixture-placeholder(installationId);
+async function installationIsTombstoned(env: Env, installationId: string): Promise<boolean> {
+  if (canonicalInstallationId(installationId) !== installationId || !env.CONTAINMENT) return false;
+  return containmentAuthority(env).installationTombstoned(installationId);
 }
 
-function fixture-placeholder(
+function resolveWebhookInstallationId(
   value: unknown,
   repo: string,
   repositoryMap: string | undefined,
 ): { installationId: string; invalid: boolean } {
   if (value !== undefined && value !== null) {
-    const installationId = fixture-placeholder(value);
+    const installationId = canonicalInstallationId(value);
     return installationId ? { installationId, invalid: false } : { installationId: "", invalid: true };
   }
-  return { installationId: fixture-placeholder(repositoryMap, repo), invalid: false };
+  return { installationId: installationIdForRepo(repositoryMap, repo), invalid: false };
 }
 
 // T4-W2 consumes T4-W1's immutable ContainmentDO attribution authority. The
 // cast keeps this commit compatible with the pre-W1 local class; the ordered
 // W1 integration supplies the RPC method and its exact validation.
-async function fixture-placeholder(
+async function readBillingJobAttribution(
   env: Env,
   jobId: string,
 ): Promise<{ jobId: string; tenant: string } | null> {
   if (!env.CONTAINMENT) return null;
-  const rpc = fixture-placeholder(env) as unknown as {
+  const rpc = containmentAuthority(env) as unknown as {
     readJobAttribution(key: string): Promise<string | null>;
   };
   const raw = await rpc.readJobAttribution(`job-attribution:${jobId}`);
@@ -2006,33 +2027,33 @@ async function fixture-placeholder(
   if (value.jobId !== jobId || typeof value.tenant !== "string" || value.tenant.trim() === "") return null;
   return { jobId, tenant: value.tenant };
 }
-async function fixture-placeholder(env: Env): Promise<boolean> {
+async function containmentRedriveAuthorityReadable(env: Env): Promise<boolean> {
   // An unavailable authority refuses every reconciler before external effects.
   try {
-    await fixture-placeholder(env).snapshot();
+    await containmentAuthority(env).snapshot();
     return true;
   } catch {
     return false;
   }
 }
-async function fixture-placeholder(env: Env, switchName: string, raw: string): Promise<void> {
+async function observeInvalidConfig(env: Env, switchName: string, raw: string): Promise<void> {
   const digest = await sha256Hex(raw);
-  const authority = fixture-placeholder(env);
+  const authority = containmentAuthority(env);
   await authority.recordInvalidConfig(switchName, raw, digest);
-  await fixture-placeholder(env);
+  await deliverInvalidConfig(env);
 }
-async function fixture-placeholder(env: Env): Promise<void> {
+async function deliverInvalidConfig(env: Env): Promise<void> {
   if (!env.METRICS) return;
-  const authority = fixture-placeholder(env);
-  let pending: fixture-placeholder[];
-  try { pending = await authority.fixture-placeholder(); } catch { return; }
+  const authority = containmentAuthority(env);
+  let pending: ContainmentOutboxRecord[];
+  try { pending = await authority.pendingInvalidConfig(); } catch { return; }
   const metrics = env.METRICS.get(env.METRICS.idFromName("singleton")) as unknown as { bumpOnce?: (signalId: string, name: string) => Promise<void> };
   if (!metrics.bumpOnce) return;
   for (const rec of pending) {
     try {
-      await authority.fixture-placeholder(rec.signal_id);
-      await metrics.bumpOnce(rec.signal_id, "fixture-placeholder");
-      await authority.fixture-placeholder(rec.signal_id);
+      await authority.markInvalidConfigAttempt(rec.signal_id);
+      await metrics.bumpOnce(rec.signal_id, "containment_config_invalid");
+      await authority.acknowledgeInvalidConfig(rec.signal_id);
     } catch {
       // Keep the same outbox record pending for the next scheduled tick.
     }
@@ -2042,7 +2063,7 @@ async function fixture-placeholder(env: Env): Promise<void> {
 // ── Autoscaler (POST /webhook) — GitHub workflow_job → mint JIT → spawn ──────
 
 // Select the credential `mintJit` presents to `generate-jitconfig`:
-//   • App creds present (GITHUB_APP_ID + fixture-placeholder) AND an
+//   • App creds present (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY) AND an
 //     installationId in hand ⇒ a GitHub-App INSTALLATION token, scoped to THAT
 //     customer's repo (the only credential that can mint a JIT on a foreign repo).
 //     `installationToken` THROWS on failure — the mint then fails (never a silent
@@ -2051,7 +2072,7 @@ async function fixture-placeholder(env: Env): Promise<void> {
 //   • Else ⇒ the static first-party GITHUB_MINT_TOKEN. When App creds are absent
 //     this is the ONLY branch taken, byte-identical to the pre-App behaviour. [I1]
 export async function mintJitAuthToken(env: Env, installationId: string): Promise<string> {
-  if (env.GITHUB_APP_ID && env.fixture-placeholder && installationId) {
+  if (env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && installationId) {
     const { token } = await installationToken(env, installationId, Date.now());
     return token;
   }
@@ -2088,7 +2109,7 @@ async function mintJit(
       headers: {
         authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
-        "user-agent": "fixture-placeholder",
+        "user-agent": "corelink-spawn-worker",
       },
       body: JSON.stringify({
         name,
@@ -2133,7 +2154,7 @@ async function mintJit(
 // Never throws so callers can preserve their original failure, but false is an
 // uncertain ownership result. Durable retry/teardown callers must retain their
 // attempt until this returns true (including 404-already-gone).
-async function fixture-placeholder(
+async function deleteRunnerRegistration(
   env: Env,
   repoFullName: string,
   runnerId: number | undefined,
@@ -2149,20 +2170,20 @@ async function fixture-placeholder(
         headers: {
           authorization: `Bearer ${authToken}`,
           accept: "application/vnd.github+json",
-          "user-agent": "fixture-placeholder",
+          "user-agent": "corelink-spawn-worker",
         },
       },
     );
     // 404 ⇒ already gone (an ephemeral runner self-deletes) — the desired end state.
     if (resp.ok || resp.status === 404) return true;
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "runner_registration_delete_failed", {
       repo: repoFullName,
       runnerId,
       status: resp.status,
     });
     return false;
   } catch (e) {
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "runner_registration_delete_failed", {
       repo: repoFullName,
       runnerId,
       error: (e as Error).message,
@@ -2185,11 +2206,11 @@ function jobTenantKey(jobId: string): string {
 
 function jobAttributionStore(env: Env): JobAttributionStore | undefined {
   if (!env.CONTAINMENT) return undefined;
-  const authority = fixture-placeholder(env);
+  const authority = containmentAuthority(env);
   return {
     get: key => authority.readJobAttribution(key),
-    putIfAbsent: (key, value) => authority.fixture-placeholder(key, value),
-    delete: key => authority.fixture-placeholder(key),
+    putIfAbsent: (key, value) => authority.putJobAttributionIfAbsent(key, value),
+    delete: key => authority.deleteJobAttribution(key),
   };
 }
 
@@ -2248,9 +2269,9 @@ const SPAWNED_BOX_TTL_S = 86400; // 24 h
 // credential, so nothing is expected to still be working past it.
 const STALE_BOX_AGE_MS = JOB_PAT_TTL_S * 1000;
 
-const fixture-placeholder = "rhandle:";
+const RUNNER_HANDLE_PREFIX = "rhandle:";
 function runnerHandleKey(runnerName: string): string {
-  return `${fixture-placeholder}${runnerName}`;
+  return `${RUNNER_HANDLE_PREFIX}${runnerName}`;
 }
 
 // Container-start retry (root-caused 2026-07-03): Cloudflare Container DO
@@ -2267,7 +2288,7 @@ const SPAWN_MAX_ATTEMPTS = 3;
 // A single `start()` attempt is abandoned after this so a HUNG DO start (the
 // transient can hang, not just throw) is retried on a fresh DO instead of
 // stalling forever. Kept short so 3 attempts + backoff fit the background budget.
-const fixture-placeholder = 8000;
+const SPAWN_ATTEMPT_TIMEOUT_MS = 8000;
 
 // ── Ghost containers (2026-08-03) ────────────────────────────────────────────
 //
@@ -2277,9 +2298,9 @@ const fixture-placeholder = 8000;
 // dist/lib/container.js:1378-1421) — so both failure shapes leave a container
 // behind:
 //
-//   • the SDK throws `fixture-placeholder` after its own poll window, but
+//   • the SDK throws `NO_CONTAINER_INSTANCE_ERROR` after its own poll window, but
 //     the platform start was already issued and may still be provisioning;
-//   • our `fixture-placeholder` race rejects while the DO-side RPC keeps
+//   • our `SPAWN_ATTEMPT_TIMEOUT_MS` race rejects while the DO-side RPC keeps
 //     running to completion — Workers does not cancel an RPC because the caller
 //     stopped awaiting it.
 //
@@ -2322,12 +2343,12 @@ interface GhostRecord {
   reason: string;
 }
 
-// Durably record an abandoned container handle for `fixture-placeholder`.
+// Durably record an abandoned container handle for `sweepGhostContainers`.
 // Written BEFORE the inline destroy, because the inline destroy is the attempt
 // that can lose a race (destroying a container the platform has not finished
 // creating is a no-op, and it then comes up anyway). Best-effort: without KV the
 // inline destroy still runs and `sleepAfter` is still the backstop.
-async function fixture-placeholder(
+async function recordGhostContainer(
   env: Env,
   handle: string,
   ns: GhostNs,
@@ -2353,13 +2374,13 @@ async function abandonContainer(
   ns: GhostNs,
   reason: string,
 ): Promise<boolean> {
-  await fixture-placeholder(env, handle, ns, reason);
+  await recordGhostContainer(env, handle, ns, reason);
   let container: { teardown(): Promise<void>; isAlive(): Promise<boolean> } | undefined;
   let teardownSucceeded = false;
   try {
     container = (
       ns === "check"
-        ? getContainer(env.fixture-placeholder, handle)
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
         : getContainer(env.RUNNER_CONTAINER, handle)
     ) as unknown as { teardown(): Promise<void>; isAlive(): Promise<boolean> };
     await container.teardown();
@@ -2367,14 +2388,14 @@ async function abandonContainer(
   } catch (e) {
     // Expected when the DO never materialised. The `ghost:` record above is what
     // makes this survivable: the cron re-destroys and confirms.
-    logEvent("info", "fixture-placeholder", { handle, error: (e as Error).message });
+    logEvent("info", "abandon_teardown_threw", { handle, error: (e as Error).message });
   }
-  await bumpMetrics(env, "fixture-placeholder");
+  await bumpMetrics(env, "container_start_abandoned");
   if (!teardownSucceeded || !container) return false;
   try {
     return !(await container.isAlive());
   } catch (e) {
-    logEvent("info", "fixture-placeholder", { handle, error: (e as Error).message });
+    logEvent("info", "abandon_liveness_threw", { handle, error: (e as Error).message });
     return false;
   }
 }
@@ -2390,7 +2411,7 @@ async function abandonContainer(
  * case the inline destroy cannot handle on its own.
  *
  * A box that is still alive after a destroy is LOGGED AT ERROR and kept for the
- * next tick; `fixture-placeholder` counts only CONFIRMED reclaims, so the
+ * next tick; `ghost_container_reaped` counts only CONFIRMED reclaims, so the
  * counter can never report capacity we did not actually get back. The whole point
  * of this sweep is that a container which boots and never does any work is a
  * named event instead of an unexplained 15-minute hole in the fleet's capacity.
@@ -2398,14 +2419,14 @@ async function abandonContainer(
  * Best-effort throughout — a backstop, never a gate. It must never throw into the
  * cron tick that also drives orphan recovery and billing.
  */
-export async function fixture-placeholder(env: Env): Promise<number> {
+export async function sweepGhostContainers(env: Env): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return 0;
   let listed: { keys: { name: string }[] };
   try {
     listed = await kv.list({ prefix: GHOST_KEY_PREFIX });
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "ghost_sweep_list_failed", { error: (e as Error).message });
     return 0;
   }
   let reaped = 0;
@@ -2423,14 +2444,14 @@ export async function fixture-placeholder(env: Env): Promise<number> {
     }
     const container =
       ns === "check"
-        ? getContainer(env.fixture-placeholder, handle)
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
         : getContainer(env.RUNNER_CONTAINER, handle);
     try {
       await container.teardown();
     } catch (e) {
       // A handle whose DO never materialised throws here; that is a box that is
       // already down, so fall through to the liveness check rather than retrying.
-      logEvent("info", "fixture-placeholder", { handle, error: (e as Error).message });
+      logEvent("info", "ghost_teardown_threw", { handle, error: (e as Error).message });
     }
     let alive: boolean;
     try {
@@ -2441,7 +2462,7 @@ export async function fixture-placeholder(env: Env): Promise<number> {
     if (alive) {
       // Still up after a destroy: keep the record and try again next tick. Loud,
       // because this is the failure mode that eats the fleet.
-      logEvent("error", "fixture-placeholder", { handle });
+      logEvent("error", "ghost_container_still_alive", { handle });
       continue;
     }
     await kv.delete(name).catch(() => {
@@ -2450,8 +2471,8 @@ export async function fixture-placeholder(env: Env): Promise<number> {
     reaped++;
   }
   if (reaped > 0) {
-    await bumpMetrics(env, ...Array(reaped).fill("fixture-placeholder"));
-    logEvent("info", "fixture-placeholder", { count: reaped });
+    await bumpMetrics(env, ...Array(reaped).fill("ghost_container_reaped"));
+    logEvent("info", "ghost_containers_reaped", { count: reaped });
   }
   return reaped;
 }
@@ -2487,15 +2508,15 @@ async function startWithRetry<T>(
         start(handle, provisioned),
         new Promise<never>((_, reject) =>
           setTimeout(
-            () => reject(new Error(`start timed out after ${fixture-placeholder}ms`)),
-            fixture-placeholder,
+            () => reject(new Error(`start timed out after ${SPAWN_ATTEMPT_TIMEOUT_MS}ms`)),
+            SPAWN_ATTEMPT_TIMEOUT_MS,
           ),
         ),
       ]);
       return { handle, provisioned, attempt };
     } catch (e) {
       lastErr = e;
-      logEvent("info", "fixture-placeholder", {
+      logEvent("info", "container_start_retry", {
         attempt,
         maxAttempts,
         error: (e as Error).message,
@@ -2538,15 +2559,15 @@ async function cancelSpawnAttempt(
     // `startWithEnv` is issued only after this durable fence resolves. If the
     // fence itself failed, no provider start occurred and a fresh retry does
     // not depend on proving a container liveness result.
-    fixture-placeholder?: boolean;
+    activeAttemptPersisted?: boolean;
     reason: string;
   },
 ): Promise<boolean> {
-  const { jobId, repo, installationId, handle, minted, fixture-placeholder, reason } = opts;
+  const { jobId, repo, installationId, handle, minted, activeAttemptPersisted, reason } = opts;
   let registrationDeleted = false;
   try {
     if (minted) {
-      registrationDeleted = await fixture-placeholder(
+      registrationDeleted = await deleteRunnerRegistration(
         env,
         repo,
         minted.runnerId,
@@ -2559,13 +2580,13 @@ async function cancelSpawnAttempt(
     // the local destroy below happens to report the box down.
     if (minted && !registrationDeleted) {
       await abandonContainer(env, handle, "runner", reason);
-      logEvent("error", "fixture-placeholder", { jobId, repo, handle, reason });
+      logEvent("error", "container_start_registration_delete_unconfirmed", { jobId, repo, handle, reason });
       return false;
     }
     const tornDown = await abandonContainer(env, handle, "runner", reason);
-    if (!fixture-placeholder) return true;
+    if (!activeAttemptPersisted) return true;
     if (!tornDown) {
-      logEvent("error", "fixture-placeholder", { jobId, repo, handle, reason });
+      logEvent("error", "container_start_abandon_unconfirmed", { jobId, repo, handle, reason });
       return false;
     }
     // The start callback records this handle before issuing its provider RPC.
@@ -2574,11 +2595,11 @@ async function cancelSpawnAttempt(
     // the retry rather than clearing a newer runner's ownership proof.
     const active = await concurrencySlots(env).readActiveAttempt(jobId);
     if (!active || active.handle !== handle || active.runnerName !== minted?.runnerName
-      || !(await concurrencySlots(env).fixture-placeholder(jobId, active.generation, active.ownerToken, handle))) {
-      logEvent("error", "fixture-placeholder", { jobId, repo, handle, reason });
+      || !(await concurrencySlots(env).retireActiveAttemptForRetry(jobId, active.generation, active.ownerToken, handle))) {
+      logEvent("error", "container_start_attempt_retire_unconfirmed", { jobId, repo, handle, reason });
       return false;
     }
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "container_start_abandoned", {
       jobId,
       repo,
       handle,
@@ -2612,16 +2633,16 @@ async function spawnRunner(
   env: Env,
   jobId: string,
   mint: ContainerEnvResult,
-  opts: fixture-placeholder,
+  opts: ContainmentDriveOpts,
 ): Promise<{ handle: string; runnerName: string; attempt: number }> {
   const { repo, installationId, labels } = opts;
-  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number; fixture-placeholder?: boolean }>(
+  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number; activeAttemptPersisted?: boolean }>(
     async (attempt) => {
       const minted = await mintJit(env, repo, labels, installationId);
       // Persist the exact GitHub runner identity before its container can start.
       // Completion later presents this same runner_name; without this fence a
       // fast completion could race a post-start binding and leave capacity held.
-      if (opts.fixture-placeholder && !(await opts.fixture-placeholder(minted.runnerName))) {
+      if (opts.bindProviderIdentity && !(await opts.bindProviderIdentity(minted.runnerName))) {
         throw new Error("spawn claim provider binding unavailable");
       }
       await bumpMetrics(env, "jit_minted");
@@ -2641,26 +2662,26 @@ async function spawnRunner(
       // projection below.  A timeout/crash at any later point therefore leaves
       // a generation-bound exact-handle teardown obligation in the singleton
       // authority, not an expiring best-effort KV hint.
-      if (!(await concurrencySlots(env).fixture-placeholder(
+      if (!(await concurrencySlots(env).persistActiveAttempt(
         jobId, h, minted.runnerName, minted.runnerId, provisioned.attempt, repo, installationId, mint.preparationId,
       ))) throw new Error("active spawn attempt was not durably recorded");
-      provisioned.fixture-placeholder = true;
-      if (mint.fixture-placeholder) await fixture-placeholder(env).fixture-placeholder(mint.fixture-placeholder, jobId);
+      provisioned.activeAttemptPersisted = true;
+      if (mint.computeReservationId) await containmentAuthority(env).claimComputeProvider(mint.computeReservationId, jobId);
       await getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
-        fixture-placeholder: minted.jit,
+        CORELINK_RUNNER_JITCONFIG: minted.jit,
         ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
       });
     },
     (h, provisioned, reason) =>
-      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, fixture-placeholder: provisioned.fixture-placeholder, reason }),
+      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, activeAttemptPersisted: provisioned.activeAttemptPersisted, reason }),
     // A fresh provider attempt needs its own independently funded reservation.
-    mint.fixture-placeholder ? 1 : SPAWN_MAX_ATTEMPTS,
+    mint.computeReservationId ? 1 : SPAWN_MAX_ATTEMPTS,
   );
   const runnerName = provisioned.minted.runnerName;
   if (isContainmentDrive(opts)) {
     // The retry helper returned only after this JIT candidate's start completed.
     // Timed-out/abandoned candidates never get a reusable DO witness.
-    await fixture-placeholder(
+    await writeContainmentEvidence(
       env,
       opts,
       "attempt",
@@ -2676,13 +2697,13 @@ async function spawnRunner(
   // keeps its immutable witness/read-back sequence below, which binds the same
   // facts to the containment permit before it may become terminal.
   if (!isContainmentDrive(opts)) {
-    await fixture-placeholder(env, opts, mint, handle, runnerName, provisioned.minted.runnerId);
+    await persistSpawnPostStartProjections(env, opts, mint, handle, runnerName, provisioned.minted.runnerId);
     return { handle, runnerName, attempt };
   }
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
     try { await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant); }
-    catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
     // Cache the tenant's monthly compute allowance (server #975) so COMPLETION —
     // a separate Worker invocation that never talks to the mint — can tell how
     // close this tenant is to it. Keyed per TENANT, not per job: the allowance is
@@ -2691,7 +2712,7 @@ async function spawnRunner(
     if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
       try { await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
         expirationTtl: VCPU_KEY_TTL_S,
-      }); } catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+      }); } catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
     }
   }
   if (env.RUNNER_JOB_PATS) {
@@ -2702,7 +2723,7 @@ async function spawnRunner(
     // from the known handle FIRST, then require the mutable completion source to
     // be durably written/read back before it may reach terminal RESULT.
     if (isContainmentDrive(opts)) {
-      await fixture-placeholder(env, opts, "lease", jobHandleKey(jobId), handle);
+      await writeContainmentEvidence(env, opts, "lease", jobHandleKey(jobId), handle);
       await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
         expirationTtl: JOB_PAT_TTL_S,
       });
@@ -2711,7 +2732,7 @@ async function spawnRunner(
     } else {
       try { await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
         expirationTtl: JOB_PAT_TTL_S,
-      }); } catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+      }); } catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
     }
     // …and stash it under the RUNNER NAME, which is what completion tears down by.
     // This is the binding that survives GitHub's job→runner permutation; the
@@ -2739,7 +2760,7 @@ async function spawnRunner(
       {
         expirationTtl: JOB_PAT_TTL_S,
       },
-    ); } catch (e) { logEvent("error", "fixture-placeholder", { jobId, runnerName, error: (e as Error).message }); throw e; }
+    ); } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
     // …and the reaper's durable twin, which deliberately OUTLIVES the binding
     // above. Same facts, longer TTL: this is what lets the sweep find a box that
     // has outlived its own keep-alive record instead of trusting `sleepAfter`.
@@ -2753,7 +2774,7 @@ async function spawnRunner(
         t: Date.now(),
       }),
       { expirationTtl: SPAWNED_BOX_TTL_S },
-    ); } catch (e) { logEvent("error", "fixture-placeholder", { jobId, runnerName, error: (e as Error).message }); throw e; }
+    ); } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
   }
   return { handle, runnerName, attempt };
 }
@@ -2764,9 +2785,9 @@ async function spawnRunner(
  * failed projection deliberately throws into exact-handle cleanup rather than
  * silently returning a false successful spawn.
  */
-export async function fixture-placeholder(
+export async function persistSpawnPostStartProjections(
   env: Env,
-  opts: Pick<fixture-placeholder, "jobId" | "repo" | "installationId">,
+  opts: Pick<ContainmentDriveOpts, "jobId" | "repo" | "installationId">,
   mint: Pick<ContainerEnvResult, "tenant" | "maxVcpuH">,
   handle: string,
   runnerName: string,
@@ -2777,39 +2798,39 @@ export async function fixture-placeholder(
   if (!kv) return;
   if (mint.tenant) {
     try { await kv.put(jobTenantKey(jobId), mint.tenant); }
-    catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
     if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
       try { await kv.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), { expirationTtl: VCPU_KEY_TTL_S }); }
-      catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+      catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
     }
   }
   try { await kv.put(jobHandleKey(jobId), handle, { expirationTtl: JOB_PAT_TTL_S }); }
-  catch (e) { logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }); throw e; }
+  catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
   try {
     await kv.put(runnerHandleKey(runnerName), encodeRunnerBinding({ h: handle, rid: runnerId, repo, inst: installationId, jid: jobId, t: Date.now() }), { expirationTtl: JOB_PAT_TTL_S });
-  } catch (e) { logEvent("error", "fixture-placeholder", { jobId, runnerName, error: (e as Error).message }); throw e; }
+  } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
   try {
     await kv.put(spawnedBoxKey(runnerName), JSON.stringify({ h: handle, rid: runnerId, repo, inst: installationId, t: Date.now() }), { expirationTtl: SPAWNED_BOX_TTL_S });
-  } catch (e) { logEvent("error", "fixture-placeholder", { jobId, runnerName, error: (e as Error).message }); throw e; }
+  } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
 }
 
 /**
  * Drive the durable teardown intent.  This intentionally never clears a tenant
  * vCPU key: it is tenant-wide subscription state, not an attempt projection.
  */
-async function fixture-placeholder(env: Env, jobId: string): Promise<boolean> {
+async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boolean> {
   let attempt: ActiveSpawnAttempt | null;
   try { attempt = await concurrencySlots(env).readActiveAttempt(jobId); }
   catch { return false; }
   if (!attempt) return false;
-  if (!attempt.fixture-placeholder) {
+  if (!attempt.teardownConfirmedAtMs) {
     // Revoke exactly the JIT registration recorded for this handle before a late
     // provider boot can claim unrelated queued work.  This is idempotent (404 is
     // success) and uses the installation captured at mint time.
     // A failed DELETE means GitHub may still allow this exact runner to claim a
     // job. Do not certify the container, release capacity, or terminalize the
     // intent until the registration fence is confirmed (404 is confirmed).
-    if (!(await fixture-placeholder(env, attempt.repo, attempt.runnerId, attempt.installationId))) return false;
+    if (!(await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId))) return false;
     const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
     // A failed teardown is not evidence that the exact handle is down. Retain the
     // intent for cron even if a follow-up liveness probe happens to say false.
@@ -2818,7 +2839,7 @@ async function fixture-placeholder(env: Env, jobId: string): Promise<boolean> {
     try { alive = await container.isAlive(); } catch { return false; }
     if (alive) return false;
     try {
-      if (!(await concurrencySlots(env).fixture-placeholder(jobId, attempt.generation, attempt.ownerToken, attempt.handle))) return false;
+      if (!(await concurrencySlots(env).markAttemptTeardownConfirmed(jobId, attempt.generation, attempt.ownerToken, attempt.handle))) return false;
     } catch { return false; }
   }
   // Retain the intent until EVERY local release has acknowledged.  A release
@@ -2826,36 +2847,36 @@ async function fixture-placeholder(env: Env, jobId: string): Promise<boolean> {
   if (attempt.preparationId) {
     try { await concurrencySlots(env).releasePreparation(jobId, attempt.preparationId); } catch { return false; }
   }
-  if (!await fixture-placeholder(env, jobId)) return false;
+  if (!await releaseConcurrencySlot(env, jobId)) return false;
   let confirmed: ActiveSpawnAttempt | null;
   try {
-    confirmed = await concurrencySlots(env).fixture-placeholder(jobId, attempt.generation, attempt.ownerToken, attempt.handle);
+    confirmed = await concurrencySlots(env).confirmAttemptTeardown(jobId, attempt.generation, attempt.ownerToken, attempt.handle);
   } catch { return false; }
   if (!confirmed) return false;
   return true;
 }
 
-export async function fixture-placeholder(env: Env): Promise<number> {
+export async function retryActiveSpawnTeardowns(env: Env): Promise<number> {
   let attempts: ActiveSpawnAttempt[];
-  try { attempts = await concurrencySlots(env).fixture-placeholder(25); } catch { return 0; }
+  try { attempts = await concurrencySlots(env).pendingActiveAttempts(25); } catch { return 0; }
   let settled = 0;
-  for (const attempt of attempts) if (await fixture-placeholder(env, attempt.jobId)) settled++;
+  for (const attempt of attempts) if (await recoverActiveSpawnAttempt(env, attempt.jobId)) settled++;
   return settled;
 }
 
 export async function revokeCompletedJob(env: Env, jobId: string, derivedTenant?: string): Promise<boolean> {
-  return fixture-placeholder(env, fixture-placeholder(env), jobId, derivedTenant);
+  return revokeCompletedJobOwned(env, containmentAuthority(env), jobId, derivedTenant);
 }
 
-export async function fixture-placeholder(env: Env): Promise<number> {
-  return fixture-placeholder(env, fixture-placeholder(env));
+export async function retryFailedRevocations(env: Env): Promise<number> {
+  return retryFailedRevocationsOwned(env, containmentAuthority(env));
 }
 
-export async function fixture-placeholder(
+export async function dispatchTenantSuspensionRevocations(
   env: Env,
   event: { event_id: string; tenant_id: string },
 ): Promise<number> {
-  return fixture-placeholder(env, fixture-placeholder(env), event);
+  return dispatchTenantSuspensionRevocationsOwned(env, containmentAuthority(env), event);
 }
 
 // Tear down a completed job's runner container by the DO handle stashed at spawn.
@@ -2863,7 +2884,7 @@ export async function fixture-placeholder(
 // holding account container-instance capacity and starving new spawns. A slot is
 // released only after the exact handle reports down; a failed/uncertain teardown
 // keeps its durable handle for the next completion/retry tick.
-async function fixture-placeholder(
+async function teardownCompletedRunner(
   env: Env,
   jobId: string,
   runnerName?: string,
@@ -2908,11 +2929,11 @@ async function fixture-placeholder(
   }
   try {
     if (await container.isAlive()) {
-      logEvent("error", "fixture-placeholder", { jobId, handle });
+      logEvent("error", "teardown_still_alive", { jobId, handle });
       return false;
     }
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+    logEvent("error", "teardown_confirmation_failed", { jobId, error: (e as Error).message });
     return false;
   }
   // With a runner name, remove only that exact runner binding. A job pointer can
@@ -2929,7 +2950,7 @@ async function fixture-placeholder(
   return true;
 }
 
-async function fixture-placeholder(env: Env, jobId: string, runnerName?: string): Promise<boolean | null> {
+async function teardownObligationPresent(env: Env, jobId: string, runnerName?: string): Promise<boolean | null> {
   if (!env.RUNNER_JOB_PATS) return false;
   try {
     if (runnerName) {
@@ -2955,7 +2976,7 @@ interface CompletedJob {
 // the request's CF colo (the substrate's natural 3-char region, ADR-0008), else
 // "". Shared by the live push AND the durable usage-ledger write so both stamp the
 // SAME region (the reconciler later validates it is 3-char).
-function fixture-placeholder(env: Env, request: Request): string {
+function resolveBillingRegion(env: Env, request: Request): string {
   const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo;
   // BILLING_REGION is an explicit override; otherwise use the actual colo
   // supplied by Cloudflare. Missing provider metadata remains unbillable.
@@ -2971,7 +2992,7 @@ function fixture-placeholder(env: Env, request: Request): string {
 // NEVER-mis-bill: a tenant-less record could never be safely billed) or the timings
 // aren't finite (nothing billable). Best-effort + fail-open: a write failure logs
 // and never breaks the webhook. MUST run BEFORE the `jtenant:` stash is deleted.
-async function fixture-placeholder(
+async function recordCompletedJobUsage(
   env: Env,
   jobId: string,
   wj: CompletedJob | undefined,
@@ -2992,7 +3013,7 @@ async function fixture-placeholder(
     });
     return true;
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+    logEvent("error", "usage_ledger_write_failed", { jobId, error: (e as Error).message });
     return false;
   }
 }
@@ -3014,7 +3035,7 @@ async function fixture-placeholder(
 // Best-effort throughout: it runs after the response and every failure is
 // swallowed. A missed warning costs a surprised customer; a thrown one would cost
 // the completion webhook, which also does revoke + teardown + billing.
-async function fixture-placeholder(
+async function warnIfNearVcpuCeiling(
   env: Env,
   jobId: string,
   tenant: string | undefined,
@@ -3044,7 +3065,7 @@ async function fixture-placeholder(
     // to reading them one at a time.
     const [usageRaw, warnedRaws] = await Promise.all([
       kv.get(usageKey),
-      Promise.all(fixture-placeholder.map((t) => kv.get(vcpuWarnedKey(tenant, period, t)))),
+      Promise.all(VCPU_WARN_THRESHOLDS.map((t) => kv.get(vcpuWarnedKey(tenant, period, t)))),
     ]);
     const prior = Number.parseFloat(usageRaw ?? "0");
     const total = (Number.isFinite(prior) ? prior : 0) + jobVcpuSeconds;
@@ -3056,8 +3077,8 @@ async function fixture-placeholder(
     await kv.put(usageKey, String(total), { expirationTtl: VCPU_KEY_TTL_S });
 
     const warned = new Set<number>();
-    for (let i = 0; i < fixture-placeholder.length; i++) {
-      if (warnedRaws[i]) warned.add(fixture-placeholder[i]);
+    for (let i = 0; i < VCPU_WARN_THRESHOLDS.length; i++) {
+      if (warnedRaws[i]) warned.add(VCPU_WARN_THRESHOLDS[i]);
     }
     const step = vcpuWarningStep(total, ceilingVcpuH, warned);
     if (step.crossed === null) return;
@@ -3068,7 +3089,7 @@ async function fixture-placeholder(
       expirationTtl: VCPU_KEY_TTL_S,
     });
     const exceeded = step.crossed >= 1;
-    logEvent(exceeded ? "error" : "info", exceeded ? "fixture-placeholder" : "fixture-placeholder", {
+    logEvent(exceeded ? "error" : "info", exceeded ? "vcpu_ceiling_exceeded" : "vcpu_ceiling_approaching", {
       jobId,
       tenant,
       period,
@@ -3080,9 +3101,9 @@ async function fixture-placeholder(
         ? "further usage this period bills as overage at $0.30/vCPU-h"
         : "approaching the included allowance; overage bills at $0.30/vCPU-h",
     });
-    await bumpMetrics(env, exceeded ? "fixture-placeholder" : "fixture-placeholder");
+    await bumpMetrics(env, exceeded ? "vcpu_ceiling_exceeded" : "vcpu_ceiling_approaching");
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+    logEvent("error", "vcpu_ceiling_warn_failed", { jobId, error: (e as Error).message });
   }
 }
 
@@ -3091,7 +3112,7 @@ async function fixture-placeholder(
 // a slot·seconds duration AND we have a 3-char region. Best-effort + FAIL-OPEN:
 // any error is swallowed (billing never breaks the webhook). `region` defaults to
 // the request's CF colo (the substrate's natural 3-char region, ADR-0008).
-async function fixture-placeholder(
+async function maybeBillCompletedJob(
   env: Env,
   jobId: string,
   wj: CompletedJob | undefined,
@@ -3101,17 +3122,17 @@ async function fixture-placeholder(
   // F6 (W7): bill ONLY the SERVER-DERIVED tenant (stashed at spawn). The old
   // `?? env.CLW_TENANT` fallback mis-attributed a customer's runner_slot_seconds to
   // the wrangler CLW_TENANT (dogfood) on a `jtenant:` KV-miss — exactly what the
-  // reconciler's I2 rule forbids (lib.ts fixture-placeholder emits 0, not a
+  // reconciler's I2 rule forbids (lib.ts reconcileCompletedJobBilling emits 0, not a
   // CLW_TENANT bill). No derived tenant ⇒ NO push (under-bill, NEVER mis-bill). Billing
   // is OFF today (BILLING_INGEST_URL unset); this makes the path correct BEFORE
   // multi-tenant billing is armed (3-lens audit F6/Lens C).
   const billedTenant = derivedTenant;
-  if (!env.BILLING_INGEST_URL || !env.fixture-placeholder || !billedTenant) return false;
+  if (!env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !billedTenant) return false;
   try {
     const startedMs = wj?.started_at ? Date.parse(wj.started_at) : NaN;
     const completedMs = wj?.completed_at ? Date.parse(wj.completed_at) : NaN;
     if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs)) return false;
-    const region = fixture-placeholder(env, request);
+    const region = resolveBillingRegion(env, request);
     if (region.length !== 3) return false; // ingest validates 3-char; skip if unknown
     const ev = await buildUsageEvent({
       tenantId: billedTenant,
@@ -3137,7 +3158,7 @@ function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
 
 type SpawnClaimLease = Pick<SpawnClaimRecord, "generation" | "ownerToken">;
 
-async function fixture-placeholder(env: Env, jobId: string): Promise<SpawnClaimLease | null> {
+async function acquireSpawnClaimAtomic(env: Env, jobId: string): Promise<SpawnClaimLease | null> {
   let acquired: SpawnClaimLease | null = null;
   try {
     if (!env.CONCURRENCY_SLOTS) return null;
@@ -3169,12 +3190,12 @@ async function fixture-placeholder(env: Env, jobId: string): Promise<SpawnClaimL
     if (acquired && env.CONCURRENCY_SLOTS) {
       await concurrencySlots(env).releaseSpawnClaim(jobId, acquired.generation, acquired.ownerToken).catch(() => undefined);
     }
-    logEvent("error", "fixture-placeholder", { jobId, error: (error as Error).message });
+    logEvent("error", "spawn_claim_authority_unavailable", { jobId, error: (error as Error).message });
     return null;
   }
 }
 
-async function fixture-placeholder(env: Env, jobId: string, lease: SpawnClaimLease | null): Promise<void> {
+async function releaseSpawnClaimAtomic(env: Env, jobId: string, lease: SpawnClaimLease | null): Promise<void> {
   if (!lease) return;
   try {
     const released = await concurrencySlots(env).releaseSpawnClaim(jobId, lease.generation, lease.ownerToken);
@@ -3189,7 +3210,7 @@ async function fixture-placeholder(env: Env, jobId: string, lease: SpawnClaimLea
       } catch { /* legacy marker: conservative adoption leaves it untouched */ }
     }
   } catch (error) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (error as Error).message });
+    logEvent("error", "spawn_claim_release_failed", { jobId, error: (error as Error).message });
   }
 }
 
@@ -3202,27 +3223,27 @@ function spawnClaimCallbacks(env: Env, jobId: string): {
   let lease: SpawnClaimLease | null = null;
   return {
     claim: async () => {
-      lease = await fixture-placeholder(env, jobId);
+      lease = await acquireSpawnClaimAtomic(env, jobId);
       return lease !== null;
     },
     release: async () => {
-      await fixture-placeholder(env, jobId, lease);
+      await releaseSpawnClaimAtomic(env, jobId, lease);
       lease = null;
     },
     active: async () => {
       if (!lease || !env.CONCURRENCY_SLOTS) return false;
-      try { return await concurrencySlots(env).fixture-placeholder(jobId, lease.generation, lease.ownerToken); }
+      try { return await concurrencySlots(env).markSpawnClaimActive(jobId, lease.generation, lease.ownerToken); }
       catch { return false; }
     },
     bindProvider: async (providerIdentity: string) => {
       if (!lease || !env.CONCURRENCY_SLOTS) return false;
-      try { return await concurrencySlots(env).fixture-placeholder(jobId, lease.generation, lease.ownerToken, providerIdentity); }
+      try { return await concurrencySlots(env).bindSpawnClaimProvider(jobId, lease.generation, lease.ownerToken, providerIdentity); }
       catch { return false; }
     },
   };
 }
 
-function retryEpochAuthority(env: Env): fixture-placeholder | null {
+function retryEpochAuthority(env: Env): RetryEpochAuthorityRpc | null {
   if (!env.CONCURRENCY_SLOTS) return null;
   return retryEpochClient(() => concurrencySlots(env));
 }
@@ -3238,7 +3259,7 @@ async function recordRetryAttempt(
   try {
     return await authority.record(jobId, epochId, legacyFloor);
   } catch (error) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (error as Error).message });
+    logEvent("error", "retry_epoch_authority_failed", { jobId, error: (error as Error).message });
     return null;
   }
 }
@@ -3249,7 +3270,7 @@ async function readRetryAttempts(env: Env, jobId: string): Promise<number | null
   try {
     return await authority.read(jobId);
   } catch (error) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (error as Error).message });
+    logEvent("error", "retry_epoch_authority_read_failed", { jobId, error: (error as Error).message });
     return null;
   }
 }
@@ -3262,12 +3283,12 @@ async function retryOwnerEpochId(effectId: string, owner: string, epoch: number)
 // Fully guarded: swallows BOTH a synchronous throw (an unbound binding in a
 // partial/test env) AND an async DO error — a missed release self-heals at the
 // slot TTL, so a release failure must NEVER break the webhook / spawn-fail path.
-async function fixture-placeholder(env: Env, jobId: string): Promise<boolean> {
+async function releaseConcurrencySlot(env: Env, jobId: string): Promise<boolean> {
   try {
     await concurrencySlots(env).release(jobId);
     return true;
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+    logEvent("error", "concurrency_slot_release_failed", { jobId, error: (e as Error).message });
     return false;
   }
 }
@@ -3276,17 +3297,17 @@ async function fixture-placeholder(env: Env, jobId: string): Promise<boolean> {
 // a replacement claim. Keep it diagnostic until provider cancellation and a
 // transactional generation authority exist (F007/T3-W16); it must never mutate
 // a claim or release capacity based on absence from a separate KV key.
-const fixture-placeholder = 32;
+const STALE_CLAIM_DIAGNOSTIC_LIMIT = 32;
 
 /** Observe old claims; authoritative cancellation remains deferred. */
-export async function fixture-placeholder(env: Env, nowMs = Date.now()): Promise<number> {
+export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promise<number> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return 0;
   let listed: { keys: { name: string }[] };
   try {
     listed = await kv.list({ prefix: "spawn:" });
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "stale_spawn_claim_list_failed", { error: (e as Error).message });
     return 0;
   }
   let diagnosed = 0;
@@ -3307,12 +3328,12 @@ export async function fixture-placeholder(env: Env, nowMs = Date.now()): Promise
     } catch {
       continue;
     }
-    if (diagnosed < fixture-placeholder) {
-      logEvent("error", "fixture-placeholder", {
+    if (diagnosed < STALE_CLAIM_DIAGNOSTIC_LIMIT) {
+      logEvent("error", "stale_spawn_claim_candidate", {
         jobId,
         ageMs: age,
-        fixture-placeholder: Boolean(handle),
-        authority: "fixture-placeholder",
+        durableHandlePresent: Boolean(handle),
+        authority: "deferred_provider_cancellation",
       });
       diagnosed++;
     }
@@ -3331,7 +3352,7 @@ export async function fixture-placeholder(env: Env, nowMs = Date.now()): Promise
 // uses the bounded ContainmentDO budget so a short hiccup does not block
 // legitimate work, while a sustained outage admits at most five starts per
 // rolling minute and an unavailable budget refuses closed.
-export async function fixture-placeholder(
+export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
   mint: Pick<ContainerEnvResult, "tenant" | "maxConcurrency">,
@@ -3341,14 +3362,14 @@ export async function fixture-placeholder(
   const warm = mint.tenant != null && mint.maxConcurrency != null;
   const key = warm ? (mint.tenant as string) : `repo:${repo}`;
   const perKeyCap = warm
-    ? Math.min(mint.maxConcurrency as number, fixture-placeholder)
+    ? Math.min(mint.maxConcurrency as number, FLEET_MAX_CONCURRENCY)
     : COLD_REPO_CAP;
   try {
     return await concurrencySlots(env).acquire(
       key,
       jobId,
       perKeyCap,
-      fixture-placeholder,
+      FLEET_MAX_CONCURRENCY,
       SLOT_TTL_S * 1000,
       preparationId,
     );
@@ -3358,12 +3379,12 @@ export async function fixture-placeholder(
     let verdict: { admitted: boolean; reason?: string };
     try {
       verdict = env.CONTAINMENT
-        ? await fixture-placeholder(env).fixture-placeholder()
-        : { admitted: false, reason: "fixture-placeholder" };
+        ? await containmentAuthority(env).spendAdmissionBudget()
+        : { admitted: false, reason: "slot_failopen_budget_unreadable" };
     } catch {
-      verdict = { admitted: false, reason: "fixture-placeholder" };
+      verdict = { admitted: false, reason: "slot_failopen_budget_unreadable" };
     }
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "concurrency_slot_acquire_error_failopen", {
       jobId,
       key,
       error: (e as Error).message,
@@ -3379,57 +3400,57 @@ export async function fixture-placeholder(
 // attempt; known preparation failures clean up their own slot and credential.
 async function prepareSpawn(
   env: Env,
-  opts: fixture-placeholder,
+  opts: ContainmentDriveOpts,
 ): Promise<ContainerEnvResult> {
   const { jobId, repo, installationId, labels } = opts;
   // A deleted App installation is a durable terminal fence.  Check at the last
   // point before authorization/mint too: an event may have entered an inbox
   // before its deletion delivery was processed.
-  if (installationId && await fixture-placeholder(env, installationId)) {
-    throw new SpawnRefusedError("fixture-placeholder");
+  if (installationId && await installationIsTombstoned(env, installationId)) {
+    throw new SpawnRefusedError("installation_deleted");
   }
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
-  const env0 = env.fixture-placeholder
+  const env0 = env.SPAWN_WORKER_PUBLIC_URL
     ? {
         stash: {
           stash: (leaseId, ticket, cred, ttlMs) =>
             env.CRED_STASH.get(env.CRED_STASH.idFromName(leaseId)).stash(ticket, cred, ttlMs),
         } satisfies CredStashLike,
-        fabricEndpoint: env.fixture-placeholder,
+        fabricEndpoint: env.SPAWN_WORKER_PUBLIC_URL,
       }
     : undefined;
   // A configured repository PAT supplements the server-owned installation
   // identity. Both reach authorization and mint, which must derive the same
   // tenant (ADR-0013). Missing configured credentials refuse preparation.
-  // fixture-placeholder re-drives explicitly use their supplied installation
+  // Reservation-contained re-drives explicitly use their supplied installation
   // only. They never let a first-party Option-C mapping convert an unmapped cold
   // candidate (or a stored external orphan) into a different credential source.
   const patSecretName = opts.credential_source === "installation-only"
     ? undefined
-    : fixture-placeholder(env.REPO_TENANT_PAT_MAP, repo);
+    : tenantPatSecretForRepo(env.REPO_TENANT_PAT_MAP, repo);
   const acquiringPat = patSecretName
     ? (env as unknown as Record<string, string | undefined>)[patSecretName]
     : undefined;
   if (patSecretName && (typeof acquiringPat !== "string" || !acquiringPat.length || acquiringPat.trim() !== acquiringPat)) {
-    throw new fixture-placeholder();
+    throw new RunnerAuthorizationError();
   }
   if (patSecretName && acquiringPat) {
-    logEvent("info", "fixture-placeholder", { jobId, repo, patSecret: patSecretName });
+    logEvent("info", "mint_option_c_pat_dispatch", { jobId, repo, patSecret: patSecretName });
   }
   const preparationId = crypto.randomUUID();
-  const params = { jobId, repoFullName: repo, installationId, acquiringPat, fixture-placeholder: preparationId };
+  const params = { jobId, repoFullName: repo, installationId, acquiringPat, computeReservationId: preparationId };
   const authorized = await authorizeRunner(env, params);
   let computeOwned = false;
   const releasePreparation = async () => {
     if (computeOwned) {
-      try { await fixture-placeholder(env).fixture-placeholder(preparationId); }
-      catch { logEvent("error", "fixture-placeholder", { jobId }); }
+      try { await containmentAuthority(env).abandonUnusedCompute(preparationId); }
+      catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
     }
     try { await concurrencySlots(env).releasePreparation(jobId, preparationId); }
-    catch { logEvent("error", "fixture-placeholder", { jobId, preparationId }); }
+    catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId }); }
   };
-  const slot = await fixture-placeholder(env, jobId, authorized, repo, preparationId);
+  const slot = await acquireConcurrencySlot(env, jobId, authorized, repo, preparationId);
   if (!slot.admitted) {
     await bumpMetrics(env, "spawn_at_ceiling");
     logEvent("info", "spawn_at_ceiling", { jobId, repo, tenant: authorized.tenant, reason: slot.reason });
@@ -3439,20 +3460,20 @@ async function prepareSpawn(
   try {
     if (authorized.computeGrant) {
       computeOwned = true;
-      await fixture-placeholder(env).prepareCompute({ token: authorized.computeGrant, reservationId: preparationId,
+      await containmentAuthority(env).prepareCompute({ token: authorized.computeGrant, reservationId: preparationId,
         tenantId: authorized.tenant, workloadKind: "spawn_worker_runner", workloadId: jobId, vcpuCount: 4, maximumWallMs: 28_800_000 });
     }
-    mint = await buildContainerEnv(env, { ...params, fixture-placeholder: preparationId }, env0);
+    mint = await buildContainerEnv(env, { ...params, credentialOperationId: preparationId }, env0);
     if (mint.patId && mint.tenant) {
-      await fixture-placeholder(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
+      await containmentAuthority(env).registerCredential({ jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     }
   } catch (error) {
     // Until registration succeeds, the issuer's unadopted operation owns
     // revocation. Close local redemption independently of that remote recovery.
     if (mint?.patId && mint.tenant) {
       try {
-        await env.CRED_STASH.get(env.CRED_STASH.idFromName(fixture-placeholder(jobId, mint.tenant, mint.patId))).wipe();
-      } catch { logEvent("error", "fixture-placeholder", { jobId }); }
+        await env.CRED_STASH.get(env.CRED_STASH.idFromName(runnerCredentialLeaseId(jobId, mint.tenant, mint.patId))).wipe();
+      } catch { logEvent("error", "preparation_stash_wipe_pending", { jobId }); }
     }
     await releasePreparation();
     throw error;
@@ -3460,12 +3481,12 @@ async function prepareSpawn(
   if (mint.authz !== "ok" || mint.tenant !== authorized.tenant
     || mint.maxConcurrency !== authorized.maxConcurrency || mint.maxVcpuH !== authorized.maxVcpuH) {
     if (mint.patId && mint.tenant) {
-      await fixture-placeholder(env, fixture-placeholder(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
+      await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     }
     await releasePreparation();
     await bumpMetrics(env, "spawn_forbidden");
-    logEvent("error", "mint_forbidden", { jobId, repo, reason: "fixture-placeholder" });
-    throw new fixture-placeholder();
+    logEvent("error", "mint_forbidden", { jobId, repo, reason: "authorization_unavailable_or_changed" });
+    throw new RunnerAuthorizationError();
   }
   // F2 (W3): register the revoke-key jobId->patId at MINT time — BEFORE the spawn.
   // Previously it was written only AFTER a successful container start (spawnRunner),
@@ -3475,7 +3496,7 @@ async function prepareSpawn(
   if (mint.patId) {
     if (!mint.tenant) throw new Error("credential authority requires server-derived tenant");
     if (env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.put(jobId, mint.patId, { expirationTtl: JOB_PAT_TTL_S }).catch((e) =>
-      logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }),
+      logEvent("error", "kv_put_job_pat_failed", { jobId, error: (e as Error).message }),
     );
   }
   // Required immutable attribution precedes JIT/container effects. Any
@@ -3484,38 +3505,38 @@ async function prepareSpawn(
     try {
       const authorityStore = jobAttributionStore(env);
       if (!authorityStore) throw new Error("durable job attribution authority unavailable");
-      await fixture-placeholder(authorityStore, { jobId, tenant: mint.tenant });
-      if (!mint.patId) throw new fixture-placeholder();
+      await persistJobAttribution(authorityStore, { jobId, tenant: mint.tenant });
+      if (!mint.patId) throw new RunnerAuthorizationError();
       // The issuer retires its timeout obligation only after durable local
       // credential ownership and attribution exist, before any provider effect.
-      await fixture-placeholder(env, preparationId, mint.patId);
+      await adoptIssuedRunnerCredential(env, preparationId, mint.patId);
     } catch (e) {
-      if (mint.patId) await fixture-placeholder(env, fixture-placeholder(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration }).catch(() => {});
+      if (mint.patId) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration }).catch(() => {});
       await releasePreparation();
       throw e;
     }
   }
-  if (computeOwned) mint.fixture-placeholder = preparationId;
+  if (computeOwned) mint.computeReservationId = preparationId;
   mint.preparationId = preparationId;
   return mint;
 }
 
 /** An invocation that never reached provider dispatch owns only its preparation. */
-async function fixture-placeholder(
-  env: Env, authority: ReturnType<typeof fixture-placeholder>, jobId: string,
+async function abandonPreparedSpawn(
+  env: Env, authority: ReturnType<typeof containmentAuthority>, jobId: string,
   prepared: ContainerEnvResult | undefined,
 ): Promise<void> {
   if (!prepared) return;
-  if (prepared.fixture-placeholder) {
-    try { await authority.fixture-placeholder(prepared.fixture-placeholder); }
-    catch { logEvent("error", "fixture-placeholder", { jobId }); }
+  if (prepared.computeReservationId) {
+    try { await authority.abandonUnusedCompute(prepared.computeReservationId); }
+    catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
   }
   if (prepared.preparationId) {
     try { await concurrencySlots(env).releasePreparation(jobId, prepared.preparationId); }
-    catch { logEvent("error", "fixture-placeholder", { jobId, preparationId: prepared.preparationId }); }
+    catch { logEvent("error", "preparation_slot_release_pending", { jobId, preparationId: prepared.preparationId }); }
   }
   if (prepared.patId && prepared.tenant) {
-    await fixture-placeholder(env, authority, { jobId, tenant: prepared.tenant, patId: prepared.patId, lifecycleGeneration: prepared.lifecycleGeneration });
+    await revokeIssuedCredential(env, authority, { jobId, tenant: prepared.tenant, patId: prepared.patId, lifecycleGeneration: prepared.lifecycleGeneration });
   }
 }
 
@@ -3525,12 +3546,12 @@ async function fixture-placeholder(
 // provider effect may actually follow; legacy callers prepare just in time.
 async function driveSpawn(
   env: Env,
-  opts: fixture-placeholder,
+  opts: ContainmentDriveOpts,
   prepared?: ContainerEnvResult,
-): Promise<fixture-placeholder | void> {
+): Promise<ProviderDriveReceipt | void> {
   const { jobId } = opts;
   const containmentIdentity = isContainmentDrive(opts)
-    ? fixture-placeholder(opts.repo, opts.jobId)
+    ? normalizeRedriveIdentity(opts.repo, opts.jobId)
     : null;
   if (isContainmentDrive(opts)) {
     const observedResourceId = containmentIdentity
@@ -3559,8 +3580,8 @@ async function driveSpawn(
     // redelivered and nothing else reports the failure.
     await recordPlacement(env, opts);
     if (isContainmentDrive(opts)) {
-      await fixture-placeholder(env, opts);
-      await fixture-placeholder(env, opts, spawned.attempt);
+      await bindContainmentPlacement(env, opts);
+      await writeContainmentResultEvidence(env, opts, spawned.attempt);
     }
     return {
       resource_id: containmentIdentity
@@ -3570,25 +3591,25 @@ async function driveSpawn(
       provider_signature: spawned.runnerName,
     };
   } catch (e) {
-    if (mint.fixture-placeholder) {
-      try { await fixture-placeholder(env).fixture-placeholder(mint.fixture-placeholder); }
-      catch { logEvent("error", "fixture-placeholder", { jobId }); }
+    if (mint.computeReservationId) {
+      try { await containmentAuthority(env).abandonUnusedCompute(mint.computeReservationId); }
+      catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
     }
     // A failure after the provider start has an ActiveSpawnAttempt.  Its exact
     // handle must be confirmed down before this generation's preparation/claim/
     // slot can be released; a replay must therefore remain deduped even after
     // every KV projection expires.  Pre-start failures have no record and retain
     // the historical guarded release behaviour.
-    const recovered = await fixture-placeholder(env, jobId);
+    const recovered = await recoverActiveSpawnAttempt(env, jobId);
     if (!recovered) {
       let outstanding = false;
       try { outstanding = Boolean(await concurrencySlots(env).readActiveAttempt(jobId)); } catch { outstanding = true; }
-      if (!outstanding) await fixture-placeholder(env, jobId);
+      if (!outstanding) await releaseConcurrencySlot(env, jobId);
     }
     // Revoke this exact issued credential after the attempt fails. The durable
     // authority retains a retry obligation if remote revoke or local wipe fails;
     // a later attempt's credential and the job's admission remain independent.
-    if (mint.patId && mint.tenant) await fixture-placeholder(env, fixture-placeholder(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
+    if (mint.patId && mint.tenant) await revokeIssuedCredential(env, containmentAuthority(env), { jobId, tenant: mint.tenant, patId: mint.patId, lifecycleGeneration: mint.lifecycleGeneration });
     throw e;
   }
 }
@@ -3646,13 +3667,13 @@ export async function recordOrphan(
     logEvent("info", "orphan_recorded", { jobId: opts.jobId, repo: opts.repo });
   } catch (e) {
     // Best-effort: never break the (already-failed) spawn path on a KV hiccup.
-    logEvent("error", "fixture-placeholder", { jobId: opts.jobId, error: (e as Error).message });
+    logEvent("error", "orphan_record_failed", { jobId: opts.jobId, error: (e as Error).message });
   }
 }
 
 // Record a spawn that SUCCEEDED as provisionally placed: a container was started
 // for this job, but nothing has yet confirmed that a runner came online and claimed
-// it. See the fixture-placeholder block in lib.ts for why a started container is
+// it. See the placement-confirmation block in lib.ts for why a started container is
 // not proof of placement (measured: 11 jobs lost in exactly this state).
 //
 // Writes the SAME `orphan:<jobId>` record the failure path uses, plus `placedMs`.
@@ -3669,11 +3690,11 @@ export async function recordOrphan(
 // behaviour before this change, never worse — so it must not fail the spawn.
 export async function recordPlacement(
   env: Env,
-  opts: fixture-placeholder,
+  opts: ContainmentDriveOpts,
 ): Promise<void> {
   // Legacy cold spawns retain their historical no-placement-record behavior:
   // re-drive cannot safely authorize them. A contained event is different: its
-  // DO-owned proof needs the actual fixture-placeholder bytes even when the
+  // DO-owned proof needs the actual provisional-placement bytes even when the
   // webhook was unmapped, otherwise disarmed cold intake wedges at RESULT.
   if (!env.RUNNER_JOB_PATS) {
     if (isContainmentDrive(opts)) throw new Error("containment placement requires RUNNER_JOB_PATS");
@@ -3700,7 +3721,7 @@ export async function recordPlacement(
       // The exact placement bytes exist before the mutable orphan write. Bind
       // them immutably first; if the legacy source write/read-back then fails,
       // RESULT is never written and the issued permit remains safely unresolved.
-      await fixture-placeholder(env, opts, "placement", key, encoded);
+      await writeContainmentEvidence(env, opts, "placement", key, encoded);
       await kv.put(key, encoded, { expirationTtl: ORPHAN_TTL_S });
       if (await kv.get(key) !== encoded) throw new Error("containment placement source was not durably written");
       return;
@@ -3708,7 +3729,7 @@ export async function recordPlacement(
     await kv.put(key, encoded, { expirationTtl: ORPHAN_TTL_S });
   } catch (e) {
     if (isContainmentDrive(opts)) throw e;
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "placement_record_failed", {
       jobId: opts.jobId,
       error: (e as Error).message,
     });
@@ -3718,7 +3739,7 @@ export async function recordPlacement(
 // Drop the provisional placement record — the job is confirmed no longer waiting on
 // us. Called from `workflow_job.completed` (free confirmation, no API call) and from
 // the reconciler when GitHub reports the job as placed.
-async function fixture-placeholder(env: Env, jobId: string): Promise<void> {
+async function clearPlacementRecord(env: Env, jobId: string): Promise<void> {
   if (!env.RUNNER_JOB_PATS) return;
   await env.RUNNER_JOB_PATS.delete(orphanKey(jobId)).catch(() => {
     /* best-effort: the record TTL-expires on its own */
@@ -3761,7 +3782,7 @@ async function fetchJobPlacement(
       headers: {
         authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
-        "user-agent": "fixture-placeholder",
+        "user-agent": "corelink-spawn-worker",
       },
     });
     if (!r.ok) return null;
@@ -3788,7 +3809,7 @@ async function fetchJobPlacement(
 // all ⇒ `null` ⇒ "unknown" ⇒ the box keeps being renewed.
 //
 // Never throws, and every non-200 that is not a 404 is reported as-is for
-// `fixture-placeholder` to resolve to "unknown". A rate-limited or unreachable
+// `runnerActivityVerdict` to resolve to "unknown". A rate-limited or unreachable
 // GitHub must make us MORE conservative, not less.
 async function fetchRunnerActivity(
   env: Env,
@@ -3803,7 +3824,7 @@ async function fetchRunnerActivity(
       headers: {
         authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
-        "user-agent": "fixture-placeholder",
+        "user-agent": "corelink-spawn-worker",
       },
     });
     if (r.status !== 200) return { httpStatus: r.status, runner: null };
@@ -3822,14 +3843,14 @@ async function fetchRunnerActivity(
 // the installation's REST budget and breaks spawning. Bindings past the cap are
 // treated as unverifiable, i.e. RENEWED: running out of API budget must not start
 // reclaiming boxes we can no longer ask about.
-const fixture-placeholder = 40;
+const KEEPALIVE_MAX_VERIFY_PER_TICK = 40;
 
 // The same hard ceiling, for the stranded-job sweep, and for the same reason: a
 // KV full of stale bindings must never let a backstop exhaust the installation's
 // REST budget and break SPAWNING, which is the thing customers actually pay for.
 // Bindings past the cap are simply not examined this tick; the sweep runs every
 // minute and the binding lives 2 h, so nothing is lost by deferring one.
-const fixture-placeholder = 40;
+const STRAND_MAX_VERIFY_PER_TICK = 40;
 
 // The same hard ceiling, for `reapStaleBoxes`, and now it is LOAD-BEARING in a way
 // it was not before. Until this change the reaper refused to verify any record with
@@ -3855,7 +3876,7 @@ const fixture-placeholder = 40;
 // can 403 the whole installation and break SPAWNING, which is the thing customers
 // pay for. Records past the cap are simply not examined this tick (no escalation,
 // nothing destroyed); the sweep runs every minute and the record lives 24 h.
-const fixture-placeholder = 40;
+const REAP_MAX_VERIFY_PER_TICK = 40;
 
 // ── Keep-alive sweep (2026-08-02; verified against GitHub 2026-08-03) ────────
 //
@@ -3883,7 +3904,7 @@ const fixture-placeholder = 40;
 // a repo + label set and to nothing else, so GitHub assigns queued jobs to idle
 // runners by LABEL MATCH and the job→box mapping is a permutation. Teardown keyed
 // on the spawn's jobId is what SIGKILLed five live customer jobs on 2026-08-02 (see
-// the note above `fixture-placeholder`). This sweep never asks about a job. It
+// the note above `RUNNER_HANDLE_PREFIX`). This sweep never asks about a job. It
 // asks GitHub about one specific runner id, and it acts only on that runner's own
 // reported state.
 //
@@ -3892,7 +3913,7 @@ const fixture-placeholder = 40;
 // binding with no runner id, or a tick that hit the verification cap) KEEPS the box
 // renewed. Leaking a container slot is recoverable — `sleepAfter` still reaps it
 // eventually and only the fleet cap suffers. Killing a running customer job is not.
-// `fixture-placeholder` is the meter on how much we are paying for that
+// `keepalive_renewed_unverifiable` is the meter on how much we are paying for that
 // choice; if it dominates, the fix is better verification, never a cheaper default.
 //
 // AND STOPPING IS NOT KILLING. Renewing sets the deadline to now + 15m, so a box we
@@ -3907,7 +3928,7 @@ const fixture-placeholder = 40;
 // drives orphan recovery and billing).
 //
 // `verify` is injected so the decision is testable without reaching GitHub.
-export async function fixture-placeholder(
+export async function keepAliveLiveRunners(
   env: Env,
   verify: (
     env: Env,
@@ -3920,9 +3941,9 @@ export async function fixture-placeholder(
   if (!kv) return 0;
   let listed: { keys: { name: string }[] };
   try {
-    listed = await kv.list({ prefix: fixture-placeholder });
+    listed = await kv.list({ prefix: RUNNER_HANDLE_PREFIX });
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "keepalive_list_failed", { error: (e as Error).message });
     return 0;
   }
   let renewed = 0;
@@ -3931,7 +3952,7 @@ export async function fixture-placeholder(
   let unverifiable = 0;
   let verifications = 0;
   for (const { name } of listed.keys) {
-    const runnerName = name.slice(fixture-placeholder.length);
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
     let binding: RunnerBinding | null = null;
     try {
       binding = parseRunnerBinding(await kv.get(name));
@@ -3945,7 +3966,7 @@ export async function fixture-placeholder(
     // therefore renewed. So is anything past the per-tick verification cap.
     const verifiable =
       typeof binding.rid === "number" && !!binding.repo && !!binding.inst &&
-      verifications < fixture-placeholder;
+      verifications < KEEPALIVE_MAX_VERIFY_PER_TICK;
 
     let activity: "busy" | "idle" | "unknown" = "unknown";
     if (verifiable) {
@@ -3955,11 +3976,11 @@ export async function fixture-placeholder(
       // renewing every box after this one — a fail-unsafe hidden inside a loop.
       // Caught per box, resolved to "unknown", which renews.
       try {
-        activity = fixture-placeholder(
+        activity = runnerActivityVerdict(
           await verify(env, binding.repo!, binding.rid!, binding.inst!),
         );
       } catch (e) {
-        logEvent("error", "fixture-placeholder", { runnerName, error: (e as Error).message });
+        logEvent("error", "keepalive_verify_threw", { runnerName, error: (e as Error).message });
       }
     }
 
@@ -3967,7 +3988,7 @@ export async function fixture-placeholder(
       // GitHub says this runner is not executing anything (or has forgotten it).
       // Stop renewing and let `sleepAfter` do its job. Nothing is destroyed here.
       idleCount++;
-      logEvent("info", "fixture-placeholder", { runnerName, runnerId: binding.rid });
+      logEvent("info", "keepalive_unrenewed_idle", { runnerName, runnerId: binding.rid });
       continue;
     }
     if (activity === "unknown") unverifiable++;
@@ -3976,10 +3997,10 @@ export async function fixture-placeholder(
     if (binding.jid) {
       try {
         if (!(await concurrencySlots(env).renew(binding.jid, SLOT_TTL_S * 1000))) {
-          logEvent("error", "fixture-placeholder", { jobId: binding.jid, runnerName });
+          logEvent("error", "keepalive_slot_missing", { jobId: binding.jid, runnerName });
         }
       } catch {
-        logEvent("error", "fixture-placeholder", { jobId: binding.jid, runnerName });
+        logEvent("error", "keepalive_slot_renewal_failed", { jobId: binding.jid, runnerName });
       }
     }
 
@@ -4004,9 +4025,9 @@ export async function fixture-placeholder(
   }
   await bumpMetrics(
     env,
-    ...Array(busyCount).fill("fixture-placeholder"),
-    ...Array(idleCount).fill("fixture-placeholder"),
-    ...Array(unverifiable).fill("fixture-placeholder"),
+    ...Array(busyCount).fill("keepalive_renewed_busy"),
+    ...Array(idleCount).fill("keepalive_unrenewed_idle"),
+    ...Array(unverifiable).fill("keepalive_renewed_unverifiable"),
   );
   return renewed;
 }
@@ -4015,7 +4036,7 @@ export async function fixture-placeholder(
 // (1000 keys per page). The fleet cap is 250 boxes, so one page always suffices
 // in reality; the loop exists so a pathological KV can never TRUNCATE the fleet
 // view into a falsely-idle verdict.
-const fixture-placeholder = 10;
+const FLEET_BUSY_MAX_LIST_PAGES = 10;
 
 /**
  * The GET /internal/v1/fleet/busy body. `busy` is the number of runners GitHub
@@ -4043,19 +4064,19 @@ export interface FleetBusySnapshot {
 //
 // This Worker already holds the answer. It owns the GitHub App credential and
 // already asks GitHub, per runner, whether that runner is `busy` — that is what
-// `fixture-placeholder` does every minute. Exposing the same question as a read
+// `keepAliveLiveRunners` does every minute. Exposing the same question as a read
 // costs the gate no GitHub permission at all.
 //
 // SAME AUTHORITY, SAME ENUMERATION, SAME CAP. This reuses the KV `rhandle:`
 // binding list, `fetchRunnerActivity` (GET /repos/{owner}/{repo}/actions/runners/
-// {id} under the per-installation App token) and `fixture-placeholder`. It
+// {id} under the per-installation App token) and `runnerActivityVerdict`. It
 // deliberately does NOT introduce a second per-tick ceiling: bindings past
-// fixture-placeholder (40) are not asked about, exactly as in the sweep.
+// KEEPALIVE_MAX_VERIFY_PER_TICK (40) are not asked about, exactly as in the sweep.
 // `checked` reports how many bindings were examined, so a caller can see when the
 // cap bound (checked > 40 with a matching floor of `unverifiable`).
 //
 // ⛔ THE FAIL-SAFE DIRECTION IS INVERTED RELATIVE TO THE SWEEP, ON PURPOSE.
-// `fixture-placeholder` resolves ignorance to "keep renewing" — leaking a slot is
+// `keepAliveLiveRunners` resolves ignorance to "keep renewing" — leaking a slot is
 // cheaper than killing a job. HERE ignorance must block a ROLL, which would kill
 // exactly those jobs. So every runner whose state cannot be established — no
 // runner id (legacy bare binding), no installation (cold spawn), an API error, a
@@ -4100,12 +4121,12 @@ export async function fleetBusySnapshot(
   const keys: string[] = [];
   let cursor: string | undefined;
   let complete = false;
-  for (let page = 0; page < fixture-placeholder; page++) {
+  for (let page = 0; page < FLEET_BUSY_MAX_LIST_PAGES; page++) {
     let listed: { keys: { name: string }[]; list_complete?: boolean; cursor?: string };
     try {
-      listed = (await kv.list({ prefix: fixture-placeholder, cursor })) as typeof listed;
+      listed = (await kv.list({ prefix: RUNNER_HANDLE_PREFIX, cursor })) as typeof listed;
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "fleet_busy_list_failed", { error: (e as Error).message });
       return { busy: 0, runners, checked: 0, unverifiable: 1 };
     }
     for (const k of listed.keys) keys.push(k.name);
@@ -4123,7 +4144,7 @@ export async function fleetBusySnapshot(
 
   for (const name of keys) {
     checked++;
-    const runnerName = name.slice(fixture-placeholder.length);
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
     let binding: RunnerBinding | null = null;
     let readFailed = false;
     try {
@@ -4143,7 +4164,7 @@ export async function fleetBusySnapshot(
       typeof binding.rid === "number" &&
       !!binding.repo &&
       !!binding.inst &&
-      verifications < fixture-placeholder;
+      verifications < KEEPALIVE_MAX_VERIFY_PER_TICK;
     if (!verifiable) {
       unverifiable++;
       continue;
@@ -4152,11 +4173,11 @@ export async function fleetBusySnapshot(
     verifications++;
     let activity: RunnerActivity = "unknown";
     try {
-      activity = fixture-placeholder(await verify(env, binding.repo!, binding.rid!, binding.inst!));
+      activity = runnerActivityVerdict(await verify(env, binding.repo!, binding.rid!, binding.inst!));
     } catch (e) {
       // A verifier that throws must not abandon the enumeration mid-list and
       // silently shrink the busy count — caught per box, resolved to unknown.
-      logEvent("error", "fixture-placeholder", { runnerName, error: (e as Error).message });
+      logEvent("error", "fleet_busy_verify_threw", { runnerName, error: (e as Error).message });
     }
     if (activity === "busy") runners.push({ name: runnerName, repo: binding.repo! });
     else if (activity === "unknown") unverifiable++;
@@ -4192,7 +4213,7 @@ async function fetchJobObservation(
       headers: {
         authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
-        "user-agent": "fixture-placeholder",
+        "user-agent": "corelink-spawn-worker",
       },
     });
     if (r.status !== 200) return { httpStatus: r.status, job: null };
@@ -4246,7 +4267,7 @@ async function recordStrandedJob(
     };
     await kv.put(key, JSON.stringify(rec), { expirationTtl: ORPHAN_TTL_S });
   } catch (e) {
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "stranded_record_failed", {
       jobId: opts.jobId,
       error: (e as Error).message,
     });
@@ -4257,7 +4278,7 @@ async function recordStrandedJob(
 //
 // THE DEFECT. A runner box that dies MID-JOB is invisible to this Worker. The
 // placement reconciler reads anything past `queued` as "placed" and drops the
-// record; `fixture-placeholder` selects only `queued`; `recordOrphan` is written
+// record; `listOrphanRunnerJobs` selects only `queued`; `recordOrphan` is written
 // only from a SPAWN-time failure. So a box killed after a successful spawn enters
 // no dead letter at all, and the first anyone hears of it is GitHub's own ~600 s
 // timeout telling the CUSTOMER that "the self-hosted runner lost communication
@@ -4270,7 +4291,7 @@ async function recordStrandedJob(
 // tears down ANYTHING. There is no `destroy()`, no `stop()`, no teardown call in
 // this function and there must never be one: on 2026-08-02 a teardown keyed on our
 // own bookkeeping SIGKILLed five live customer boxes (see the note above
-// `fixture-placeholder`). Container termination stays where it already is — the
+// `RUNNER_HANDLE_PREFIX`). Container termination stays where it already is — the
 // idle window, `reapStaleBoxes`, and the DO alarm.
 //
 // WHAT IT MAY CONCLUDE FROM, AND ONLY FROM. GitHub's own answers, twice over:
@@ -4294,7 +4315,7 @@ async function recordStrandedJob(
 // All four are OUR bookkeeping. None of them touch the box.
 //
 // Both verifiers are injected so every branch is testable without a network.
-export async function fixture-placeholder(
+export async function detectStrandedInFlightJobs(
   env: Env,
   nowMs: number,
   verifyRunner: (
@@ -4314,12 +4335,12 @@ export async function fixture-placeholder(
   if (!kv) {
     // SAY SO. An unbound credential must not read as a quiet, healthy tick —
     // that ambiguity is exactly how a dead backstop stays dead for weeks.
-    logEvent("info", "fixture-placeholder", { reason: "RUNNER_JOB_PATS unbound" });
+    logEvent("info", "strand_sweep_skipped_unbound", { reason: "RUNNER_JOB_PATS unbound" });
     return 0;
   }
   let listed: { keys: { name: string }[] };
   try {
-    listed = await kv.list({ prefix: fixture-placeholder });
+    listed = await kv.list({ prefix: RUNNER_HANDLE_PREFIX });
   } catch (e) {
     logEvent("error", "strand_list_failed", { error: (e as Error).message });
     return 0;
@@ -4327,8 +4348,8 @@ export async function fixture-placeholder(
   let stranded = 0;
   let verifications = 0;
   for (const { name } of listed.keys) {
-    if (verifications >= fixture-placeholder) break;
-    const runnerName = name.slice(fixture-placeholder.length);
+    if (verifications >= STRAND_MAX_VERIFY_PER_TICK) break;
+    const runnerName = name.slice(RUNNER_HANDLE_PREFIX.length);
     let binding: RunnerBinding | null = null;
     try {
       binding = parseRunnerBinding(await kv.get(name));
@@ -4359,7 +4380,7 @@ export async function fixture-placeholder(
     try {
       gone = runnerGoneVerdict(await verifyRunner(env, repo, rid, inst));
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { runnerName, error: (e as Error).message });
+      logEvent("error", "strand_runner_verify_threw", { runnerName, error: (e as Error).message });
       continue;
     }
     // "present" ⇒ the registration is alive, the box is fine. "unknown" ⇒ GitHub
@@ -4370,7 +4391,7 @@ export async function fixture-placeholder(
     try {
       verdict = strandedJobVerdict(await verifyJob(env, repo, jid, inst), rid);
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { runnerName, jobId: jid, error: (e as Error).message });
+      logEvent("error", "strand_job_verify_threw", { runnerName, jobId: jid, error: (e as Error).message });
       continue;
     }
     // `not_stranded` is the OVERWHELMINGLY common path: an ephemeral runner is
@@ -4398,7 +4419,7 @@ export async function fixture-placeholder(
       nowMs,
     });
     // Return the concurrency slot (idempotent; self-heals at SLOT_TTL_S anyway).
-    await fixture-placeholder(env, jid);
+    await releaseConcurrencySlot(env, jid);
     // Revoke the per-job `cas:rw` PAT through the SAME path `workflow_job.completed`
     // uses — shrinking a live credential's window from its full TTL to now.
     let derivedTenant: string | undefined;
@@ -4422,7 +4443,7 @@ export async function fixture-placeholder(
  * for 10.2 h against a 15-minute window — the box burns until someone notices.
  * This is the second layer.
  *
- * ⚠️ The fail-safe here is the OPPOSITE of `fixture-placeholder`, on purpose.
+ * ⚠️ The fail-safe here is the OPPOSITE of `keepAliveLiveRunners`, on purpose.
  * That sweep renews when it cannot verify, because renewing on ignorance only
  * wastes money. This one DESTROYS, so it must never act on ignorance: killing a
  * box that is in fact running a customer's job costs them the job. A box is
@@ -4480,7 +4501,7 @@ export async function reapStaleBoxes(
     // registration, as the dispatch site itself says (src/index.ts, the Option-C
     // note: "The installationId still flows for the GitHub JIT/box registration
     // below — only the CAS-tenant changes"). The records with `inst: ""` are COLD
-    // SPAWNS: a REPO webhook carries no `installation.id`, and fixture-placeholder
+    // SPAWNS: a REPO webhook carries no `installation.id`, and REPO_INSTALLATION_MAP
     // injects one only for mapped repos — of which there is exactly one. So a spawn
     // for any unmapped repo is COLD and writes `inst: ""`. (The record that anchored
     // the 2026-08-31 measurement, `repo = 'HuGR-Labs/corelink-server'`, is precisely
@@ -4505,7 +4526,7 @@ export async function reapStaleBoxes(
     // of those records appeared to contradict the log — a skip that does not name
     // its reason cannot be acted on, only guessed at.
     if (typeof rec.rid !== "number" || !rec.repo) {
-      logEvent("info", "fixture-placeholder", {
+      logEvent("info", "reap_skipped_unverifiable", {
         runnerName,
         ageMs: nowMs - rec.t,
         reason: typeof rec.rid !== "number" ? `rid:${typeof rec.rid}` : "repo:empty",
@@ -4513,9 +4534,9 @@ export async function reapStaleBoxes(
       continue;
     }
 
-    // Past the per-tick ceiling ⇒ not examined this tick. See fixture-placeholder:
+    // Past the per-tick ceiling ⇒ not examined this tick. See REAP_MAX_VERIFY_PER_TICK:
     // this guard is what keeps the widened population a drip instead of a burst.
-    if (verifications >= fixture-placeholder) {
+    if (verifications >= REAP_MAX_VERIFY_PER_TICK) {
       deferred++;
       continue;
     }
@@ -4525,7 +4546,7 @@ export async function reapStaleBoxes(
     try {
       // `inst ?? ""` is the cold-spawn shape: an absent installation selects the
       // static mint token inside `mintJitAuthToken`, never an App token for "".
-      activity = fixture-placeholder(await verify(env, rec.repo, rec.rid, rec.inst ?? ""));
+      activity = runnerActivityVerdict(await verify(env, rec.repo, rec.rid, rec.inst ?? ""));
     } catch (e) {
       logEvent("error", "reap_verify_threw", { runnerName, error: (e as Error).message });
       continue; // ignorance ⇒ never destroy
@@ -4547,8 +4568,8 @@ export async function reapStaleBoxes(
       // the `sbox:` record is the last cron-visible handle. Deleting it on a
       // throw would strand a RUNNING box forever, contradicting the contract
       // above ("a throw ⇒ left alone and retried next tick"). Same shape as
-      // fixture-placeholder: probe liveness and only reap on a definite "down".
-      logEvent("info", "fixture-placeholder", { runnerName, error: (e as Error).message });
+      // sweepGhostContainers: probe liveness and only reap on a definite "down".
+      logEvent("info", "reap_destroy_skipped", { runnerName, error: (e as Error).message });
       let alive: boolean;
       try {
         alive = await getContainer(env.RUNNER_CONTAINER, rec.h).isAlive();
@@ -4557,7 +4578,7 @@ export async function reapStaleBoxes(
       }
       if (alive) {
         // Still up after a failed destroy: keep the record and retry next tick.
-        logEvent("error", "fixture-placeholder", { runnerName });
+        logEvent("error", "stale_box_still_alive", { runnerName });
         continue;
       }
       await kv.delete(name).catch(() => {});
@@ -4567,7 +4588,7 @@ export async function reapStaleBoxes(
     // Not an error: the sweep runs every minute and the record lives 24 h. It IS
     // worth seeing, because a persistently non-zero `deferred` means the `sbox:`
     // population is outrunning the sweep and the real defect is upstream.
-    logEvent("info", "fixture-placeholder", { deferred, cap: fixture-placeholder });
+    logEvent("info", "reap_deferred_over_cap", { deferred, cap: REAP_MAX_VERIFY_PER_TICK });
   }
   if (reaped > 0) await bumpMetrics(env, ...Array(reaped).fill("stale_box_reaped"));
   return reaped;
@@ -4584,7 +4605,7 @@ export async function reapStaleBoxes(
 // sweep that enumerates `sbox:` can never see them. A detector for bookkeeping
 // LOSS cannot start from the bookkeeping.
 //
-// `fixture-placeholder` is the mirror image: it starts from the Cloudflare
+// `reconcileOrphanBoxes` is the mirror image: it starts from the Cloudflare
 // Containers API — whatever is running IS running, recorded or not — and asks the
 // opposite question. It is the in-Worker, cron-driven analogue of the external
 // `scripts/orphan-box-check.sh` CI probe (2026-08-24), so an orphan is caught on
@@ -4596,7 +4617,7 @@ export async function reapStaleBoxes(
 // is (today) no path from a CF Containers instance name back to its Durable
 // Object that would let a teardown land (POST /v1/teardown with an instance name
 // resolves `idFromName()` to a fresh unrelated DO and no-ops with a 204). Actual
-// teardown is a SEPARATE, owner-gated flag (`fixture-placeholder`) and a
+// teardown is a SEPARATE, owner-gated flag (`RECONCILE_ORPHAN_TEARDOWN`) and a
 // future landing, exactly like the B-038 audit lease.
 //
 // ⚠️ UNVERIFIED JOIN KEY, surfaced not trusted. The join is `instance.name` ===
@@ -4611,7 +4632,7 @@ export async function reapStaleBoxes(
 // Age floor for an orphan candidate: 2×`STALE_BOX_AGE_MS` (= 2×JOB_PAT_TTL_S = 4 h).
 // `sbox:` is written at spawn COMPLETION, so the only window a live box lacks its
 // record is sub-second (container start → the KV PUT landing) or a logged
-// `fixture-placeholder`. No legitimate mid-spawn box is 4 h old, so
+// `kv_put_spawned_box_failed`. No legitimate mid-spawn box is 4 h old, so
 // "no sbox: AND age > 4 h" is genuinely un-accounted, never a record that simply
 // has not landed yet. Deliberately DOUBLE `reapStaleBoxes`' own floor.
 const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
@@ -4621,23 +4642,23 @@ const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
 // completeness proof below (cursor absent) holds in ONE request. Matches
 // scripts/container-instances.sh's default; overridable there via env, a constant
 // here (raise it if tombstones ever outgrow it — a truncated page fails closed).
-const fixture-placeholder = 2000;
+const ORPHAN_SCAN_PER_PAGE = 2000;
 
 // The ONE container application whose instances this sweep may consider. The CF
 // account also hosts `corelink-prod-*` (customer-serving CoreLink servers),
 // unrelated application instances, the `corelink-fabricd-*` app, and this very
-// worker's OWN `fixture-placeholder` app — NONE of which
+// worker's OWN `corelink-spawn-worker-checkhostcontainer` app — NONE of which
 // write `sbox:` records. Without this filter every long-running instance of every
 // one of them satisfies the "no sbox record + age>4h" orphan predicate and floods
 // `orphan_box_detected` (and, once teardown is armed, would be a destroy target).
 //
 // Match the STABLE app-id; the derived name is asserted only as a secondary
-// signal. This is deliberately NOT a prefix match: `fixture-placeholder*` also
+// signal. This is deliberately NOT a prefix match: `corelink-spawn-worker-*` also
 // matches the checkhost app (a DIFFERENT DO namespace this sweep must not reap via
 // the runner binding), and a bare `corelink` prefix would match the prod servers.
 // The app-id is the guarantee that keeps the sweep scoped to runner instances.
-const RUNNER_APP_ID = "fixture-placeholder";
-const RUNNER_APP_NAME = "fixture-placeholder";
+const RUNNER_APP_ID = "a03d11a2-7e03-48a4-96bb-4d2c43892cd4";
+const RUNNER_APP_NAME = "corelink-spawn-worker-runnercontainer";
 
 // One RUNNING platform instance, as enumerated from the CF Containers API. `name`
 // is the join key (the DO-handle UUID). `started_at` is the platform's own clock
@@ -4660,7 +4681,7 @@ function flagEnabled(v: string | undefined): boolean {
 
 // Resolve the containers-read token (preferred name first), mirroring the script.
 function containersApiToken(env: Env): string | undefined {
-  return env.fixture-placeholder || env.fixture-placeholder || undefined;
+  return env.CLOUDFLARE_CONTAINERS_API_TOKEN || env.CLOUDFLARE_API_TOKEN || undefined;
 }
 
 // A GET against the CF API that FAILS LOUD on anything that is not a clean 200 +
@@ -4677,7 +4698,7 @@ async function cfContainersGet(
     headers: {
       authorization: `Bearer ${token}`,
       accept: "application/json",
-      "user-agent": "fixture-placeholder",
+      "user-agent": "corelink-spawn-worker",
     },
   });
   if (!resp.ok) {
@@ -4719,8 +4740,8 @@ async function cfContainersGet(
 //
 // Deduped by instance id. Throws on any API error / truncation ⇒ the caller
 // returns 0 and touches nothing (fail-closed on ignorance).
-export async function fixture-placeholder(env: Env): Promise<RunningInstance[]> {
-  const accountId = env.fixture-placeholder;
+export async function listRunningInstances(env: Env): Promise<RunningInstance[]> {
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const token = containersApiToken(env);
   if (!accountId || !token) return []; // gate already checked; belt-and-braces
   const appsBody = await cfContainersGet(
@@ -4740,7 +4761,7 @@ export async function fixture-placeholder(env: Env): Promise<RunningInstance[]> 
     // cannot see it). Fail-QUIET on detection — never fabricate orphans from an
     // empty match — but log LOUD so this silent-death is visible, not mistaken for
     // a genuinely clean fleet.
-    logEvent("error", "fixture-placeholder", {
+    logEvent("error", "orphan_scan_runner_app_missing", {
       expectedId: RUNNER_APP_ID,
       expectedName: RUNNER_APP_NAME,
       appsSeen: apps.map((a) => a.name ?? a.id ?? "?"),
@@ -4751,7 +4772,7 @@ export async function fixture-placeholder(env: Env): Promise<RunningInstance[]> 
   // does NOT change behavior (the id is authoritative) but is surfaced.
   for (const a of runnerApps) {
     if (a.name && a.name !== RUNNER_APP_NAME) {
-      logEvent("info", "fixture-placeholder", {
+      logEvent("info", "orphan_scan_runner_app_name_drift", {
         id: a.id,
         sawName: a.name,
         expectedName: RUNNER_APP_NAME,
@@ -4767,13 +4788,13 @@ export async function fixture-placeholder(env: Env): Promise<RunningInstance[]> 
       env,
       accountId,
       token,
-      `/accounts/${accountId}/containers/applications/${app.id}/instances?per_page=${fixture-placeholder}`,
+      `/accounts/${accountId}/containers/applications/${app.id}/instances?per_page=${ORPHAN_SCAN_PER_PAGE}`,
     );
     if (body.result_info?.next_page_token) {
       // Capped page ⇒ the whole fleet was NOT seen; an orphan past the cap would
       // read as clean. Fail closed rather than emit a partial fleet.
       throw new Error(
-        `TRUNCATED PAGE for app ${app.id}: per_page=${fixture-placeholder} still returned a next_page_token`,
+        `TRUNCATED PAGE for app ${app.id}: per_page=${ORPHAN_SCAN_PER_PAGE} still returned a next_page_token`,
       );
     }
     const instances = Array.isArray((body.result as { instances?: unknown })?.instances)
@@ -4815,11 +4836,11 @@ export async function fixture-placeholder(env: Env): Promise<RunningInstance[]> 
 // within reach now that corelink-server's Rust gate runs on `runs-on: corelink`)
 // would truncate this set. A truncated known-handle set turns accounted, LIVE
 // boxes into false orphans — the fail-UNSAFE direction, the exact reason
-// `fixture-placeholder` follows its own cursor. So we walk the cursor to
+// `detectStrandedInFlightJobs` follows its own cursor. So we walk the cursor to
 // completion; if the walk cannot complete we THROW, and the caller returns 0 and
 // touches nothing this tick. (`reapStaleBoxes` shares the single-call form but is
 // safe there — its GitHub-idle guard means truncation only MISSES reaps.)
-export async function fixture-placeholder(env: Env): Promise<Set<string>> {
+export async function listSpawnedBoxHandles(env: Env): Promise<Set<string>> {
   const kv = env.RUNNER_JOB_PATS;
   const known = new Set<string>();
   if (!kv) return known;
@@ -4860,7 +4881,7 @@ export async function fixture-placeholder(env: Env): Promise<Set<string>> {
  * NEVER tears anything down at this stage.
  *
  * FAIL-SAFE / FAIL-CLOSED:
- *   • not enabled (`fixture-placeholder` falsy) ⇒ return 0, no enumeration;
+ *   • not enabled (`RECONCILE_ORPHAN_BOXES` falsy) ⇒ return 0, no enumeration;
  *   • CF creds absent ⇒ return 0 (this is what keeps it inert until owner-wired);
  *   • any CF API error / truncated page / KV read failure ⇒ log + return 0,
  *     touch nothing this tick (unknown ⇒ leave everything running).
@@ -4868,19 +4889,19 @@ export async function fixture-placeholder(env: Env): Promise<Set<string>> {
  * `listInstances` and `listSbox` are injected so every branch is testable without
  * a network or a live KV.
  */
-export async function fixture-placeholder(
+export async function reconcileOrphanBoxes(
   env: Env,
   nowMs: number,
-  listInstances: (env: Env) => Promise<RunningInstance[]> = fixture-placeholder,
-  listSbox: (env: Env) => Promise<Set<string>> = fixture-placeholder,
+  listInstances: (env: Env) => Promise<RunningInstance[]> = listRunningInstances,
+  listSbox: (env: Env) => Promise<Set<string>> = listSpawnedBoxHandles,
 ): Promise<number> {
   // 1) GATE — fail-safe OFF, two independent conditions.
-  if (!flagEnabled(env.fixture-placeholder)) {
+  if (!flagEnabled(env.RECONCILE_ORPHAN_BOXES)) {
     return 0; // inert: not even the platform is enumerated
   }
-  if (!env.fixture-placeholder || !containersApiToken(env)) {
-    logEvent("info", "fixture-placeholder", {
-      reason: "fixture-placeholder and/or a containers-read token unbound",
+  if (!env.CLOUDFLARE_ACCOUNT_ID || !containersApiToken(env)) {
+    logEvent("info", "orphan_reconcile_skipped_no_creds", {
+      reason: "CLOUDFLARE_ACCOUNT_ID and/or a containers-read token unbound",
     });
     return 0;
   }
@@ -4890,7 +4911,7 @@ export async function fixture-placeholder(
   try {
     instances = await listInstances(env);
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "orphan_reconcile_platform_read_failed", { error: (e as Error).message });
     return 0;
   }
 
@@ -4900,7 +4921,7 @@ export async function fixture-placeholder(
   try {
     known = await listSbox(env);
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "orphan_reconcile_sbox_read_failed", { error: (e as Error).message });
     return 0;
   }
 
@@ -4908,12 +4929,12 @@ export async function fixture-placeholder(
   // (unverified) join key BEFORE any teardown flag is ever flipped. If the key is
   // wrong this shows every box as an orphan; that mismatch is the whole point of
   // logging it.
-  logEvent("info", "fixture-placeholder", {
+  logEvent("info", "orphan_reconcile_scan", {
     scanned: instances.length,
     sboxKnown: known.size,
     instanceNames: instances.map((i) => i.name),
     knownHandles: [...known],
-    teardownArmed: flagEnabled(env.fixture-placeholder), // false; teardown NOT wired here
+    teardownArmed: flagEnabled(env.RECONCILE_ORPHAN_TEARDOWN), // false; teardown NOT wired here
   });
 
   // 4) ORPHAN PREDICATE + 5) DRY-RUN ACTION.
@@ -4941,7 +4962,7 @@ export async function fixture-placeholder(
     });
   }
 
-  logEvent(count > 0 ? "error" : "info", "fixture-placeholder", {
+  logEvent(count > 0 ? "error" : "info", "orphan_boxes_detected", {
     count,
     scanned: instances.length,
     sboxKnown: known.size,
@@ -4954,13 +4975,13 @@ export async function fixture-placeholder(
 // or a later reconciler tick can then re-drive the job (never a silent orphan).
 async function driveSpawnGuarded(
   env: Env,
-  opts: fixture-placeholder,
+  opts: ContainmentDriveOpts,
 ): Promise<void> {
   const spawnClaim = spawnClaimCallbacks(env, opts.jobId);
   if (!(await spawnClaim.claim())) return;
   try {
     if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-    const receipt = await driveSpawn(env, { ...opts, fixture-placeholder: spawnClaim.bindProvider });
+    const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider });
     if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) {
       throw new Error("spawn claim provider binding unavailable");
     }
@@ -4984,47 +5005,47 @@ async function driveSpawnGuarded(
   }
 }
 
-type fixture-placeholder = {
+type ContainmentDriveOpts = {
   jobId: string;
   repo: string;
   installationId: string;
   labels: string[];
-  // Omitted is the historical webhook/legacy behavior. fixture-placeholder
+  // Omitted is the historical webhook/legacy behavior. Reservation-contained
   // re-drives set this to freeze their credential source to installation-only.
   credential_source?: "installation-only";
   effect_id?: string;
-  fixture-placeholder?: string;
+  containment_event_id?: string;
   // The immutable one-shot permit is evidence identity, not a lease capability:
   // an old continuation may finish durable evidence after its lease expires but
   // cannot mark/ack. A reclaimer never receives this field for a new effect.
   effect_permit_id?: string;
   // Supplied by runCanonicalEffect only after it has durably bound the provider
   // identity. This is local route evidence, never a caller-provided protocol field.
-  effect_binding?: fixture-placeholder;
+  effect_binding?: ContainmentEffectBinding;
   /** Internal attempt callback; persisted before the runner container starts. */
-  fixture-placeholder?: (providerIdentity: string) => Promise<boolean>;
+  bindProviderIdentity?: (providerIdentity: string) => Promise<boolean>;
 };
-function isContainmentDrive(opts: fixture-placeholder): opts is fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string; effect_binding: fixture-placeholder } {
+function isContainmentDrive(opts: ContainmentDriveOpts): opts is ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string; effect_binding: ContainmentEffectBinding } {
   return typeof opts.effect_id === "string"
-    && typeof opts.fixture-placeholder === "string"
+    && typeof opts.containment_event_id === "string"
     && typeof opts.effect_permit_id === "string"
     && typeof opts.effect_binding?.resource_id === "string";
 }
-async function fixture-placeholder(
+async function writeContainmentEvidence(
   env: Env,
-  opts: fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string },
-  kind: fixture-placeholder,
+  opts: ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string },
+  kind: ContainmentEffectWitnessKind,
   sourceKey: string,
   sourceValue: string,
-  extras: Pick<fixture-placeholder, "terminal" | "attempt_count"> = {},
+  extras: Pick<ContainmentEffectEvidence, "terminal" | "attempt_count"> = {},
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) throw new Error("containment evidence requires RUNNER_JOB_PATS");
-  const evidence: fixture-placeholder = {
+  const evidence: ContainmentEffectEvidence = {
     schema_version: 1,
     kind,
     effect_id: opts.effect_id,
-    event_id: opts.fixture-placeholder,
+    event_id: opts.containment_event_id,
     job_id: opts.jobId,
     permit_id: opts.effect_permit_id,
     source_key: sourceKey,
@@ -5032,8 +5053,8 @@ async function fixture-placeholder(
     source_sha256: await sha256Hex(sourceValue),
     ...extras,
   };
-  const key = fixture-placeholder(opts.effect_id, kind);
-  const encoded = fixture-placeholder(evidence);
+  const key = containmentEffectEvidenceKey(opts.effect_id, kind);
+  const encoded = canonicalContainmentEvidence(evidence);
   const prior = await kv.get(key);
   if (prior) {
     if (prior !== encoded) throw new Error(`containment ${kind} evidence conflicts`);
@@ -5046,60 +5067,60 @@ async function fixture-placeholder(
   if (await kv.get(key) !== encoded) throw new Error(`containment ${kind} evidence was not durably bound`);
 }
 
-async function fixture-placeholder(
+async function bindContainmentSpawnClaim(
   env: Env,
-  opts: fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string },
+  opts: ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string },
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) throw new Error("containment effect witnesses require RUNNER_JOB_PATS");
   const key = `spawn:${opts.jobId}`;
   const raw = await kv.get(key);
   if (!raw) throw new Error("containment spawn claim missing after acquisition");
-  const jobBinding = JSON.stringify({ schema_version: 1, effect_id: opts.effect_id, event_id: opts.fixture-placeholder, job_id: opts.jobId, permit_id: opts.effect_permit_id });
-  const jobKey = fixture-placeholder(opts.jobId);
+  const jobBinding = JSON.stringify({ schema_version: 1, effect_id: opts.effect_id, event_id: opts.containment_event_id, job_id: opts.jobId, permit_id: opts.effect_permit_id });
+  const jobKey = containmentEffectJobKey(opts.jobId);
   const priorBinding = await kv.get(jobKey);
   if (priorBinding && priorBinding !== jobBinding) throw new Error("containment job binding conflicts");
   if (!priorBinding) await kv.put(jobKey, jobBinding);
   if (await kv.get(jobKey) !== jobBinding) throw new Error("containment job binding was not durably bound");
-  await fixture-placeholder(env, opts, "spawn_claim", key, raw);
+  await writeContainmentEvidence(env, opts, "spawn_claim", key, raw);
 }
 
-async function fixture-placeholder(
+async function bindContainmentPlacement(
   env: Env,
-  opts: fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string },
+  opts: ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string },
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) throw new Error("containment effect witnesses require RUNNER_JOB_PATS");
   // `recordPlacement` writes this immutable evidence before touching the
   // mutable orphan key. Completion may clear that key after its write/read-back,
   // so terminalization must verify the durable witness rather than re-read it.
-  const evidenceRaw = await kv.get(fixture-placeholder(opts.effect_id, "placement"));
-  let evidence: fixture-placeholder | null = null;
+  const evidenceRaw = await kv.get(containmentEffectEvidenceKey(opts.effect_id, "placement"));
+  let evidence: ContainmentEffectEvidence | null = null;
   try {
-    evidence = evidenceRaw ? (JSON.parse(evidenceRaw) as fixture-placeholder) : null;
+    evidence = evidenceRaw ? (JSON.parse(evidenceRaw) as ContainmentEffectEvidence) : null;
   } catch {
     evidence = null;
   }
   let placement: (OrphanRecord & { effect_id?: string }) | null = null;
   try { placement = evidence ? (JSON.parse(evidence.source_value) as OrphanRecord & { effect_id?: string }) : null; } catch { placement = null; }
-  if (!evidenceRaw || !evidence || fixture-placeholder(evidence) !== evidenceRaw || evidence.kind !== "placement" || evidence.effect_id !== opts.effect_id || evidence.event_id !== opts.fixture-placeholder || evidence.job_id !== opts.jobId || evidence.permit_id !== opts.effect_permit_id || evidence.source_key !== orphanKey(opts.jobId) || evidence.source_sha256 !== await sha256Hex(evidence.source_value) || !placement || placement.effect_id !== opts.effect_id || !Number.isFinite(placement.placedMs) || JSON.stringify(placement) !== evidence.source_value) {
+  if (!evidenceRaw || !evidence || canonicalContainmentEvidence(evidence) !== evidenceRaw || evidence.kind !== "placement" || evidence.effect_id !== opts.effect_id || evidence.event_id !== opts.containment_event_id || evidence.job_id !== opts.jobId || evidence.permit_id !== opts.effect_permit_id || evidence.source_key !== orphanKey(opts.jobId) || evidence.source_sha256 !== await sha256Hex(evidence.source_value) || !placement || placement.effect_id !== opts.effect_id || !Number.isFinite(placement.placedMs) || JSON.stringify(placement) !== evidence.source_value) {
     throw new Error("containment placement cannot bind this effect");
   }
 }
 
-async function fixture-placeholder(
+async function writeContainmentResultEvidence(
   env: Env,
-  opts: fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string },
+  opts: ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string },
   attemptCount: number,
 ): Promise<void> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv || !Number.isSafeInteger(attemptCount) || attemptCount < 1) throw new Error("containment terminal evidence lacks an attempt");
-  const prior = await Promise.all(fixture-placeholder.slice(0, 4).map((kind) => kv.get(fixture-placeholder(opts.effect_id, kind))));
+  const prior = await Promise.all(CONTAINMENT_EFFECT_WITNESS_KINDS.slice(0, 4).map((kind) => kv.get(containmentEffectEvidenceKey(opts.effect_id, kind))));
   const evidence = prior.map((raw) => {
     if (!raw) return null;
     try {
-      const parsed = JSON.parse(raw) as fixture-placeholder;
-      return fixture-placeholder(parsed) === raw ? parsed : null;
+      const parsed = JSON.parse(raw) as ContainmentEffectEvidence;
+      return canonicalContainmentEvidence(parsed) === raw ? parsed : null;
     } catch {
       return null;
     }
@@ -5113,18 +5134,18 @@ async function fixture-placeholder(
     placement_sha256: evidence[2]!.source_sha256,
     lease_sha256: evidence[3]!.source_sha256,
   });
-  await fixture-placeholder(env, opts, "result", "result", source, { terminal: "DELIVERED", attempt_count: attemptCount });
+  await writeContainmentEvidence(env, opts, "result", "result", source, { terminal: "DELIVERED", attempt_count: attemptCount });
 }
 
-async function fixture-placeholder(env: Env, event: ContainmentEvent): Promise<string | null> {
+async function containmentEvidenceDigest(env: Env, event: ContainmentEvent): Promise<string | null> {
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return null;
   try {
-    const records = await Promise.all(fixture-placeholder.map((kind) => kv.get(fixture-placeholder(event.effect_id, kind))));
+    const records = await Promise.all(CONTAINMENT_EFFECT_WITNESS_KINDS.map((kind) => kv.get(containmentEffectEvidenceKey(event.effect_id, kind))));
     if (records.some((raw) => !raw)) return null;
     const canonical = records.map((raw) => {
-      const parsed = JSON.parse(raw as string) as fixture-placeholder;
-      return fixture-placeholder(parsed) === raw ? raw : null;
+      const parsed = JSON.parse(raw as string) as ContainmentEffectEvidence;
+      return canonicalContainmentEvidence(parsed) === raw ? raw : null;
     });
     if (canonical.some((raw) => !raw)) return null;
     return sha256Hex(JSON.stringify(canonical));
@@ -5133,24 +5154,24 @@ async function fixture-placeholder(env: Env, event: ContainmentEvent): Promise<s
   }
 }
 
-type fixture-placeholder = {
+type ContainmentDrainDependencies = {
   claimSpawn?: typeof claimSpawn;
-  fixture-placeholder?: typeof fixture-placeholder;
+  bindContainmentSpawnClaim?: typeof bindContainmentSpawnClaim;
   driveSpawn?: typeof driveSpawn;
-  fixture-placeholder?: typeof fixture-placeholder;
+  containmentEvidenceDigest?: typeof containmentEvidenceDigest;
 };
 
-export async function runContainmentDrain(env: Env, dependencies: fixture-placeholder = {}): Promise<void> {
+export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
   // Containment drain creates NEW runner admissions. Completion/teardown is
   // handled by the webhook completed leg and scheduled teardown retry below;
   // pausing this drain leaves those lifecycle paths available.
-  if (admissionPaused(env.fixture-placeholder)) return;
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   const claim = dependencies.claimSpawn ?? claimSpawn;
-  const bindClaim = dependencies.fixture-placeholder ?? fixture-placeholder;
+  const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
-  const evidenceDigest = dependencies.fixture-placeholder ?? fixture-placeholder;
+  const evidenceDigest = dependencies.containmentEvidenceDigest ?? containmentEvidenceDigest;
   let authority: DurableObjectStub<ContainmentDO>;
-  try { authority = fixture-placeholder(env); } catch { return; }
+  try { authority = containmentAuthority(env); } catch { return; }
   const owner = crypto.randomUUID();
   let lease: { owner: string; epoch: number; expires_ms: number } | null;
   try { lease = await authority.acquireLease(owner); } catch { return; }
@@ -5165,50 +5186,52 @@ export async function runContainmentDrain(env: Env, dependencies: fixture-placeh
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
-      const tombstoned = await authority.fixture-placeholder(event.installation_id);
+      const tombstoned = await authority.installationTombstoned(event.installation_id);
       // A permit may have crossed into an external effect before deletion. Keep
       // that head on the proof-bound recovery path below; a permit-free head is
       // terminalized entirely inside the authority and can never reach a side
       // effect. A crash after terminalization is recovered by the committed leg.
       if (tombstoned && !event.effect_permit) {
-        if (!(await authority.fixture-placeholder(event.event_id, owner, lease.epoch))) break;
+        if (!(await authority.terminalizeTombstonedEvent(event.event_id, owner, lease.epoch))) break;
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
       if (event.effect_permit) {
         const proof = await evidenceDigest(env, event);
-        if (!proof || !(await authority.fixture-placeholder(event.effect_id, owner, lease.epoch, proof))) break;
+        if (!proof || !(await authority.recoverEffectCommitted(event.effect_id, owner, lease.epoch, proof))) break;
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
       if (tombstoned) break;
-      if (fixture-placeholder(env.fixture-placeholder)
-        && !fixture-placeholder(env.fixture-placeholder, event.installation_id)) break;
+      if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+        && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
       if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
-      const spawnOpts: fixture-placeholder = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
+      const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
       let prepared: ContainerEnvResult | undefined;
       const spawnClaim = spawnClaimCallbacks(env, event.job_id);
       const routeResult = await runCanonicalEffect({
         ledger: authority,
         tuple,
         opts: spawnOpts,
-        provider: "fixture-placeholder",
+        provider: "cloudflare-container",
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        fence: async () => !(await authority.installationTombstoned(event.installation_id)),
+        releaseFence: () => authority.releaseInstallationFence(event.installation_id, event.effect_id),
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
-        abandonPreparation: () => fixture-placeholder(env, authority, event.job_id, prepared),
+        abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
         claim: dependencies.claimSpawn ? () => claim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.claim,
         release: dependencies.claimSpawn ? () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.release,
         beforeDrive: async () => dependencies.claimSpawn ? true : spawnClaim.active(),
         drive: async driveOpts => {
-          const typed = driveOpts as fixture-placeholder & { effect_id: string; fixture-placeholder: string; effect_permit_id: string };
+          const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
-          const receipt = await drive(env, { ...typed, fixture-placeholder: spawnClaim.bindProvider }, prepared);
+          const receipt = await drive(env, { ...typed, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
           if (!dependencies.claimSpawn && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
           return receipt;
         },
@@ -5225,19 +5248,19 @@ export async function runContainmentDrain(env: Env, dependencies: fixture-placeh
 }
 
 /** Recover normal arrivals without moving them into the containment backlog. */
-export async function fixture-placeholder(env: Env, fixture-placeholder?: string): Promise<void> {
+export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?: string): Promise<void> {
   // Normal-intake drain creates NEW runner admissions. A completed webhook is
   // intentionally independent and continues to revoke, tear down, and release
   // capacity while this gate is active.
-  const authority = fixture-placeholder(env);
-  await authority.fixture-placeholder();
-  const intakeState = fixture-placeholder(env.fixture-placeholder);
-  const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.fixture-placeholder(25);
+  const authority = containmentAuthority(env);
+  await authority.cleanupExpiredA317Proofs();
+  const intakeState = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+  const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.normalIntakeA317Pending(25);
   for (const event of candidates) {
-    const proof = await authority.fixture-placeholder(event.event_id);
+    const proof = await authority.normalIntakeA317Proof(event.event_id);
     if (proof && intakeState !== "paused") return;
-    if (fixture-placeholder(env.fixture-placeholder) !== "normal" && !proof) return;
-    if (proof && (!env.fixture-placeholder || !env.fixture-placeholder || proof.build_sha !== env.fixture-placeholder)) return;
+    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal" && !proof) return;
+    if (proof && (!env.A317_LIVE_PROOF_HMAC_KEY || !env.A317_LIVE_PROOF_BUILD_SHA || proof.build_sha !== env.A317_LIVE_PROOF_BUILD_SHA)) return;
     // The qualification event deliberately enters the same durable pending →
     // retry transition, but terminates before every authorization/provider
     // primitive. Its per-event mint overlay is therefore observational only;
@@ -5247,54 +5270,57 @@ export async function fixture-placeholder(env: Env, fixture-placeholder?: string
       // synthetic key cases fail at this pre-provider fence, so neither can
       // reach authorization, claim, JIT, lease, nor container code.
       const proofEnv: Env = proof.phase === "missing_key"
-        ? { ...env, fixture-placeholder: undefined, REQUIRE_MINT_KEY: "1" }
-        : { ...env, fixture-placeholder: "fixture-placeholder", REQUIRE_MINT_KEY: "1" };
+        ? { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: undefined, REQUIRE_MINT_KEY: "1" }
+        : { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: "a317-invalid-mint-key", REQUIRE_MINT_KEY: "1" };
       if (proof.phase === "missing_key") {
         await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
         continue;
       }
-      if (await authority.fixture-placeholder(event.event_id)) {
-        const authorization = await fixture-placeholder(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
-        await authority.fixture-placeholder(event.event_id, authorization.kind === "refused" ? (authorization.status === 401 ? "refused401" : "refused403") : authorization.kind === "authorized" ? "accepted2xx" : "unknown");
+      if (await authority.beginA317Authorization(event.event_id)) {
+        const authorization = await inspectRunnerAuthorization(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
+        await authority.finishA317Authorization(event.event_id, authorization.kind === "refused" ? (authorization.status === 401 ? "refused401" : "refused403") : authorization.kind === "authorized" ? "accepted2xx" : "unknown");
         await authority.normalIntakeSettle(event.event_id, event.body_sha256, authorization.kind === "refused" ? "retry" : "uncertain");
       }
       continue;
     }
-    if (admissionPaused(env.fixture-placeholder)) return;
+    if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
     if ((await authority.snapshot()).backlog_count !== 0) return;
-    if (await authority.fixture-placeholder(event.installation_id)) {
+    if (await authority.installationTombstoned(event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
       continue;
     }
-    if (fixture-placeholder(env.fixture-placeholder)
-      && !fixture-placeholder(env.fixture-placeholder, event.installation_id)) {
+    if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+      && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
       continue;
     }
-    if (event.event_id !== fixture-placeholder && env.WEBHOOK_LIMITER
+    if (event.event_id !== alreadyRateAdmittedEventId && env.WEBHOOK_LIMITER
       && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
       continue;
     }
-    const spawnOpts: fixture-placeholder = { jobId: event.job_id, repo: event.repo,
+    const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo,
       installationId: event.installation_id, labels: event.labels };
     let prepared: ContainerEnvResult | undefined;
     const spawnClaim = spawnClaimCallbacks(env, event.job_id);
     const result = await runCanonicalEffect({
       ledger: authority,
       tuple: await intakeOwnerTuple(event.repo, event.job_id, `containment:v1:${event.event_id}`, event.event_id),
-      opts: spawnOpts, provider: "fixture-placeholder",
+      opts: spawnOpts, provider: "cloudflare-container",
       resource_id: `job:${event.repo}/${event.job_id}`, idempotency_key: `containment:v1:${event.event_id}`,
-      admit: async () => fixture-placeholder(env.fixture-placeholder) === "normal"
-        && (await authority.snapshot()).backlog_count === 0,
+      admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
+        && (await authority.snapshot()).backlog_count === 0
+        && await authority.normalIntakeAdmit(event.event_id),
+      fence: () => authority.normalIntakeAdmissionFence(event.event_id),
+      releaseFence: () => authority.normalIntakeReleaseFence(event.event_id),
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
-      abandonPreparation: () => fixture-placeholder(env, authority, event.job_id, prepared),
+      abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
       claim: spawnClaim.claim,
       release: spawnClaim.release,
       beforeDrive: spawnClaim.active,
       drive: async opts => {
-        await fixture-placeholder(env, opts);
-        const receipt = await driveSpawn(env, { ...opts, fixture-placeholder: spawnClaim.bindProvider }, prepared);
+        await bindContainmentSpawnClaim(env, opts);
+        const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
         if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
         return receipt;
       },
@@ -5302,8 +5328,8 @@ export async function fixture-placeholder(env: Env, fixture-placeholder?: string
     await authority.normalIntakeSettle(event.event_id, event.body_sha256,
       result.status === "committed" ? "complete"
         : result.status === "unknown_terminal" || result.status === "mirror_tampered" ? "uncertain" : "retry");
-    if (result.status === "committed") await bumpMetrics(env, "fixture-placeholder");
-    else if (result.status === "claim_refused") await bumpMetrics(env, "fixture-placeholder");
+    if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
+    else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
   }
 }
 
@@ -5333,12 +5359,12 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (env.CONTAINMENT) ctx.waitUntil(fixture-placeholder(env).fixture-placeholder().catch(() => {}));
+    if (env.CONTAINMENT) ctx.waitUntil(containmentAuthority(env).cleanupExpiredA317Proofs().catch(() => {}));
     // Reuse the existing cron: post-start projection failures retain an exact
     // teardown intent in ConcurrencySlotsDO until the provider confirms down.
-    ctx.waitUntil(fixture-placeholder(env));
+    ctx.waitUntil(retryActiveSpawnTeardowns(env));
     if (env.FABRIC_COMPUTE_URL && env.CONTAINMENT) {
-      ctx.waitUntil(fixture-placeholder(env).drainUnusedCompute().catch(() => logEvent("error", "fixture-placeholder", {})));
+      ctx.waitUntil(containmentAuthority(env).drainUnusedCompute().catch(() => logEvent("error", "compute_cleanup_pending", {})));
     }
     // Family-aware (mirrors the webhook gate): the reconcilers scan for the
     // `corelink` label family, not a fixed default, so an orphaned/unbilled
@@ -5348,20 +5374,20 @@ export default {
     const now = Date.now();
     {
       try {
-        await fixture-placeholder(env);
-        const intake = fixture-placeholder(env.fixture-placeholder);
-        if (intake === "invalid") await fixture-placeholder(env, "fixture-placeholder", env.fixture-placeholder as string);
+        await deliverInvalidConfig(env);
+        const intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+        if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
         if (intake === "normal") await runContainmentDrain(env);
-        if (intake === "normal" || !!env.fixture-placeholder) await fixture-placeholder(env);
+        if (intake === "normal" || !!env.A317_LIVE_PROOF_HMAC_KEY) await runNormalIntakeDrain(env);
       } catch (e) {
-        logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+        logEvent("error", "containment_tick_failed", { error: (e as Error).message });
       }
     }
     try {
       // FIRST: a live box being SIGTERMed costs a whole customer job, which
       // outranks orphan recovery and billing backfill. Guarded so it can never
       // throw out of scheduled() and take the rest of the tick with it.
-      await fixture-placeholder(env);
+      await keepAliveLiveRunners(env);
     } catch (e) {
       logEvent("error", "keepalive_failed", { error: (e as Error).message });
     }
@@ -5370,7 +5396,7 @@ export default {
       // before the re-drive reconcilers on purpose — those place NEW boxes, and
       // they should be placing them into a fleet whose ghosts have already been
       // returned to it. Guarded: a backstop must never take the tick down.
-      await fixture-placeholder(env);
+      await sweepGhostContainers(env);
     } catch (e) {
       logEvent("error", "ghost_sweep_failed", { error: (e as Error).message });
     }
@@ -5383,7 +5409,7 @@ export default {
       const reaped = await reapStaleBoxes(env, now);
       if (reaped > 0) logEvent("error", "stale_boxes_reaped", { count: reaped });
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "stale_box_reap_failed", { error: (e as Error).message });
     }
     try {
       // THIRD-b (immediately after the reap): the platform-truth MIRROR of it.
@@ -5393,30 +5419,30 @@ export default {
       // Containers API and LOGS any running instance the fabric cannot account
       // for. OBSERVE-ONLY + default-off + inert without CF creds; it tears
       // NOTHING down. Guarded so it can never throw out of the tick.
-      const orphans = await fixture-placeholder(env, now);
-      if (orphans > 0) logEvent("error", "fixture-placeholder", { count: orphans });
+      const orphans = await reconcileOrphanBoxes(env, now);
+      if (orphans > 0) logEvent("error", "orphan_boxes_reconciled", { count: orphans });
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "orphan_reconcile_failed", { error: (e as Error).message });
     }
     try {
       // Reclaim claims that never acquired a durable handle, and prune expired
       // slot leases even on a quiet fleet. Live handles remain fenced.
-      await fixture-placeholder(env, now);
+      await reapStaleSpawnClaims(env, now);
       if (env.CONCURRENCY_SLOTS) {
         const slots = env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
         if (typeof slots.pruneExpired === "function") await slots.pruneExpired();
       }
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "lifecycle_reap_failed", { error: (e as Error).message });
     }
     // FOURTH: detect jobs whose box died MID-JOB — the one loss nothing watched.
     // Its own `waitUntil` + its own `.catch()`, so it can neither delay nor take
     // down the placement work below. OBSERVE-ONLY: it tears nothing down (see the
     // long note on the function), it releases only OUR accounting.
     ctx.waitUntil(
-      fixture-placeholder(env, now)
+      detectStrandedInFlightJobs(env, now)
         .then((n) => {
-          if (n > 0) logEvent("error", "fixture-placeholder", { count: n });
+          if (n > 0) logEvent("error", "stranded_jobs_detected", { count: n });
         })
         .catch((e) => logEvent("error", "strand_sweep_failed", { error: (e as Error).message })),
     );
@@ -5432,35 +5458,35 @@ export default {
       logEvent("error", "orphan_retry_failed", { error: (e as Error).message });
     }
     try {
-      await fixture-placeholder(env);
+      await retryFailedRevocations(env);
     } catch (e) {
       logEvent("error", "revoke_retry_failed", { error: (e as Error).message });
     }
     try {
-      const pushed = await fixture-placeholder(
+      const pushed = await reconcileCompletedJobBilling(
         env,
         configured,
         now,
-        env.CONTAINMENT ? (jobId) => fixture-placeholder(env, jobId) : undefined,
+        env.CONTAINMENT ? (jobId) => readBillingJobAttribution(env, jobId) : undefined,
       );
       if (pushed > 0) {
-        logEvent("info", "fixture-placeholder", { count: pushed });
+        logEvent("info", "billing_reconcile_pushed", { count: pushed });
       }
     } catch (e) {
       // Never let the billing reconciler throw out of scheduled() — it is a
       // backstop, not a gate; a failure here just means next tick retries.
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "billing_reconcile_failed", { error: (e as Error).message });
     }
     try {
       // Flush the durable per-job source with KV pagination and bounded ingest
       // chunks. A malformed record is quarantined in isolation; an HTTP failure
       // leaves its source record pending for the next tick.
-      const flushed = await fixture-placeholder(env);
+      const flushed = await flushBillingUsageBacklog(env);
       if (flushed.pushed > 0 || flushed.quarantined > 0) {
-        logEvent("info", "fixture-placeholder", { ...flushed });
+        logEvent("info", "billing_backlog_flushed", { ...flushed });
       }
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "billing_backlog_flush_failed", { error: (e as Error).message });
     }
   },
 };
@@ -5477,9 +5503,9 @@ function a317Decode(value: string): Uint8Array | null {
   try { const raw = atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)); return Uint8Array.from(raw, c => c.charCodeAt(0)); } catch { return null; }
 }
 async function verifyA317LiveClaim(request: Request, env: Env): Promise<A317LiveClaim | null> {
-  const key = env.fixture-placeholder, build = env.fixture-placeholder;
+  const key = env.A317_LIVE_PROOF_HMAC_KEY, build = env.A317_LIVE_PROOF_BUILD_SHA;
   if (!key || !build) return null;
-  const header = request.headers.get("fixture-placeholder") ?? ""; const [encoded, mac, extra] = header.split(".");
+  const header = request.headers.get("x-corelink-a317-proof") ?? ""; const [encoded, mac, extra] = header.split(".");
   if (!encoded || !mac || extra !== undefined) return null;
   const payload = a317Decode(encoded); const supplied = a317Decode(mac); if (!payload || !supplied || supplied.length !== 32) return null;
   const signingKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -5500,8 +5526,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   const { pathname } = url;
 
     // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────
-    // Gated by a DEDICATED observability key (fixture-placeholder), mirroring
-    // fabricd's /internal/v1/status — NOT the shared fixture-placeholder
+    // Gated by a DEDICATED observability key (X-Corelink-Internal-Auth), mirroring
+    // fabricd's /internal/v1/status — NOT the shared CLOUDFLARE_SPAWN_AUTH_TOKEN
     // (that's the spawn-CONTROL credential; ops-READ is a separate domain, and a
     // shared secret can't be rotated for observability without breaking spawn).
     // Default-off, fail-closed: key unset → 404 (invisible); header mismatch →
@@ -5509,62 +5535,62 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // the check-exec/moat lease path; THIS covers the autoscaler/direct-fleet path
     // the dogfood product runs on.
     if (request.method === "GET" && pathname === "/internal/v1/metrics") {
-      const key = env.fixture-placeholder ?? "";
+      const key = env.METRICS_OBSERVABILITY_KEY ?? "";
       if (key.length === 0) return json({ error: "not found" }, 404);
-      const presented = request.headers.get("fixture-placeholder") ?? "";
+      const presented = request.headers.get("x-corelink-internal-auth") ?? "";
       if (!safeEqual(presented, key)) return unauthorized();
       return json({ counters: await snapshotMetrics(env) }, 200);
     }
 
-    // A3.17's only control-plane surface is a fixture-placeholder,
+    // A3.17's only control-plane surface is a capability-authenticated,
     // run-scoped read. It exposes aggregate durable evidence only; it cannot
     // create, settle, drain, fault, or alter normal intake configuration.
     if (request.method === "GET" && pathname === "/internal/v1/a317-live-proof") {
       const claim = await verifyA317LiveClaim(request, env);
       if (!claim) return json({ error: "not found" }, 404);
-      try { return json(await fixture-placeholder(env).fixture-placeholder(claim.run_id), 200); }
+      try { return json(await containmentAuthority(env).normalIntakeA317Snapshot(claim.run_id), 200); }
       catch { return json({ error: "A3.17 proof store unavailable" }, 503); }
     }
 
     // Authenticated fabric suspension signal. The producer is fabricd's
     // durable suspension outbox and uses the scoped lifecycle bearer;
-    // this route is never public or fixture-placeholder.
+    // this route is never public or tenant-authenticated.
     if (request.method === "POST" && pathname === "/internal/v1/tenant-suspension") {
       if (!controlAuthed(request, env)) return unauthorized();
-      let body: { event_id?: string; tenant_id?: string; fixture-placeholder?: string; action?: string };
+      let body: { event_id?: string; tenant_id?: string; lifecycle_generation?: string; action?: string };
       try { body = (await request.json()) as typeof body; } catch { return json({ error: "invalid JSON body" }, 400); }
-      if (body.action !== "suspended" || !body.event_id || !body.tenant_id || !body.fixture-placeholder || Object.keys(body).sort().join(",") !== "action,event_id,fixture-placeholder,tenant_id" || body.fixture-placeholder.length > 19 || !/^(0|[1-9][0-9]*)$/.test(body.fixture-placeholder) || (() => { try { return BigInt(body.fixture-placeholder!) > fixture-placeholder; } catch { return true; } })()) return json({ error: "invalid suspension event" }, 400);
+      if (body.action !== "suspended" || !body.event_id || !body.tenant_id || !body.lifecycle_generation || Object.keys(body).sort().join(",") !== "action,event_id,lifecycle_generation,tenant_id" || body.lifecycle_generation.length > 19 || !/^(0|[1-9][0-9]*)$/.test(body.lifecycle_generation) || (() => { try { return BigInt(body.lifecycle_generation!) > 9_223_372_036_854_775_807n; } catch { return true; } })()) return json({ error: "invalid suspension event" }, 400);
       try {
-        const input: fixture-placeholder = { event_id: body.event_id, tenant_id: body.tenant_id, fixture-placeholder: body.fixture-placeholder };
-        const authority = fixture-placeholder(env) as unknown as fixture-placeholder["authority"];
-        const result = await fixture-placeholder(env, input, {
+        const input: TenantSuspensionInput = { event_id: body.event_id, tenant_id: body.tenant_id, lifecycle_generation: body.lifecycle_generation };
+        const authority = containmentAuthority(env) as unknown as TenantSuspensionConsumerDependencies["authority"];
+        const result = await consumeTenantSuspensionCredentials(env, input, {
           authority,
           revokeCredential: async identity => {
-            if (!(await fixture-placeholder(env, authority, identity))) throw new Error("credential revoke pending");
+            if (!(await revokeIssuedCredential(env, authority, identity))) throw new Error("credential revoke pending");
           },
         });
         const complete = result.complete;
         return new Response(JSON.stringify({ ...input, complete }), {
           status: complete ? 200 : 202,
-          headers: { "content-type": "application/json", "fixture-placeholder": complete ? "verified" : "unknown" },
+          headers: { "content-type": "application/json", "x-corelink-legacy-coverage": complete ? "verified" : "unknown" },
         });
       } catch (e) {
-        logEvent("error", "fixture-placeholder", { eventId: body.event_id, error: (e as Error).message });
+        logEvent("error", "tenant_suspension_dispatch_failed", { eventId: body.event_id, error: (e as Error).message });
         return json({ error: "suspension dispatch unavailable" }, 503);
       }
     }
 
     // ── POST /internal/v1/containment/drain — admin resume request ──────────
     if (request.method === "POST" && pathname === "/internal/v1/containment/drain") {
-      const key = env.fixture-placeholder ?? "";
+      const key = env.CONTAINMENT_ADMIN_KEY ?? "";
       if (!key) return json({ error: "not found" }, 404);
-      if (!safeEqual(request.headers.get("fixture-placeholder") ?? "", key)) return unauthorized();
+      if (!safeEqual(request.headers.get("x-corelink-internal-auth") ?? "", key)) return unauthorized();
       if ((await request.text()).length !== 0) return json({ error: "body must be empty" }, 400);
       try {
-        const authority = fixture-placeholder(env);
+        const authority = containmentAuthority(env);
         const meta = await authority.requestDrain();
-        const state = fixture-placeholder(env.fixture-placeholder);
-        if (state === "invalid") await fixture-placeholder(env, "fixture-placeholder", env.fixture-placeholder as string);
+        const state = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+        if (state === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
         if (state === "normal") ctx.waitUntil(runContainmentDrain(env));
         return json({ schema_version: 1, drain_requested: meta.drain_requested, intake_paused: state !== "normal", backlog_count: meta.backlog_count, drain_cursor: meta.drain_cursor }, 200);
       } catch {
@@ -5577,9 +5603,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // question needs `administration: read` across every RECONCILER_REPOS repo,
     // which the Actions GITHUB_TOKEN does not have and GitHub offers no API to
     // mint. This Worker already holds the App credential and already asks GitHub
-    // per runner (see `fleetBusySnapshot` / `fixture-placeholder`).
+    // per runner (see `fleetBusySnapshot` / `keepAliveLiveRunners`).
     //
-    // Gated by its OWN key (fixture-placeholder) — NOT the spawn-CONTROL
+    // Gated by its OWN key (X-Corelink-Internal-Auth) — NOT the spawn-CONTROL
     // token and NOT the metrics key. Default-off, fail-closed: key unset → 404
     // (the route is invisible); header mismatch → 401; match → 200.
     //
@@ -5591,7 +5617,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (request.method === "GET" && pathname === "/internal/v1/fleet/busy") {
       const key = env.FLEET_BUSY_READ_KEY ?? "";
       if (key.length === 0) return json({ error: "not found" }, 404);
-      const presented = request.headers.get("fixture-placeholder") ?? "";
+      const presented = request.headers.get("x-corelink-internal-auth") ?? "";
       if (!safeEqual(presented, key)) return unauthorized();
       return json(await fleetBusySnapshot(env), 200);
     }
@@ -5602,16 +5628,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // deletion is an App lifecycle event and deliberately does not require the
     // runner-mint token, so configuration is split below by event family.
     if (request.method === "POST" && pathname === "/webhook") {
-      const appSecret = env.fixture-placeholder;
-      const repoSecret = env.fixture-placeholder;
+      const appSecret = env.GITHUB_WEBHOOK_SECRET;
+      const repoSecret = env.GITHUB_WEBHOOK_REPO_SECRET;
       if (!appSecret && !repoSecret) {
         return json({ error: "autoscaler not configured" }, 503);
       }
       const rawBytes = await request.arrayBuffer();
       const sig = request.headers.get("x-hub-signature-256") ?? "";
       const [appValid, repoValid] = await Promise.all([
-        appSecret ? fixture-placeholder(appSecret, sig, rawBytes) : Promise.resolve(false),
-        repoSecret ? fixture-placeholder(repoSecret, sig, rawBytes) : Promise.resolve(false),
+        appSecret ? verifyGithubHmacBytes(appSecret, sig, rawBytes) : Promise.resolve(false),
+        repoSecret ? verifyGithubHmacBytes(repoSecret, sig, rawBytes) : Promise.resolve(false),
       ]);
       if (!appValid && !repoValid) {
         // Metrics are an intentional side effect only of an actually configured
@@ -5635,7 +5661,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         let installation: { action?: unknown; installation?: { id?: unknown } };
         try { installation = JSON.parse(raw) as typeof installation; }
         catch { return json({ error: "invalid installation payload" }, 400); }
-        const installationId = fixture-placeholder(installation.installation?.id);
+        const installationId = canonicalInstallationId(installation.installation?.id);
         if (installation.action !== "deleted" || !installationId) {
           return json({ error: "invalid installation deletion" }, 400);
         }
@@ -5643,9 +5669,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           const bodySha = await sha256Hex(raw);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
             || await sha256Hex(`installation.deleted:v1\n${installationId}\n${bodySha}`);
-          const result = await fixture-placeholder(env).fixture-placeholder(installationId, delivery, bodySha);
+          const result = await containmentAuthority(env).tombstoneInstallation(installationId, delivery, bodySha);
           if (result === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
-          return json({ ok: true, fixture-placeholder: true, duplicate: result === "duplicate", installation_id: installationId }, 202);
+          if (result === "busy") return json({ error: "installation deletion waits for admitted effect", retryable: true }, 503);
+          return json({ ok: true, installation_deleted: true, duplicate: result === "duplicate", installation_id: installationId }, 202);
         } catch {
           return json({ error: "installation tombstone unavailable", retryable: true }, 503);
         }
@@ -5674,7 +5701,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       let lexicalJobId: string | null = null;
       let a317Claim: A317LiveClaim | null = null;
       try {
-        lexicalJobId = fixture-placeholder(raw);
+        lexicalJobId = canonicalWorkflowJobIdFromRaw(raw);
         if (lexicalJobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
         evt = JSON.parse(raw) as typeof evt;
       } catch {
@@ -5693,8 +5720,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // The shared freeze applies only to the NEW queued admission leg. Parse
       // and route the event first so workflow_job.completed still reaches its
       // revoke/teardown/slot-release cleanup path during containment.
-      if (evt.action === "queued" && admissionPaused(env.fixture-placeholder)) {
-        return fixture-placeholder();
+      if (evt.action === "queued" && admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
       }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.
@@ -5707,58 +5734,58 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // and continue through the existing cleanup path below.
       if (evt.action === "queued") {
         const rawRepo = evt.repository?.full_name ?? "";
-        const identity = fixture-placeholder(rawRepo, jobId);
+        const identity = normalizeRedriveIdentity(rawRepo, jobId);
         if (!identity) return json({ error: "no repository in payload" }, 400);
         const repo = identity.repo;
-        const fixture-placeholder = fixture-placeholder(evt.installation?.id, repo, env.fixture-placeholder);
-        if (fixture-placeholder.invalid) return json({ error: "invalid installation id" }, 400);
-        const installationId = fixture-placeholder.installationId;
+        const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+        if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+        const installationId = resolvedInstallation.installationId;
         // A3.17 is a run-scoped qualification lane. GitHub's webhook HMAC has
         // already authenticated this delivery; this second capability is only
         // accepted while normal intake remains paused and can never unpause it.
         a317Claim = await verifyA317LiveClaim(request, env);
         if (a317Claim) {
-          const proofRepo = env.fixture-placeholder ?? "";
+          const proofRepo = env.A317_LIVE_PROOF_REPO ?? "";
           const proofLabel = "corelink-a317-proof";
           if (proofRepo !== repo || a317Claim.installation_id !== installationId || jobLabels.length !== 1 || jobLabels[0] !== proofLabel
-            || fixture-placeholder(env.fixture-placeholder) !== "paused") a317Claim = null;
+            || parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "paused") a317Claim = null;
         }
         if (a317Claim) {
           try {
-            const authority = fixture-placeholder(env);
-            await authority.fixture-placeholder();
+            const authority = containmentAuthority(env);
+            await authority.cleanupExpiredA317Proofs();
             const bodySha = await sha256Hex(rawBytes);
             const eventId = `a317:v1:${a317Claim.run_id}:${a317Claim.phase}:${a317Claim.i}`;
-            const result = await authority.fixture-placeholder({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha,
+            const result = await authority.normalIntakeA317ProofEnqueue({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha,
               job_id: jobId, repo, installation_id: installationId, labels: mintLabels },
-              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, fixture-placeholder: 0, fixture-placeholder: 0, authorization_state: "pending" },
+              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" },
               a317Claim.phase === "store_unavailable");
             if (result.status === "conflict") return json({ error: "A3.17 proof conflicts with durable evidence" }, 409);
             if (result.status === "full") return json({ error: "A3.17 proof inbox full" }, 503);
-            ctx.waitUntil(fixture-placeholder(env));
+            ctx.waitUntil(runNormalIntakeDrain(env));
             return json({ ok: true, a317_proof: true, duplicate: result.status === "duplicate", job_id: jobId }, 202);
           } catch {
             return json({ error: "A3.17 proof durable store unavailable", retryable: true }, 503);
           }
         }
-        if (fixture-placeholder(env.fixture-placeholder)
-          && !fixture-placeholder(env.fixture-placeholder, installationId)) {
-          logEvent("info", "fixture-placeholder", { jobId, repo, installationId });
-          ctx.waitUntil(bumpMetrics(env, "fixture-placeholder"));
+        if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
+          && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
+          logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
+          ctx.waitUntil(bumpMetrics(env, "webhook_installation_not_allowlisted"));
           return json({ ok: true, ignored: "installation not allowlisted", job_id: jobId }, 202);
         }
         let intake: ContainmentSwitch;
         try {
-          intake = fixture-placeholder(env.fixture-placeholder);
-          if (intake === "invalid") await fixture-placeholder(env, "fixture-placeholder", env.fixture-placeholder as string);
-          const authority = fixture-placeholder(env);
-          if (installationId && await authority.fixture-placeholder(installationId)) {
+          intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+          if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
+          const authority = containmentAuthority(env);
+          if (installationId && await authority.installationTombstoned(installationId)) {
             return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
           }
           const bodySha = await sha256Hex(rawBytes);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "");
           const eventId = delivery || await sha256Hex(`containment:v1\n${jobId}\n${evt.action}\n${bodySha}`);
-          const bootstrapped = await authority.fixture-placeholder(repo, jobId);
+          const bootstrapped = await authority.bootstrapContainedEventIndex(repo, jobId);
           if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") return json({ error: "containment pair authority unavailable" }, 503);
           // One DO transaction observes backlog/switch state and either admits
           // continuation or appends. A fresh arrival cannot race a draining head.
@@ -5767,7 +5794,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           if (result.status === "authority-busy") return json({ error: "containment redrive authority busy" }, 503);
           if (result.status === "redrive_owned") return json({ ok: true, redrive_owned: true, job_id: jobId }, 202);
           if (result.status !== "continued") {
-            ctx.waitUntil(fixture-placeholder(env));
+            ctx.waitUntil(deliverInvalidConfig(env));
             if (intake === "normal") ctx.waitUntil(runContainmentDrain(env));
             return json({ ok: true, contained: true, deduped: result.status === "duplicate", job_id: jobId }, 202);
           }
@@ -5780,10 +5807,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
       // This visibility-only signal is deliberately after containment. A paused
       // event must produce zero success/continuation side effects of any kind.
-      const unserved = fixture-placeholder(mintLabels);
+      const unserved = unservedCapabilityClaims(mintLabels);
       if (unserved.length > 0) {
-        console.warn(JSON.stringify({ event: "fixture-placeholder", labels: unserved, fixture-placeholder: fixture-placeholder, repo: evt.repository?.full_name ?? "", job_id: jobId, note: "served the standard box; the requested shape does not exist in the fleet" }));
-        await bumpMetrics(env, "fixture-placeholder");
+        console.warn(JSON.stringify({ event: "capability_claim_unserved", labels: unserved, served_instance_type: SERVED_INSTANCE_TYPE, repo: evt.repository?.full_name ?? "", job_id: jobId, note: "served the standard box; the requested shape does not exist in the fleet" }));
+        await bumpMetrics(env, "capability_claim_unserved");
       }
 
       // ── workflow_job:completed ⇒ revoke the per-job CAS PAT (hardening) ──────
@@ -5807,21 +5834,21 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         } catch (e) {
           // An invalid or ambiguous identity is never replaced with a deploy
           // default. Under-billing is safer than billing the wrong tenant.
-          logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+          logEvent("error", "job_attribution_unusable", { jobId, error: (e as Error).message });
         }
         // The job is over ⇒ it is definitively not waiting on us. Drop any
         // provisional placement record so the reconciler never re-drives a job that
         // already ran (and so the common case costs ZERO GitHub API calls — this
         // clears the record long before the confirmation window would ask).
-        await fixture-placeholder(env, jobId);
+        await clearPlacementRecord(env, jobId);
         // Reservation cleanup is deliberately separate from legacy completion
         // cleanup. A verified `completed` may race the redrive owner's final
         // continuation; the DO either clears an already-COMPLETED tombstone or
         // latches observation on EFFECT_ELIGIBLE for that owner to resolve.
-        const completedIdentity = fixture-placeholder(evt.repository?.full_name ?? "", jobId);
+        const completedIdentity = normalizeRedriveIdentity(evt.repository?.full_name ?? "", jobId);
         if (completedIdentity && env.CONTAINMENT) {
           try {
-            await fixture-placeholder(env).fixture-placeholder(
+            await containmentAuthority(env).clearCompletedRedrive(
               completedIdentity.repo,
               completedIdentity.job_id,
               redriveEffectId(completedIdentity.repo, completedIdentity.job_id),
@@ -5829,7 +5856,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           } catch (e) {
             // A failed cleanup leaves the durable tombstone/latch for a later
             // verified completion delivery; it never weakens completion itself.
-            logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+            logEvent("error", "containment_redrive_completion_cleanup_failed", { jobId, error: (e as Error).message });
           }
         }
         let revoked = false;
@@ -5839,7 +5866,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           // Missing server-derived identity is a loud refusal, but must not
           // turn a GitHub completion delivery into a redelivery storm. The PAT
           // mapping remains durable for operator-visible repair.
-          logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+          logEvent("error", "completion_revoke_refused", { jobId, error: (e as Error).message });
         }
         // WP-F: durably record this job's usage to the `usage:<jobId>` ledger NOW —
         // BEFORE the `jtenant:` stash is dropped below and while derivedTenant + the
@@ -5847,8 +5874,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // (ledger fills ⇒ a later-armed push backfills tenant-safely); skipped when
         // there's no derived tenant. Independent of the push, so history exists to
         // backfill (the reconciler reads this record, not the tenant-less GitHub API).
-        const region = fixture-placeholder(env, request);
-        const ledgered = await fixture-placeholder(
+        const region = resolveBillingRegion(env, request);
+        const ledgered = await recordCompletedJobUsage(
           env,
           jobId,
           evt.workflow_job,
@@ -5859,7 +5886,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // invoice does. Runs after the ledger write so the durable record exists
         // even if this best-effort warning path throws (it swallows its own
         // errors either way — a missed warning must never cost a completion).
-        await fixture-placeholder(env, jobId, derivedTenant, evt.workflow_job);
+        await warnIfNearVcpuCeiling(env, jobId, derivedTenant, evt.workflow_job);
         // Drop the derived-tenant stash (still needed for revoke + billing above;
         // the usage ledger above already captured the tenant durably for backfill).
         if (derivedTenant && env.RUNNER_JOB_PATS) {
@@ -5873,7 +5900,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // policy once those obligations are durably settled.
         // ASK-2: emit the per-job runner_slot_seconds usage event (prod billing
         // lives here, not the dev-only Rust fabricd). Best-effort, fail-open.
-        const billed = await fixture-placeholder(
+        const billed = await maybeBillCompletedJob(
           env,
           jobId,
           evt.workflow_job,
@@ -5886,7 +5913,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // of the 2026-07-05 dogfood spawn stall). Best-effort + fail-open: no handle
         // on file (legacy/cold job, or a KV miss) ⇒ sleepAfter is the backstop; a
         // destroy() throw is swallowed (idempotent teardown, deadline backstop).
-        const tornDown = await fixture-placeholder(
+        const tornDown = await teardownCompletedRunner(
           env,
           jobId,
           evt.workflow_job?.runner_name ?? undefined,
@@ -5894,7 +5921,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // Release capacity only after exact-handle teardown is confirmed. A
         // missing legacy handle has no provider obligation; an unreadable or
         // still-live handle retains the slot until a later completion/retry.
-        const teardownPending = await fixture-placeholder(
+        const teardownPending = await teardownObligationPresent(
           env,
           jobId,
           evt.workflow_job?.runner_name ?? undefined,
@@ -5904,29 +5931,29 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           try {
             const providerIdentity = evt.workflow_job?.runner_name;
             if (providerIdentity && env.CONCURRENCY_SLOTS) {
-              const released = await concurrencySlots(env).fixture-placeholder(jobId, providerIdentity);
+              const released = await concurrencySlots(env).releaseSpawnClaimForCompletion(jobId, providerIdentity);
               // `spawn:` remains a migration/evidence projection only. Its value
               // is never read to decide completion ownership.
               exactClaimReleased = released === "released";
               if (exactClaimReleased && env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(`spawn:${jobId}`);
             }
           } catch (e) {
-            logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message });
+            logEvent("error", "spawn_claim_release_deferred", { jobId, error: (e as Error).message });
           }
         }
-        if ((tornDown || teardownPending === false) && exactClaimReleased) await fixture-placeholder(env, jobId);
+        if ((tornDown || teardownPending === false) && exactClaimReleased) await releaseConcurrencySlot(env, jobId);
         else if (teardownPending === true || teardownPending === null || !exactClaimReleased) {
-          logEvent("error", "fixture-placeholder", { jobId });
+          logEvent("error", "concurrency_slot_release_deferred", { jobId });
         }
         // Exact PAT leases are closed by the durable revocation authority above.
         // Also clean the historical job-scoped stash during migration.
         if (env.CRED_STASH) {
           await env.CRED_STASH.get(env.CRED_STASH.idFromName(jobId)).wipe().catch((e) =>
-            logEvent("error", "fixture-placeholder", { jobId, error: (e as Error).message }),
+            logEvent("error", "cred_stash_wipe_failed", { jobId, error: (e as Error).message }),
           );
         }
         // 2c completed-leg dedup: GitHub redelivers `completed` (at-least-once).
-        // Claim the completion so the `fixture-placeholder` counter is bumped
+        // Claim the completion so the `webhook_job_completed` counter is bumped
         // EXACTLY once — a redelivery is a counter no-op. This gates ONLY the
         // metric; the security actions above (revoke / slot-release / teardown)
         // are NOT gated by it — they already ran and are each independently
@@ -5935,7 +5962,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         // Golden signals for the completion leg (fire-and-forget; never delays
         // the GitHub webhook response).
         const completedSignals: string[] = [];
-        if (firstCompletion) completedSignals.push("fixture-placeholder");
+        if (firstCompletion) completedSignals.push("webhook_job_completed");
         if (revoked) completedSignals.push("cas_pat_revoked");
         if (billed) completedSignals.push("billing_pushed");
         if (tornDown) completedSignals.push("runner_torn_down");
@@ -5951,7 +5978,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // to dead-letter the job and the dead-letter record needs both.
       // The repo is the webhook's repository (full_name).
       const rawRepo = evt.repository?.full_name ?? "";
-      const repo = fixture-placeholder(rawRepo, jobId)?.repo ?? rawRepo;
+      const repo = normalizeRedriveIdentity(rawRepo, jobId)?.repo ?? rawRepo;
       // NOTE: the `!repo` 400 is deliberately NOT here. It moved BELOW the rate
       // limiter, because a queued+labeled job must consult the limiter even when
       // the payload names no repository (invariant I1: never fail-open to
@@ -5959,26 +5986,26 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // limiter entirely — caught by the I1 regression test when this block was
       // first reordered.
       // Resolve the server authorization identity before durable admission.
-      const fixture-placeholder = fixture-placeholder(evt.installation?.id, repo, env.fixture-placeholder);
-      if (fixture-placeholder.invalid) return json({ error: "invalid installation id" }, 400);
-      const installationId = fixture-placeholder.installationId;
-      if (env.fixture-placeholder && !installationId) {
-        logEvent("info", "fixture-placeholder", { jobId, repo });
+      const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+      if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+      const installationId = resolvedInstallation.installationId;
+      if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
+        logEvent("info", "installation_id_missing", { jobId, repo });
       }
       if (!repo) return json({ error: "no repository in payload" }, 400);
       // ── External-GA installation allowlist gate (WP-D) ───────────────────────
       // MUST run here — after the installation id is resolved (App id, or the
-      // fixture-placeholder injection for first-party repo-webhooks) and BEFORE
+      // REPO_INSTALLATION_MAP injection for first-party repo-webhooks) and BEFORE
       // `claimSpawn` below (the first consumer of a spawn-claim) and therefore
       // before `driveSpawnGuarded` (mint + COLD_REPO_CAP slot + `recordOrphan`).
-      // OPT-IN: unset/blank fixture-placeholder ⇒ not armed ⇒ this is a no-op
+      // OPT-IN: unset/blank INSTALLATION_ALLOWLIST ⇒ not armed ⇒ this is a no-op
       // (today's exact behavior). Armed + id not in the list ⇒ refuse EARLY with a
       // clean ack (202, NOT 5xx — a 5xx makes GitHub retry the same rejected id),
       // having taken NO claim / NO slot / NO orphan.
-      if (fixture-placeholder(env.fixture-placeholder)) {
-        if (!fixture-placeholder(env.fixture-placeholder, installationId)) {
-          logEvent("info", "fixture-placeholder", { jobId, repo, installationId });
-          ctx?.waitUntil?.(bumpMetrics(env, "fixture-placeholder"));
+      if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)) {
+        if (!isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
+          logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
+          ctx?.waitUntil?.(bumpMetrics(env, "webhook_installation_not_allowlisted"));
           return json(
             { ok: true, ignored: "installation not allowlisted", job_id: jobId },
             202,
@@ -5988,7 +6015,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // A 202 acknowledges a recoverable command, including limiter refusals.
       // This inbox is separate from T3-W17's ordered containment backlog.
       try {
-        const authority = fixture-placeholder(env);
+        const authority = containmentAuthority(env);
         const bodySha = await sha256Hex(raw);
         const eventId = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
           || await sha256Hex(`containment:v1\n${jobId}\nqueued\n${bodySha}`);
@@ -6000,8 +6027,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (result.status === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
         if (result.status === "tombstoned") return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
         if (result.status === "full") return json({ error: "intake capacity unavailable", retryable: true }, 503);
-        if (admitted) ctx.waitUntil(fixture-placeholder(env, eventId));
-        else ctx.waitUntil(bumpMetrics(env, "fixture-placeholder"));
+        if (admitted) ctx.waitUntil(runNormalIntakeDrain(env, eventId));
+        else ctx.waitUntil(bumpMetrics(env, "webhook_rate_limited"));
         return json({ ok: true, queued: true, rate_limited: !admitted, job_id: jobId }, 202);
       } catch {
         return json({ error: "durable intake unavailable", retryable: true }, 503);
@@ -6064,7 +6091,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     //
     // ACCEPTED COST, instrumented deliberately: a job running longer than
     // SPAWN_CLAIM_TTL_S (7200 s) has no claim left, so its diag POST is refused.
-    // That refusal bumps `fixture-placeholder` + logs at info level so we can SEE
+    // That refusal bumps `runner_diag_no_claim` + logs at info level so we can SEE
     // if it ever bites instead of discovering it as silence.
     {
       const diag = pathname.match(/^\/v1\/leases\/([^/]+)\/runner-diag$/);
@@ -6084,13 +6111,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         if (env.WEBHOOK_LIMITER) {
           const { success } = await env.WEBHOOK_LIMITER.limit({ key: `diag:${jobId}` });
           if (!success) {
-            ctx?.waitUntil?.(bumpMetrics(env, "fixture-placeholder"));
+            ctx?.waitUntil?.(bumpMetrics(env, "runner_diag_rate_limited"));
             return json({ ok: true }, 200);
           }
         }
         if (!claimed) {
-          ctx?.waitUntil?.(bumpMetrics(env, "fixture-placeholder"));
-          logEvent("info", "fixture-placeholder", { jobId });
+          ctx?.waitUntil?.(bumpMetrics(env, "runner_diag_no_claim"));
+          logEvent("info", "runner_diag_refused_unknown_job", { jobId });
           return json({ ok: true }, 200);
         }
         const raw = await request.text().catch(() => "");
@@ -6118,8 +6145,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (request.method === "POST" && pathname === "/v1/spawn") {
       // This is a NEW provider admission. Existing status, exec, teardown, and
       // egress-cutoff routes remain available so already-issued handles drain.
-      if (admissionPaused(env.fixture-placeholder)) {
-        return fixture-placeholder();
+      if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
       }
       let body: SpawnBody;
       try {
@@ -6142,7 +6169,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // sees a diagnosable Err, never a fabricated success). Mirrors the
       // /webhook + /v1/exec + /v1/teardown error discipline already in this file.
       try {
-        // ── Check-mode (C2): route to fixture-placeholder (NOT the runner DO) ──
+        // ── Check-mode (C2): route to CHECK_HOST_CONTAINER (NOT the runner DO) ──
         // Additive + back-compat: mode absent OR "runner" ⇒ the unchanged runner
         // path below. mode==="check" requires toolchain_digest; injected as
         // TOOLCHAIN_DIGEST so the container hydrates the toolchain at start (C2/C5).
@@ -6153,18 +6180,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           // O7 (fail-closed): the exec-server bearer is REQUIRED for a check-host
           // spawn. Without it the exec-server would serve unauthenticated, so we
           // refuse to spawn one — mirroring controlAuthed()'s "no secret ⇒ deny" gate
-          // (index.ts fail-closed on an empty fixture-placeholder). 503:
+          // (index.ts fail-closed on an empty CLOUDFLARE_SPAWN_AUTH_TOKEN). 503:
           // a config/service-not-ready condition, not the caller's fault.
           //
           // ⚠️ DEPLOY-ORDERING (breaking): this secret was the back-compat-unset
           // default and is now MANDATORY. Provision it BEFORE deploying this
-          // Worker version — `wrangler secret put fixture-placeholder` → then
+          // Worker version — `wrangler secret put EXEC_SERVER_AUTH_TOKEN` → then
           // `wrangler deploy` — or every check-mode spawn 503s until it is set.
           // See deploy/cloudflare/README.md "Deploy-ordering" note.
-          const execAuthToken = env.fixture-placeholder;
+          const execAuthToken = env.EXEC_SERVER_AUTH_TOKEN;
           if (!execAuthToken) {
             return json(
-              { error: "fixture-placeholder is not configured; check-host spawn refused" },
+              { error: "EXEC_SERVER_AUTH_TOKEN is not configured; check-host spawn refused" },
               503,
             );
           }
@@ -6174,15 +6201,15 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           const { handle } = await startWithRetry<undefined>(
             async () => undefined,
             (h) =>
-              getContainer(env.fixture-placeholder, h).start({
+              getContainer(env.CHECK_HOST_CONTAINER, h).start({
                 envVars: {
                   ...body.env,
                   TOOLCHAIN_DIGEST: body.toolchain_digest!,
                   // Track-C C2b (now REQUIRED, guaranteed present by the check above):
                   // provider ingress only. The entrypoint converts it to the
                   // mode-0400 file consumed by the durable exec-server.
-                  fixture-placeholder: execAuthToken,
-                  fixture-placeholder,
+                  EXEC_SERVER_AUTH_TOKEN: execAuthToken,
+                  EXEC_SERVER_AUTH_TOKEN_FILE,
                 },
                 enableInternet: true,
               }),
@@ -6235,7 +6262,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         return json({ error: "invalid JSON body" }, 400);
       }
       if (!body.handle) return json({ error: "missing handle" }, 400);
-      const container = getContainer(env.fixture-placeholder, body.handle);
+      const container = getContainer(env.CHECK_HOST_CONTAINER, body.handle);
       let resp: Response;
       try {
         resp = await container.containerFetch(
@@ -6246,12 +6273,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
               // Track-C C2b: present the exec-server bearer (the same value
               // injected at spawn). Absent secret ⇒ header omitted. NOTE: this
               // no-auth fallback is now UNREACHABLE for any live check-host — the
-              // O7 change makes check-mode spawn hard-require fixture-placeholder
+              // O7 change makes check-mode spawn hard-require EXEC_SERVER_AUTH_TOKEN
               // (fail-closed 503), so no check container can exist without it. The
               // spread is kept only so the request shape is uniform; it is not a
               // live fail-open.
-              ...(env.fixture-placeholder
-                ? { authorization: `Bearer ${env.fixture-placeholder}` }
+              ...(env.EXEC_SERVER_AUTH_TOKEN
+                ? { authorization: `Bearer ${env.EXEC_SERVER_AUTH_TOKEN}` }
                 : {}),
             },
             body: JSON.stringify({ argv: body.argv, timeout_ms: body.timeout_ms }),
@@ -6282,7 +6309,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (request.method === "GET" && pathname.startsWith("/v1/status/")) {
       const handle = pathname.slice("/v1/status/".length);
       if (!handle) return json({ error: "missing handle" }, 400);
-      // Route by mode (audit r4): a check-host handle lives in fixture-placeholder,
+      // Route by mode (audit r4): a check-host handle lives in CHECK_HOST_CONTAINER,
       // NOT RUNNER_CONTAINER. Querying the wrong DO namespace returns a fresh
       // never-started stub (isAlive()=false → false 404). Default 'runner' is
       // back-compat. Mirrors the spawn/exec routing.
@@ -6290,7 +6317,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // so a union would not typecheck.
       const checkMode = url.searchParams.get("mode") === "check";
       const container = checkMode
-        ? getContainer(env.fixture-placeholder, handle)
+        ? getContainer(env.CHECK_HOST_CONTAINER, handle)
         : getContainer(env.RUNNER_CONTAINER, handle);
       const alive = await container.isAlive();
       return alive
@@ -6316,11 +6343,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       try {
         const container =
           body.mode === "check"
-            ? getContainer(env.fixture-placeholder, handle)
+            ? getContainer(env.CHECK_HOST_CONTAINER, handle)
             : getContainer(env.RUNNER_CONTAINER, handle);
         await container.teardown();
       } catch {
-        logEvent("error", "fixture-placeholder", {
+        logEvent("error", "teardown_route_failed", {
           handle,
           mode: body.mode ?? "runner",
         });
@@ -6349,12 +6376,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (!handle) return json({ error: "missing handle" }, 400);
       const container =
         body.mode === "check"
-          ? getContainer(env.fixture-placeholder, handle)
+          ? getContainer(env.CHECK_HOST_CONTAINER, handle)
           : getContainer(env.RUNNER_CONTAINER, handle);
       try {
         await container.cutEgress();
       } catch (e) {
-        logEvent("error", "fixture-placeholder", {
+        logEvent("error", "egress_cutoff_failed", {
           handle,
           mode: body.mode ?? "runner",
           error: String(e),
@@ -6373,8 +6400,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 // (COLD — no installation_id from the jobs API; a running runner beats an
 // orphan). The claim-KV dedups against the webhook + prior ticks. OFF unless
 // RECONCILER_REPOS is set AND the autoscaler is configured.
-type fixture-placeholder = {
-  fixture-placeholder?: typeof fixture-placeholder;
+type RedriveOrphanedJobsDependencies = {
+  listOrphanRunnerJobs?: typeof listOrphanRunnerJobs;
   releaseSpawnClaim?: typeof releaseSpawnClaim;
   claimSpawn?: typeof claimSpawn;
   driveSpawn?: typeof driveSpawn;
@@ -6386,44 +6413,44 @@ export async function redriveOrphanedJobs(
   ctx: ExecutionContext,
   configured: string | undefined,
   now: number,
-  dependencies: fixture-placeholder = {},
+  dependencies: RedriveOrphanedJobsDependencies = {},
 ): Promise<void> {
   // Re-drive is a NEW spawn admission; leave lifecycle cleanup to its own
   // scheduled paths while the shared freeze is active.
-  if (admissionPaused(env.fixture-placeholder)) return;
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   // Optional only for deterministic callers: production continues to invoke the
   // same functions at the same seams when no dependency object is supplied.
-  const list = dependencies.fixture-placeholder ?? fixture-placeholder;
+  const list = dependencies.listOrphanRunnerJobs ?? listOrphanRunnerJobs;
   const release = dependencies.releaseSpawnClaim ?? releaseSpawnClaim;
   const claim = dependencies.claimSpawn ?? claimSpawn;
   const drive = dependencies.driveSpawn ?? driveSpawn;
   const orphan = dependencies.recordOrphan ?? recordOrphan;
   let redriveState: ContainmentSwitch;
   try {
-    redriveState = fixture-placeholder(env.fixture-placeholder);
-    if (redriveState === "invalid") await fixture-placeholder(env, "fixture-placeholder", env.fixture-placeholder as string);
+    redriveState = parseContainmentSwitch(env.AUTOSCALER_REDRIVE_PAUSED);
+    if (redriveState === "invalid") await observeInvalidConfig(env, "AUTOSCALER_REDRIVE_PAUSED", env.AUTOSCALER_REDRIVE_PAUSED as string);
   } catch { return; }
   if (redriveState !== "normal") return;
-  if (!(await fixture-placeholder(env))) return;
-  const fixture-placeholder = fixture-placeholder(env);
-  const staticRepos = fixture-placeholder(env.RECONCILER_REPOS);
-  let registryRepos: fixture-placeholder[] | null = null;
-  if (env.fixture-placeholder?.trim()) {
+  if (!(await containmentRedriveAuthorityReadable(env))) return;
+  const reservationAuthority = containmentAuthority(env);
+  const staticRepos = parseReconcilerRepos(env.RECONCILER_REPOS);
+  let registryRepos: ReconcilerRepository[] | null = null;
+  if (env.RECONCILER_REGISTRY_URL?.trim()) {
     // A configured registry provides candidates, never eligibility. Every
     // candidate must also appear in that installation's GitHub repository
     // inventory before it may reach the existing scan and reservation path.
     // Registry or membership uncertainty is not permission to use a stale
     // static list, so this tick remains read-only.
     try {
-      const candidates = await fixture-placeholder(env);
+      const candidates = await discoverAuthorizationCandidates(env);
       if (candidates === null) return;
-      const liveCandidates: fixture-placeholder[] = [];
+      const liveCandidates: ReconcilerRepository[] = [];
       for (const candidate of candidates) {
-        if (!(await fixture-placeholder(env, candidate.installationId))) liveCandidates.push(candidate);
+        if (!(await installationIsTombstoned(env, candidate.installationId))) liveCandidates.push(candidate);
       }
-      registryRepos = await fixture-placeholder(env, liveCandidates, now);
+      registryRepos = await confirmInstallationRepositories(env, liveCandidates, now);
     } catch (e) {
-      logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+      logEvent("error", "reconciler_registry_membership_failed", { error: (e as Error).message });
       return;
     }
     if (registryRepos === null) return;
@@ -6432,14 +6459,14 @@ export async function redriveOrphanedJobs(
     ? registryRepos.map(entry => ({ repo: entry.repo, installationId: entry.installationId }))
     : staticRepos.map(repo => ({ repo }));
   if (candidates.length === 0) return; // opt-in: no allowlist/registry ⇒ reconciler off
-  if (!env.fixture-placeholder || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
+  if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
   for (const candidate of candidates) {
     const repo = candidate.repo;
-    const fixture-placeholder = candidate.installationId
-      ?? fixture-placeholder(env.fixture-placeholder, repo);
+    const redriveInstallationId = candidate.installationId
+      ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
     // Do not even mint an installation token or list GitHub after deletion.
     // A tombstone wins before every redrive reservation, handoff and KV write.
-    if (fixture-placeholder && await fixture-placeholder(env, fixture-placeholder)) continue;
+    if (redriveInstallationId && await installationIsTombstoned(env, redriveInstallationId)) continue;
     let scanEnv: Env = env;
     if (candidate.installationId) {
       // Registry entries carry the only installation identity accepted for this
@@ -6448,7 +6475,7 @@ export async function redriveOrphanedJobs(
       try {
         token = await mintJitAuthToken(env, candidate.installationId);
       } catch (e) {
-        logEvent("error", "fixture-placeholder", {
+        logEvent("error", "reconciler_installation_token_failed", {
           repo,
           installationId: candidate.installationId,
           error: (e as Error).message,
@@ -6456,13 +6483,13 @@ export async function redriveOrphanedJobs(
         continue;
       }
       if (!token) continue;
-      scanEnv = { ...env, fixture-placeholder: token };
+      scanEnv = { ...env, GITHUB_RECONCILER_TOKEN: token };
     }
-    const orphans = await list(scanEnv, repo, configured, fixture-placeholder, now);
+    const orphans = await list(scanEnv, repo, configured, RECONCILE_MIN_AGE_MS, now);
     // Each orphan carries its OWN matched family label so the redrive mints the
     // JIT with exactly what the job requested (family-aware).
     for (const { jobId, labels } of orphans) {
-      // `fixture-placeholder` already proved this job is queued ≥ MIN_AGE,
+      // `listOrphanRunnerJobs` already proved this job is queued ≥ MIN_AGE,
       // labeled, and has NO runner — genuinely orphaned. A spawn claim can LEAK
       // when the background `driveSpawnGuarded` (waitUntil) is killed by the
       // platform before its catch releases the claim (a slow mint+start
@@ -6475,36 +6502,36 @@ export async function redriveOrphanedJobs(
       // succeeds".
       //
       // WARM re-drive (2026-07-06): use the installation_id from
-      // fixture-placeholder (same as the webhook), so a fixture-placeholder
+      // REPO_INSTALLATION_MAP (same as the webhook), so a reconciler-recovered
       // job is WARM (cache-warm), not COLD — otherwise every job that fell to the
       // reconciler silently lost cache-warm. RECONCILER_REPOS is a trusted
       // first-party allowlist, so authorizing the mint on re-drive is safe. An
       // unmapped repo ⇒ installationId "" ⇒ COLD (unchanged fallback).
       let redriveRepo = repo;
       let redriveJobId = jobId;
-      let reservation: fixture-placeholder | null = null;
-      if (fixture-placeholder) {
-        const identity = fixture-placeholder(repo, jobId);
+      let reservation: ContainmentRedriveReservation | null = null;
+      if (reservationAuthority) {
+        const identity = normalizeRedriveIdentity(repo, jobId);
         if (!identity) continue;
         // The containment ledger owns its canonical key. Keep the authorized
         // registry spelling in redriveRepo for prepareSpawn and its downstream
         // authorize/mint request; normalizing it here would change that external
         // identity before the issuer sees it.
-        let admitted: Awaited<ReturnType<ContainmentDO["fixture-placeholder"]>>;
+        let admitted: Awaited<ReturnType<ContainmentDO["reserveRedriveCandidate"]>>;
         try {
-          const bootstrapped = await fixture-placeholder.fixture-placeholder(identity.repo, identity.job_id);
+          const bootstrapped = await reservationAuthority.bootstrapContainedEventIndex(identity.repo, identity.job_id);
           if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") continue;
-          admitted = await fixture-placeholder.fixture-placeholder(identity.repo, identity.job_id, now);
+          admitted = await reservationAuthority.reserveRedriveCandidate(identity.repo, identity.job_id, now);
         } catch {
           continue; // authority uncertainty is fail-closed before any KV seam
         }
         if (admitted.status !== "reserved" || !admitted.reservation) continue;
         reservation = admitted.reservation;
       }
-      const reInstallationId = fixture-placeholder;
+      const reInstallationId = redriveInstallationId;
       // ── Age-gate the force-release (2026-08-24) ──────────────────────────────
       // "queued ≥ 90 s with no runner" is ALSO what a healthy-but-slow spawn looks
-      // like: the placement machinery itself waits fixture-placeholder
+      // like: the placement machinery itself waits PLACEMENT_CONFIRM_GRACE_MS
       // (180 s) before even asking GitHub, calling that the slowest healthy boot.
       // Force-releasing a claim that young yanks it from a spawn still in flight —
       // second mint, second JIT registration, second container. So the release now
@@ -6521,18 +6548,18 @@ export async function redriveOrphanedJobs(
       // self-clearing as pre-change claims TTL out.
       const rawClaim = await env.RUNNER_JOB_PATS?.get(`spawn:${redriveJobId}`);
       const claimAgeMs = spawnClaimAgeMs(rawClaim, now);
-      if (claimAgeMs !== null && claimAgeMs < fixture-placeholder) {
+      if (claimAgeMs !== null && claimAgeMs < PLACEMENT_CONFIRM_GRACE_MS) {
         // A live spawn is probably still in flight — leave its claim alone.
         continue;
       }
-      if (reservation && fixture-placeholder) {
+      if (reservation && reservationAuthority) {
         const ownedReservation = reservation;
-        const ownedAuthority = fixture-placeholder;
+        const ownedAuthority = reservationAuthority;
         const retryEpoch = await retryOwnerEpochId(ownedReservation.effect_id, ownedReservation.owner, ownedReservation.epoch);
         if (!await recordRetryAttempt(env, redriveJobId, retryEpoch, 0)) continue;
         ctx.waitUntil((async () => {
           const effect = ownedReservation.effect_id;
-          const spawnOpts: fixture-placeholder = { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" };
+          const spawnOpts: ContainmentDriveOpts = { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" };
           let prepared: ContainerEnvResult | undefined;
           const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
           const useInjectedClaim = !!dependencies.claimSpawn;
@@ -6540,34 +6567,36 @@ export async function redriveOrphanedJobs(
             ledger: ownedAuthority,
             tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
             opts: spawnOpts,
-            provider: "fixture-placeholder",
+            provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
-            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, reInstallationId)).status === "eligible",
+            fence: async () => !(await ownedAuthority.installationTombstoned(reInstallationId)),
+            releaseFence: () => ownedAuthority.releaseInstallationFence(reInstallationId, effect),
             beforeClaim: async () => {
               if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
             },
-            abandonPreparation: () => fixture-placeholder(env, ownedAuthority, redriveJobId, prepared),
+            abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, redriveJobId, prepared),
             claim: useInjectedClaim ? () => claim(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.claim,
             release: useInjectedClaim ? () => release(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.release,
             beforeDrive: async () => useInjectedClaim ? true : spawnClaim.active(),
             drive: async driveOpts => {
-              await fixture-placeholder(env, driveOpts);
-              const receipt = await drive(env, { ...driveOpts, fixture-placeholder: spawnClaim.bindProvider }, prepared);
+              await bindContainmentSpawnClaim(env, driveOpts);
+              const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
               if (!useInjectedClaim && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
               return receipt;
             },
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
-              return terminal.status === "completed" || terminal.status === "fixture-placeholder";
+              return terminal.status === "completed" || terminal.status === "cleared_after_completion";
             },
           });
-          if (result.status !== "committed" || !result.finalized) logEvent("error", "fixture-placeholder", { jobId: redriveJobId, repo: redriveRepo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
+          if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_redrive_blocked", { jobId: redriveJobId, repo: redriveRepo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
         })());
         continue;
       }
-      const handoff = await fixture-placeholder(env.RUNNER_JOB_PATS, {
+      const handoff = await claimReconcileHandoff(env.RUNNER_JOB_PATS, {
         schema_version: 1,
         repo: redriveRepo,
         job_id: redriveJobId,
@@ -6577,7 +6606,7 @@ export async function redriveOrphanedJobs(
       }, now);
       if (!handoff) continue;
       if (!await recordRetryAttempt(env, redriveJobId, `legacy-redrive:${redriveRepo}:${redriveJobId}`, 0)) {
-        await fixture-placeholder(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
+        await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
         continue;
       }
       const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
@@ -6591,7 +6620,7 @@ export async function redriveOrphanedJobs(
         ctx.waitUntil((async () => {
           try {
             if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
-            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, fixture-placeholder: spawnClaim.bindProvider });
+            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, bindProviderIdentity: spawnClaim.bindProvider });
           } catch (e) {
             if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
             else await spawnClaim.release();
@@ -6604,11 +6633,11 @@ export async function redriveOrphanedJobs(
             // A successful spawn leaves the ordinary spawn claim as the
             // lifetime idempotency record; failures release it and this marker
             // so a later authoritative poll can hand the job off again.
-            await fixture-placeholder(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
+            await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
           }
           })());
       } else {
-        await fixture-placeholder(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
+        await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
       }
     }
   }
@@ -6617,7 +6646,7 @@ export async function redriveOrphanedJobs(
 // ── the dead-letter orphan retry (cron, part 3 of 3 — see scheduled() above) ─────
 // W7/F8: retry the WARM-recoverable failed spawns recorded by `recordOrphan` (the
 // `orphan:<jobId>` dead-letter). UNLIKE `redriveOrphanedJobs` (first-party GitHub
-// scan, fixture-placeholder, cold), this re-drives WARM (the record carries the
+// scan, RECONCILER_REPOS-scoped, cold), this re-drives WARM (the record carries the
 // installation_id ⇒ buildContainerEnv authorizes+mints) and works for ANY repo,
 // including external customers. Bounded (MAX_ORPHAN_ATTEMPTS), idempotent
 // (claimSpawn dedups vs the live path), self-healing (ORPHAN_TTL_S).
@@ -6631,10 +6660,10 @@ export async function retryOrphanedSpawns(
   now: number,
   drive: (
     env: Env,
-    opts: fixture-placeholder,
+    opts: ContainmentDriveOpts,
     prepared?: ContainerEnvResult,
-  ) => Promise<fixture-placeholder | void> = driveSpawn,
-  // Injected for the same reason as `drive` — so the fixture-placeholder
+  ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
+  // Injected for the same reason as `drive` — so the placement-confirmation
   // branches are testable without reaching the real GitHub API. Takes the
   // installation id from the record (same seam as `fetchJobObservation`).
   verify: (
@@ -6646,27 +6675,27 @@ export async function retryOrphanedSpawns(
 ): Promise<void> {
   // Dead-letter retry is also a NEW spawn admission. Existing teardown/status
   // retries continue independently from the scheduled tick.
-  if (admissionPaused(env.fixture-placeholder)) return;
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   let redriveState: ContainmentSwitch;
   try {
-    redriveState = fixture-placeholder(env.fixture-placeholder);
-    if (redriveState === "invalid") await fixture-placeholder(env, "fixture-placeholder", env.fixture-placeholder as string);
+    redriveState = parseContainmentSwitch(env.AUTOSCALER_REDRIVE_PAUSED);
+    if (redriveState === "invalid") await observeInvalidConfig(env, "AUTOSCALER_REDRIVE_PAUSED", env.AUTOSCALER_REDRIVE_PAUSED as string);
   } catch { return; }
   if (redriveState !== "normal") return;
-  if (!(await fixture-placeholder(env))) return;
-  const fixture-placeholder = fixture-placeholder(env);
+  if (!(await containmentRedriveAuthorityReadable(env))) return;
+  const reservationAuthority = containmentAuthority(env);
   const kv = env.RUNNER_JOB_PATS;
   if (!kv) return; // no dead-letter store bound ⇒ nothing to retry
   let listed: { keys: { name: string }[] };
   try {
     listed = await kv.list({ prefix: ORPHAN_KEY_PREFIX });
   } catch (e) {
-    logEvent("error", "fixture-placeholder", { error: (e as Error).message });
+    logEvent("error", "orphan_retry_list_failed", { error: (e as Error).message });
     return;
   }
   for (const { name } of listed.keys) {
     let jobId = name.slice(ORPHAN_KEY_PREFIX.length);
-    let fixture-placeholder: { repo: string; waitedMs: number; attempts: number } | null = null;
+    let deferredPlacementUnconfirmed: { repo: string; waitedMs: number; attempts: number } | null = null;
     // Parse the record (a malformed/absent value ⇒ null ⇒ the "missing" branch).
     let rec: OrphanRecord | null = null;
     try {
@@ -6678,10 +6707,10 @@ export async function retryOrphanedSpawns(
     // A contained re-drive must use the exact validated orphan identity. Do not
     // repair malformed values or substitute a first-party installation: that
     // would turn a stale dead-letter into an authorization boundary bypass.
-    if (fixture-placeholder) {
+    if (reservationAuthority) {
       if (!rec) continue;
       const orphan = rec;
-      const identity = fixture-placeholder(orphan.repo, jobId);
+      const identity = normalizeRedriveIdentity(orphan.repo, jobId);
       const labelsAreStrings = Array.isArray(orphan.labels)
         && orphan.labels.every((label) => typeof label === "string");
       const managedLabels = labelsAreStrings
@@ -6696,10 +6725,10 @@ export async function retryOrphanedSpawns(
       // repos; it is validation-only here. An unmapped external orphan keeps its
       // stored installation — there is no independent expected-id authority, so
       // canonical decimal format + repo/job + exact managed labels are frozen.
-      const fixture-placeholder = identity
-        ? fixture-placeholder(env.fixture-placeholder, identity.repo)
+      const expectedInstallationId = identity
+        ? installationIdForRepo(env.REPO_INSTALLATION_MAP, identity.repo)
         : "";
-      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || fixture-placeholder(orphan.installationId) !== orphan.installationId || (fixture-placeholder !== "" && fixture-placeholder !== orphan.installationId)) continue;
+      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || canonicalInstallationId(orphan.installationId) !== orphan.installationId || (expectedInstallationId !== "" && expectedInstallationId !== orphan.installationId)) continue;
       // From this point onward, every effectful seam uses the one normalized
       // identity. Keep the orphan's installation id byte-for-byte; no map or
       // first-party fallback is ever substituted into this retry.
@@ -6716,7 +6745,7 @@ export async function retryOrphanedSpawns(
     if (!rec) continue;
     // This must precede placement verification, retry epoch writes, reservation
     // acquisition and every provider/GitHub retry seam.
-    if (await fixture-placeholder(env, rec.installationId)) continue;
+    if (await installationIsTombstoned(env, rec.installationId)) continue;
     const durableAttempts = await readRetryAttempts(env, jobId);
     if (durableAttempts === null) continue;
     rec = { ...rec, attempts: Math.max(rec.attempts, durableAttempts) };
@@ -6729,7 +6758,7 @@ export async function retryOrphanedSpawns(
     // leaves the record untouched for a later tick, so this can never duplicate a
     // running job.
     if (rec) {
-      const placement = fixture-placeholder(rec, now, fixture-placeholder);
+      const placement = placementConfirmStep(rec, now, PLACEMENT_CONFIRM_GRACE_MS);
       if (placement.action === "within_grace") continue; // booting — leave it alone
       if (placement.action === "verify") {
         // The record carries the installation id the spawn was WARM-minted with —
@@ -6747,7 +6776,7 @@ export async function retryOrphanedSpawns(
         if (verdict === "unknown") {
           // We could not tell. Do NOT re-drive on ignorance — leave the record and
           // ask again next tick, bounded by ORPHAN_TTL_S like everything else.
-          logEvent("info", "fixture-placeholder", { jobId, repo: rec.repo });
+          logEvent("info", "placement_verify_unknown", { jobId, repo: rec.repo });
           continue;
         }
         // "lost": the container we started never claimed the job. Fall through to
@@ -6773,18 +6802,18 @@ export async function retryOrphanedSpawns(
         // ~15 min, with no new kill path and no new correlation to get wrong.
         // Explicit teardown here would need a runner-keyed lookup from a job-keyed
         // record; the ~12 minutes it would save do not justify inventing one.
-        if (fixture-placeholder) {
+        if (reservationAuthority) {
           // Do not emit a mutation-capable metric before this candidate holds
           // its tuple/eligibility fence. Legacy fixture behavior remains eager.
-          fixture-placeholder = { repo: rec.repo, waitedMs: placement.waitedMs, attempts: rec.attempts };
+          deferredPlacementUnconfirmed = { repo: rec.repo, waitedMs: placement.waitedMs, attempts: rec.attempts };
         } else {
-          logEvent("error", "fixture-placeholder", {
+          logEvent("error", "placement_unconfirmed", {
             jobId,
             repo: rec.repo,
             waitedMs: placement.waitedMs,
             attempts: rec.attempts,
           });
-          await bumpMetrics(env, "fixture-placeholder");
+          await bumpMetrics(env, "placement_unconfirmed");
         }
         rec = { ...rec, placedMs: undefined };
       }
@@ -6803,15 +6832,15 @@ export async function retryOrphanedSpawns(
       });
       continue;
     }
-    let reservation: fixture-placeholder | null = null;
-    if (fixture-placeholder) {
-      const identity = fixture-placeholder(rec!.repo, jobId);
+    let reservation: ContainmentRedriveReservation | null = null;
+    if (reservationAuthority) {
+      const identity = normalizeRedriveIdentity(rec!.repo, jobId);
       if (!identity) continue;
-      let admitted: Awaited<ReturnType<ContainmentDO["fixture-placeholder"]>>;
+      let admitted: Awaited<ReturnType<ContainmentDO["reserveRedriveCandidate"]>>;
       try {
-        const bootstrapped = await fixture-placeholder.fixture-placeholder(identity.repo, identity.job_id);
+        const bootstrapped = await reservationAuthority.bootstrapContainedEventIndex(identity.repo, identity.job_id);
         if (bootstrapped.status === "blocked" || bootstrapped.status === "invalid") continue;
-        admitted = await fixture-placeholder.fixture-placeholder(identity.repo, identity.job_id, now);
+        admitted = await reservationAuthority.reserveRedriveCandidate(identity.repo, identity.job_id, now);
       } catch {
         continue; // authority uncertainty precedes every retry mutation
       }
@@ -6821,51 +6850,53 @@ export async function retryOrphanedSpawns(
     // Commit the retry epoch before any external claim. The authority's result
     // is the count we project into KV, so stale KV cannot reset a higher durable
     // count and an authority failure cannot produce a retry side effect.
-    const retryEpoch = reservation && fixture-placeholder
+    const retryEpoch = reservation && reservationAuthority
       ? await retryOwnerEpochId(reservation.effect_id, reservation.owner, reservation.epoch)
       : `legacy-retry:${step.nextAttempts}`;
     const retryCommit = await recordRetryAttempt(env, jobId, retryEpoch, rec!.attempts);
     if (!retryCommit) continue;
     const bumped: OrphanRecord = { ...(rec as OrphanRecord), attempts: retryCommit.attempts };
-    if (reservation && fixture-placeholder) {
+    if (reservation && reservationAuthority) {
       const ownedReservation = reservation;
-      const ownedAuthority = fixture-placeholder;
+      const ownedAuthority = reservationAuthority;
       const effect = ownedReservation.effect_id;
-      const spawnOpts: fixture-placeholder = { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" };
+      const spawnOpts: ContainmentDriveOpts = { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" };
       let prepared: ContainerEnvResult | undefined;
       const spawnClaim = spawnClaimCallbacks(env, ownedReservation.job_id);
       const result = await runCanonicalEffect({
         ledger: ownedAuthority,
         tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
         opts: spawnOpts,
-        provider: "fixture-placeholder",
+        provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
-        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, bumped.installationId)).status === "eligible",
+        fence: async () => !(await ownedAuthority.installationTombstoned(bumped.installationId)),
+        releaseFence: () => ownedAuthority.releaseInstallationFence(bumped.installationId, effect),
         beforeClaim: async () => {
-          if (fixture-placeholder) {
-            logEvent("error", "fixture-placeholder", { jobId, ...fixture-placeholder });
-            await bumpMetrics(env, "fixture-placeholder");
+          if (deferredPlacementUnconfirmed) {
+            logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });
+            await bumpMetrics(env, "placement_unconfirmed");
           }
           await kv.put(name, JSON.stringify(bumped), { expirationTtl: ORPHAN_TTL_S });
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
-        abandonPreparation: () => fixture-placeholder(env, ownedAuthority, ownedReservation.job_id, prepared),
+        abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, ownedReservation.job_id, prepared),
         claim: spawnClaim.claim,
         release: spawnClaim.release,
         beforeDrive: spawnClaim.active,
         drive: async driveOpts => {
-          await fixture-placeholder(env, driveOpts);
-          const receipt = await drive(env, { ...driveOpts, fixture-placeholder: spawnClaim.bindProvider }, prepared);
+          await bindContainmentSpawnClaim(env, driveOpts);
+          const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
           if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
           return receipt;
         },
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
-          return terminal.status === "completed" || terminal.status === "fixture-placeholder";
+          return terminal.status === "completed" || terminal.status === "cleared_after_completion";
         },
       });
-      if (result.status !== "committed" || !result.finalized) logEvent("error", "fixture-placeholder", { jobId, repo: bumped.repo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
+      if (result.status !== "committed" || !result.finalized) logEvent("error", "contained_orphan_retry_blocked", { jobId, repo: bumped.repo, status: result.status, ...(result.status !== "committed" ? { reason: result.reason } : {}) });
       continue;
     }
     await kv
@@ -6885,7 +6916,7 @@ export async function retryOrphanedSpawns(
         installationId: bumped.installationId,
         labels: bumped.labels,
         ...(reservation ? { credential_source: "installation-only" as const } : {}),
-        fixture-placeholder: spawnClaim.bindProvider,
+        bindProviderIdentity: spawnClaim.bindProvider,
       });
       if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
       // Re-driven ⇒ do NOT delete the record here.
@@ -6902,7 +6933,7 @@ export async function retryOrphanedSpawns(
       // successful spawn) and to the confirmation above / `workflow_job.completed`
       // (which clear it). The spawn claim is still left to TTL-expire, blocking
       // redeliveries for the job's lifetime, same as the live path.
-      logEvent("info", "fixture-placeholder", {
+      logEvent("info", "orphan_retry_recovered", {
         jobId,
         repo: bumped.repo,
         attempts: bumped.attempts,
@@ -6926,7 +6957,7 @@ export async function retryOrphanedSpawns(
           // LOUD: a job we waited the full window for and never placed is a real
           // capacity fault, not routine backpressure. It is the signal that the
           // fleet cap is undersized for this tenant's load.
-          logEvent("error", "fixture-placeholder", {
+          logEvent("error", "orphan_refusal_giveup", {
             jobId,
             repo: (rec as OrphanRecord).repo,
             waitedS: step.waitedS,
@@ -6940,7 +6971,7 @@ export async function retryOrphanedSpawns(
           .catch(() => {
             /* best-effort: next tick re-reads whatever survived */
           });
-        logEvent("info", "fixture-placeholder", {
+        logEvent("info", "orphan_refusal_waiting", {
           jobId,
           repo: (rec as OrphanRecord).repo,
           waitedS: step.waitedS,
@@ -6950,7 +6981,7 @@ export async function retryOrphanedSpawns(
       }
       // Genuine failure ⇒ LEAVE the (bumped) record for the next tick.
       await bumpMetrics(env, "spawn_failed");
-      logEvent("error", "fixture-placeholder", {
+      logEvent("error", "orphan_retry_drive_failed", {
         jobId,
         repo: bumped.repo,
         attempts: bumped.attempts,
