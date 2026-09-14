@@ -69,6 +69,9 @@ export interface Env {
   // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
   // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
   DATABASE_URL?: string;
+  // Optional shadow binding. The Worker selector chooses exactly one database URL.
+  DATABASE_URL_B2?: string;
+  FABRIC_DATABASE_URL_SLOT?: string;
   // Fail-closed arm for the durable ledger, WITHOUT deleting the secret. Only the
   // exact string "0" permits DATABASE_URL to reach the container; unset, blank,
   // whitespace, "1", and every malformed value behave as if DATABASE_URL were
@@ -180,6 +183,31 @@ export function pgLedgerEnvVars(
   };
 }
 
+export type LedgerDatabaseResolution =
+  | { ok: true; databaseUrl: string | undefined }
+  | { ok: false };
+
+/** Select exactly one Worker database binding, failing closed for an invalid B2. */
+export function resolveLedgerDatabaseUrl(
+  env: Pick<Env, "DATABASE_URL" | "DATABASE_URL_B2" | "FABRIC_DATABASE_URL_SLOT">,
+): LedgerDatabaseResolution {
+  const slot = env.FABRIC_DATABASE_URL_SLOT ?? "legacy";
+  if (slot === "legacy") return { ok: true, databaseUrl: env.DATABASE_URL };
+  if (slot === "b2" && env.DATABASE_URL_B2?.trim()) {
+    return { ok: true, databaseUrl: env.DATABASE_URL_B2 };
+  }
+  return { ok: false };
+}
+
+const INVALID_LEDGER_BINDING_ERROR = "fabricd ledger binding configuration invalid";
+
+function invalidLedgerBindingResponse(): Response {
+  return new Response(JSON.stringify({ error: INVALID_LEDGER_BINDING_ERROR }), {
+    status: 503,
+    headers: { "content-type": "application/json", "retry-after": "1" },
+  });
+}
+
 /**
  * Whether the Worker edge should refuse new lease/admission/mint requests.
  *
@@ -258,6 +286,8 @@ export class FabricdContainer extends Container<Env> {
 
   constructor(ctx: DurableObject<Env>["ctx"], env: Env) {
     super(ctx, env);
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) throw new Error(INVALID_LEDGER_BINDING_ERROR);
     // Inject the fabricd env at container start. corelink auth backend +
     // loopback-free bind; secrets flow from Worker secrets → the container
     // process. Optional keys are omitted when unset (billing/boxes added later).
@@ -333,7 +363,7 @@ export class FabricdContainer extends Container<Env> {
       // Every key here arms together (the pg backend, the vCPU ceiling the #265
       // guard ties to it, and the pg-only export), so suppressing them together is
       // the same coherent state as never having set the secret. Nothing half-arms.
-      ...pgLedgerEnvVars(env),
+      ...pgLedgerEnvVars({ ...env, DATABASE_URL: selected.databaseUrl }),
       // ── Moat mint + env-0 + attested-cost — forward the wrangler vars/secrets
       // INTO the container (the fabricd binary reads these from its own env). The
       // mint trio (URL+key, cred-ticket secret, CLW endpoint) arm together or the
@@ -1004,6 +1034,8 @@ const watchdogState = new Map<string, WatchdogEntry>();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) return invalidLedgerBindingResponse();
     const N = numShards(env);
     const { pathname } = new URL(request.url);
     // `/__do/*` is the DO-internal, container-free activity surface (idle-status)
@@ -1118,6 +1150,11 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) {
+      console.error(INVALID_LEDGER_BINDING_ERROR);
+      return;
+    }
     // Conditional keep-alive probe for recently active shards — plus a liveness
     // watchdog + self-heal (2026-07-08 recurring-hang incident: the
     // singleton went dark on its own, `/v1/health` timing out, needing a MANUAL
