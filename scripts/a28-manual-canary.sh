@@ -90,18 +90,36 @@ RUNNER_NAME="a28-manual-${LABEL#a28-manual-canary-}"
 
 cleanup() {
   local rc=$?
+  local cleanup_failed=0 teardown_status status_code encoded_handle
   if [[ -n "${HANDLE}" ]]; then
-    curl --silent --show-error --fail-with-body \
+    teardown_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
       -X POST "${SPAWN_WORKER_URL}/v1/teardown" \
       -H "@${LIFECYCLE_AUTH_HEADER_FILE}" \
       -H 'Content-Type: application/json' \
-      --data-binary "@${TEARDOWN_BODY_FILE}" >/dev/null || true
+      --data-binary "@${TEARDOWN_BODY_FILE}" 2>/dev/null)" || teardown_status=000
+    if [[ "${teardown_status}" != 204 ]]; then
+      echo "A2.8 cleanup failed: teardown HTTP ${teardown_status}" >&2
+      cleanup_failed=1
+    fi
+    encoded_handle="$(printf '%s' "${HANDLE}" | jq -sRr @uri)" || encoded_handle=""
+    status_code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+      -X GET "${SPAWN_WORKER_URL}/v1/status/${encoded_handle}" \
+      -H "@${LIFECYCLE_AUTH_HEADER_FILE}" 2>/dev/null)" || status_code=000
+    if [[ "${status_code}" != 404 && "${status_code}" != 410 ]]; then
+      echo "A2.8 cleanup failed: status HTTP ${status_code}" >&2
+      cleanup_failed=1
+    fi
   fi
   if [[ -n "${RUNNER_ID}" ]]; then
     gh api --silent --method DELETE \
       "repos/${GH_REPO}/actions/runners/${RUNNER_ID}" >/dev/null 2>&1 || true
   fi
   rm -rf -- "${TMP_DIR}"
+  if [[ "${rc}" -eq 0 && "${cleanup_failed}" -eq 0 ]]; then
+    echo "A2.8 canary passed: runner booted and workflow succeeded"
+  elif [[ "${cleanup_failed}" -ne 0 && "${rc}" -eq 0 ]]; then
+    rc=1
+  fi
   exit "${rc}"
 }
 # image_digest is an assertion at /v1/spawn. Read the authoritative
@@ -177,4 +195,3 @@ chmod 600 "${TEARDOWN_BODY_FILE}"
 
 echo "A2.8 canary queued: run=${RUN_ID} job=${JOB_ID} label=${LABEL} handle=${HANDLE} image=${CF_IMAGE}"
 gh run watch "${RUN_ID}" --repo "${GH_REPO}" --exit-status --interval 5
-echo "A2.8 canary passed: runner booted and workflow succeeded"

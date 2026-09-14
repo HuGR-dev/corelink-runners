@@ -26,7 +26,7 @@ rg -n --fixed-strings 'SPAWN_AUTH_TOKEN="$(<"${SPAWN_AUTH_TOKEN_FILE}")"' "${SCR
 rg -n --fixed-strings 'LIFECYCLE_AUTH_TOKEN="$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")"' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'contains non-printable bytes' "${SCRIPT}" >/dev/null
 [[ "$(rg -n --fixed-strings -- '-H "@${SPAWN_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
-[[ "$(rg -n --fixed-strings -- '-H "@${LIFECYCLE_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
+[[ "$(rg -n --fixed-strings -- '-H "@${LIFECYCLE_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 2 ]]
 rg -n --fixed-strings -- '--data-binary "@${SPAWN_BODY_FILE}"' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings -- '--rawfile jit "${JIT_FILE}"' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'chmod 600 "${JIT_FILE}"' "${SCRIPT}" >/dev/null
@@ -99,6 +99,52 @@ if CORELINK_LIFECYCLE_AUTH_TOKEN_FILE="${BINARY_LIFECYCLE_FILE}" \
 fi
 rg -n --fixed-strings 'CoreLink lifecycle token file contains non-printable bytes' \
   "${VALIDATION_TMP}/binary-output" >/dev/null
+
+# Exercise the real cleanup function offline with deterministic HTTP mocks.
+# The success case requires teardown=204 and status=404; the failure case
+# proves a teardown 401 and an unexpected status make the launcher nonzero.
+CLEANUP_FUNCTION_FILE="${VALIDATION_TMP}/cleanup-function.sh"
+awk '/^cleanup\(\) \{/{found=1} found{print} found && /^}$/{exit}' \
+  "${SCRIPT}" >"${CLEANUP_FUNCTION_FILE}"
+MOCK_BIN="${VALIDATION_TMP}/mock-bin"
+mkdir "${MOCK_BIN}"
+# shellcheck disable=SC2016 # These are literal lines for the generated mock.
+printf '%s\n' '#!/usr/bin/env bash' \
+  'case "$*" in' \
+  '  *"/v1/teardown"*) printf "%s" "${MOCK_TEARDOWN_STATUS}" ;;' \
+  '  *"/v1/status/"*) printf "%s" "${MOCK_STATUS_CODE}" ;;' \
+  '  *) exit 99 ;;' \
+  'esac' >"${MOCK_BIN}/curl"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${MOCK_BIN}/gh"
+chmod 700 "${MOCK_BIN}/curl" "${MOCK_BIN}/gh"
+run_cleanup_mock() {
+  local name="$1" expected_rc="$2" teardown_status="$3" status_code="$4" out rc case_tmp
+  case_tmp="${VALIDATION_TMP}/${name}"
+  mkdir "${case_tmp}"
+  : >"${case_tmp}/teardown.json"
+  : >"${case_tmp}/lifecycle.header"
+  set +e
+  out="$(MOCK_TEARDOWN_STATUS="${teardown_status}" MOCK_STATUS_CODE="${status_code}" \
+    PATH="${MOCK_BIN}:${PATH}" SPAWN_WORKER_URL=https://example.invalid \
+    LIFECYCLE_AUTH_HEADER_FILE="${case_tmp}/lifecycle.header" \
+    TEARDOWN_BODY_FILE="${case_tmp}/teardown.json" HANDLE=synthetic-handle \
+    RUNNER_ID=runner-id GH_REPO=test/repo TMP_DIR="${case_tmp}" \
+    bash -c 'source "$1"; cleanup' -- "${CLEANUP_FUNCTION_FILE}" 2>&1)"
+  rc=$?
+  set -e
+  [[ "${rc}" -eq "${expected_rc}" ]] || {
+    echo "${name}: expected rc ${expected_rc}, got ${rc}: ${out}" >&2
+    exit 1
+  }
+  if [[ "${expected_rc}" -eq 0 ]]; then
+    [[ "${out}" == *"A2.8 canary passed"* ]] || exit 1
+  else
+    [[ "${out}" == *"teardown HTTP ${teardown_status}"* ]] || exit 1
+    [[ "${out}" == *"status HTTP ${status_code}"* ]] || exit 1
+  fi
+}
+run_cleanup_mock cleanup-success 0 204 404
+run_cleanup_mock cleanup-failure 1 401 200
 
 # The canary is CoreLink-only; no Hugit secret path or input is permitted.
 if rg -ni 'hugit|\.hugit' "${SCRIPT}"; then
