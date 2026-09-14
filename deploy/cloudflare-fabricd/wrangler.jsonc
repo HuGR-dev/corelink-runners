@@ -337,9 +337,9 @@
       // difference from the images that do start: the registry path itself.
       //   boots ⇒ the fabricdcontainer repository's pull path is the fault
       //   fails ⇒ the path is fine and the fault is still unlocated
-      // build-sha: 01560b697c87b92bf1572ceec175d5350034aebb
-      // image-provenance: digest=sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5 build-sha=01560b697c87b92bf1572ceec175d5350034aebb
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5",
+      // build-sha: 543fa5f253580056eb5f526d3f6d8694839e9c7c
+      // image-provenance: digest=sha256:5c7d47513acdb7f426893b1cce8cc110428708976e52bb3975762fc720b33807 build-sha=543fa5f253580056eb5f526d3f6d8694839e9c7c
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5c7d47513acdb7f426893b1cce8cc110428708976e52bb3975762fc720b33807",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
       // responsive under a burst of box provisions. The provider shape for

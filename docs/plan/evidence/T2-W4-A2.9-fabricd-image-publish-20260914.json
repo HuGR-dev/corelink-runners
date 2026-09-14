@@ -1,0 +1,42 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w4-a2.9-fabricd-image-publish-20260914",
+  "kind": "test",
+  "status": "PASS",
+  "observed_at": "2026-09-14T18:00:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "a94c9d594567556ba2b13c6acc187df0803dc8db",
+    "path": "docs/plan/evidence/T2-W4-A2.9-fabricd-image-publish-20260914.json"
+  },
+  "claims": ["T2-W4:A2.9-fabricd-image-build"],
+  "version": {
+    "id": "corelink-fabricd-fabricdcontainer:543fa5f253580056eb5f526d3f6d8694839e9c7c",
+    "digest": "sha256:5c7d47513acdb7f426893b1cce8cc110428708976e52bb3975762fc720b33807"
+  },
+  "evidence": {
+    "source_commit": "543fa5f253580056eb5f526d3f6d8694839e9c7c",
+    "source_tree": "1f349a9ff860a85d698364fcb6be524ebecde4aa",
+    "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:5c7d47513acdb7f426893b1cce8cc110428708976e52bb3975762fc720b33807",
+    "builder": "local Docker Desktop isolated build",
+    "build": {
+      "dockerfile": "crates/corelink-fabric-server/Dockerfile",
+      "command": "docker buildx build --load --file crates/corelink-fabric-server/Dockerfile --tag corelink-fabricd-fabricdcontainer:543fa5f253580056eb5f526d3f6d8694839e9c7c .",
+      "result": "PASS"
+    },
+    "publication": {
+      "command": "wrangler containers push corelink-fabricd-fabricdcontainer:543fa5f253580056eb5f526d3f6d8694839e9c7c",
+      "tag_resolves_to_recorded_digest": true
+    },
+    "deployment": {
+      "invoked": false,
+      "rollout": false,
+      "live_qualification": "pending A2.9 post-merge timing proof"
+    },
+    "w2b_provenance": {
+      "status": "unchanged",
+      "reason": "W2b runs before merge against the current live Fabricd image."
+    }
+  },
+  "notes": "This proves an immutable Fabricd image build and desired-config pin only. It does not claim deployment, rollout, health, or A2.9 completion."
+}
