@@ -163,6 +163,41 @@ describe("normal webhook durable acknowledgement", () => {
     expect(getContainer).toHaveBeenCalledTimes(1);
   });
 
+  it("fences a selected normal intake when installation deletion commits before effect admission", async () => {
+    const f = setup(false);
+    const context = ctx();
+    expect((await worker.fetch(await webhook(8250, "delete-race-8250"), f.runtime, context as never)).status).toBe(202);
+    await settle(context); // rate-limited intake is durable but not yet eligible
+    const record = f.d.storage.map.get("normal-inbox:v1:event:delete-race-8250") as { next_attempt_ms: number };
+    vi.spyOn(Date, "now").mockReturnValue(record.next_attempt_ms);
+    f.limiter.mockResolvedValue({ success: true });
+
+    let entered!: () => void; let finish!: () => void;
+    const atProvider = new Promise<void>(resolve => { entered = resolve; });
+    const releaseProvider = new Promise<void>(resolve => { finish = resolve; });
+    vi.mocked(getContainer).mockReturnValue({ startWithEnv: vi.fn(async () => { entered(); await releaseProvider; }), teardown: vi.fn(async () => {}) } as never);
+    const drain = runNormalIntakeDrain(f.runtime);
+    await atProvider;
+    // The real canonical route is past admission and paused in its provider
+    // seam. Deletion cannot commit while its durable lease remains live.
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("busy");
+    expect(await f.d.instance.installationTombstoned("42")).toBe(false);
+    finish();
+    // This is a lifecycle assertion, not a Vitest escape hatch: the provider
+    // has resolved, so the real drain must settle promptly and leave no
+    // asynchronous work holding the focused process open.
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        drain,
+        new Promise<never>((_, reject) => { expiry = setTimeout(() => reject(new Error("normal drain did not settle after provider completion")), 2_000); }),
+      ]);
+    } finally {
+      if (expiry !== undefined) clearTimeout(expiry);
+    }
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
+  });
+
   it.each([
     ["missing production mint key", { mintKey: "" }],
     ["wrong production mint key", { mintKey: "wrong-runtime-key", expectedInternalKey: "mint-auth" }],
