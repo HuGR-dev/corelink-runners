@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_LOG:?}"
+scenario="${MOCK_SCENARIO:-success}"
+[ "${1:-}" = post-cutover ] && [[ "${2:-}" =~ ^https:// ]] && [ "$#" -eq 2 ] || exit 2
+IFS= read -r new_line
+IFS= read -r old_line
+[[ "$new_line" = new_token=* && "$old_line" = old_token=* ]] || exit 3
+printf 'auth-probe:<post-cutover><%s>\n' "$2" >> "$MOCK_LOG"
+new_status=503
+old_status=401
+bound=2
+[ "$scenario" != auth_new ] || new_status=400
+[ "$scenario" != auth_old ] || old_status=400
+[ "$scenario" != auth_bound ] || bound=3
+printf '%s\n' "new_status=$new_status" "old_status=$old_status" 'probe_path=/v1/spawn' 'probe_method=POST' 'probe_body=empty_object' "max_requests=$bound" 'new_spawned=0' 'old_spawned=0'

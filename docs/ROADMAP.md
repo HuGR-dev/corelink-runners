@@ -473,6 +473,6 @@ the corresponding mechanisms are live on the fabric's own side.)
 ## Standing constraints (do not relitigate without the owner)
 
 Concurrency pricing · never bill the customer's compute twice · cache-warm by
-construction · fail-closed isolation · tense discipline on cache claims ·
-the fabric wire/envelope contract (historical hugit framing, §12 protocol; hugit
-discontinued — the mechanisms are the fabric's own).
+construction · fail-closed isolation · tense discipline on cache claims · close is
+required for teardown/release/metrics/cost/billing/attestation · optional envelope
+ingest/poll telemetry · the historical wire/envelope provenance is not an external gate.

@@ -2,7 +2,7 @@
  * Conformance drift-tripwire for @corelink/verify.
  *
  * Loads ../../conformance/result_binding_v2.json — the SHARED cross-repo
- * vector that hugit mirrors. Any change to the v2 pre-image formula, the
+ * vector that external clients mirror. Any change to the v2 pre-image formula, the
  * fabric signer, or the wire types immediately breaks at least one of:
  *   (a) the Rust CLI's golden test
  *   (b) this test

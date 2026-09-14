@@ -131,16 +131,16 @@ describe("canonical containment effect route", () => {
     expect(result.status).toBe("busy"); expect(released).toBe(1);
   });
 
-  it("orders redrive release, claim, reservation eligibility, then drive", async () => {
+  it("orders redrive eligibility, claim, preparation, then drive", async () => {
     const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
     const result = await runCanonicalEffect({ ...deps(ledger, t), admit: async () => { events.push("eligible"); return true; }, beforeClaim: async () => { events.push("release"); }, claim: async () => { events.push("claim"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
-    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "release", "claim", "drive"]);
+    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "claim", "release", "drive"]);
   });
 
-  it("orders orphan mutation before claim and eligibility", async () => {
+  it("orders orphan eligibility and claim before mutation", async () => {
     const events: string[] = []; const { ledger } = make(); const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
     const result = await runCanonicalEffect({ ...deps(ledger, t), admit: async () => { events.push("eligible"); return true; }, beforeClaim: async () => { events.push("mutation"); }, claim: async () => { events.push("claim"); return true; }, drive: async () => { events.push("drive"); return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "r", provider_signature: "s" }; } });
-    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "mutation", "claim", "drive"]);
+    expect(result.status).toBe("committed"); expect(events).toEqual(["eligible", "claim", "mutation", "drive"]);
   });
 
   it("derives retry-stable nonces from the full logical attempt", async () => {

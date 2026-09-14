@@ -38,7 +38,8 @@ fn attestation_key_set_conformance_vector_is_byte_exact() {
     );
 }
 
-/// The committed key_id matches what hugit would compute from the committed pubkey.
+/// The committed key_id matches what an external verifier computes from the
+/// committed pubkey.
 #[test]
 fn committed_key_id_matches_pubkey_derivation() {
     let raw = include_str!("../../../conformance/attestation_key_set.json");

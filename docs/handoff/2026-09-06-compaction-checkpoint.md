@@ -2,11 +2,23 @@
 
 Data: 2026-09-06. Este arquivo é ESTADO DE RETOMADA, não um novo plano. Pedido atual do usuário: "Ok salva o estado pra compact".
 
+## Atualização de checkpoint — 2026-09-08 (prevalece)
+
+- Estado Git recuperado após o crash: B2 está limpo em `/private/tmp/corelink-b2-integration-20260907`, branch `bundle/b2-sprint2-closeout-20260906`, tip `20cc115d5ffbbd89d6c5e596da53f7bbd3e81d1e`. O ledger mantém B2 em 11/14 implementações formais; não há novo PR, aceite ou merge de B2.
+- Entrega efetiva: 1/3 merges de bundles, correspondente ao B1/#559 em `0cc2d82373b9786450414a77dba656ea43e015a0`. B2 ainda não foi entregue/mesclado; B3 permanece em 0/28. Commits, agentes, testes e worktrees não são crédito de WP ou merge.
+- GitHub é o provedor ativo do fluxo CoreLink (GitHub App, `workflow_job.completed` e integrações aplicáveis). Githugr e Hugit são projetos externos descontinuados para este produto: não são dependências, consumidores, autoridades, ambientes, verificadores, gates ou bloqueios de CoreLink. Histórico permanece preservado; não confundir Githugr com GitHub. Ver `docs/adr/0014-corelink-standalone-product-boundary.md`.
+- CI pesada local disponível: B1 passou 12/12; a linha B2 registrou 1119/1119 e o candidato posterior de admission-freeze 1123/1123, além de testes focados e typechecks. GitHub Actions não é o caminho operacional nesta campanha por causa do billing; isso não equivale a aprovação de B2.
+- Evidência operacional de quiescência anterior: Worker `1418af47-d71a-488f-89a6-cbb9173402bd` a 100%, Fabricd no digest `sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565`, DevEnv no digest `sha256:d105e11f92718d610b390a71c37acb9bfb668da278b2f80c1f617f7cd068768c`, fleet `busy=0 checked=0 unverifiable=0`, intake/redrive pausados `1/1`. É evidência histórica verificável, não promoção nem substituto para T2-W2b.
+- T2-W2b continua parcial: falta evidência version-bound de 10/10 cold starts; falhas anteriores e recuperação estão preservadas nos artefatos `docs/plan/evidence/T2-W2b-A2.7-final-20260908.json`, `T2-W2b-incident-recovery-20260908.json` e `T2-W2b-deploy.json`. T2-W4 ainda retém A2.8/A2.9 conforme o ledger; T2-W6 aguarda AU1.8 real e rotação de secrets.
+- Incidente interno de exposição de secrets: a rotação forward-only v2 e o controller estão preparados, mas ainda pendentes. Não registrar valores de secrets nem executar rotação/freeze live antes de manifesto não secreto do `corelink-fabricd`/Cloudflare, inventário das instâncias CoreLink ativas, provas Corelink-native e revalidação operacional. Ausência de Hugit/Githugr não é pré-requisito.
+- Restrição de ambiente: host/disco já esteve quase cheio; somente caches recriáveis foram limpos e worktrees, evidências, secrets e o checkout sujo foram preservados. Não apagar/prunar worktrees ou dados sem destino comprovado.
+- Preservar exatamente o arquivo não rastreado AU1.8 `scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh`; ele não pertence a commits B2 até revisão/integração própria.
+
 ## Primeira ação após compactação
 
 1. Ler o plano único completo: `/Users/gustavoschneiter/.codex/plans/corelink-wp-closeout-20260906.md`.
 2. Ler este checkpoint e o ledger canônico; conferir o retorno do integrador `runner_final_composition` para a sincronização mais recente e o inventário Git.
-3. Continuar a Sprint 1. NÃO pedir novamente aprovação do plano, NÃO criar outro plano, NÃO recomeçar auditorias/implementações e NÃO iniciar S2/S3.
+3. Retomar a Sprint 2 no candidato B2 `20cc115`, sem reiniciar auditorias ou recontar trabalho; concluir somente os 3 WPs formais restantes antes do gate da sprint.
 4. Root precisa resolver sua pendência real de arquitetura dos serviços restantes do T6-W15. O executor está esperando contratos, não falta de autorização para corrigir código. Finalizar decisões e fornecer entrada concreta ao MESMO executor; evitar mais ciclos de planejamento genérico.
 
 ## Mandato mais recente do usuário (prevalece)
@@ -33,8 +45,8 @@ Contratos: canonical DAG `docs/plan/2026-09-01-reconciled-dispatch-dag.md`, roun
 Skill TechLead relida: `/Users/gustavoschneiter/Documents/HuGR/techlead/skills/techlead/SKILL.md`; loop relida. Plan skill também lida. Não atribuir limitação de ferramentas inexistentes a automação armada.
 
 Plano pessoal hash SHA256 no checkpoint: 06307751902236105e09bd17f84915fc0cd7ebb97860fe61124b1cd9914d2477.
-Integração Runner HEAD observado: 30aa091c8f903002429e633f3bb9545675584e6c.
-ATENÇÃO: integrador recebeu followup para copiar a ÚLTIMA versão do plano com âncoras/checklists/Git-only. Seu último hash de sincronização anterior era 35aa85e3902a3d5c5ae42add58422e606f91b55f7b592f400efb475b83807f72, portanto verificar sincronização, não alegar que o último espelho já existe sem retorno.
+Integração B2 observada após recuperação: `20cc115d5ffbbd89d6c5e596da53f7bbd3e81d1e`, worktree limpa.
+O espelho canônico e o inventário Git continuam referências de coordenação; conferir o SHA efetivamente integrado antes de qualquer promoção.
 
 ## Repositórios, branches e realidade do progresso
 
@@ -43,11 +55,11 @@ Server integração: `/private/tmp/corelink-server-budget-20260906`, último HEA
 Main REMOTA Runner verificada via gh API: `cda90940f74735c006693d9b9e3be85c37b26f1a`. main LOCAL `387c1b1cfa55f11ed1d219e5d671cc50a292d47d` está desatualizada; não usar como remoto.
 Checkout principal usuário `/Users/gustavoschneiter/Documents/HuGR/corelink-runners`: branch `pr-0c-d4-openrouter`, behind2, conflitos UU index.ts/metrics.ts e DU containment-intake.test.ts sob deploy/cloudflare. Untracked incluem .atlas/.vite/node_modules e handoffs; não resetar/descartar.
 265 worktrees registrados. Não presumir todos da campanha/descartáveis. Não apagar worktree dirty ou dependência fonte ainda usada.
-Três refs locais foram criadas VAZIAS sobre origin/main; sem push/PR/merge: `bundle/b1-sprint1-closeout-20260906`, `bundle/b2-sprint2-closeout-20260906`, `bundle/b3-sprint3-closeout-20260906` (B3 foi renomeada da antiga sprint34).
+Os bundles operacionais são `bundle/b1-sprint1-closeout-20260906`, `bundle/b2-sprint2-closeout-20260906` e `bundle/b3-sprint3-closeout-20260906`. B1 já tem o único merge confirmado desta campanha; B2 está no tip limpo `20cc115` e B3 permanece sem merge.
 PRs abertos #548–#558: 11, nove drafts; todos heads ancestrais da integração, nenhum inclui todas correções posteriores. 548/549 T3-W18, 550/551/552 T8-W4b,553 T6-W4,554 T6-W9,555 T4-W4,556 T3-W10,557 T6-W2,558cleanup misto. Não mesclar ou fechar individualmente sem reconciliação.
 
 Ledger efetivo já migrou para três sprints operacionais: scopes12/14/28; historical_sprint e historical_sprint_scope preservados. Checker/scripts/tests foram ajustados, testes mecânicos10/10 e ledgercheckPASS. Isso é tooling/registro, não CI pesada de produto.
-Contagem: 16 registros históricos de entrega +16 OUTROS WPs implementation complete +6 partial +32 unknown backlog =70. Os16 históricos não foram recertificados agora; os16 completos não são todos novos desta sessão. Nenhum novo WP entregue, nenhum merge novo, nenhuma sprint entregue. S1 implementação10/12; S2 6/14; S3 0/28 completas (háumparcial).
+Contagem: 16 registros históricos de entrega +16 OUTROS WPs implementation complete +6 partial +32 unknown backlog =70. Os16 históricos não foram recertificados agora; os16 completos não são todos novos desta sessão. Entrega efetiva da campanha: 1/3 merges de bundles; B2 11/14 formais e ainda não entregue; B3 0/28. S1 está mesclada em `0cc2d823...`; não transformar estado de implementação em crédito de merge.
 
 ## Pacotes atuais e evidência — não repetir trabalho
 
@@ -81,7 +93,7 @@ AWSaccountsmonitor975306274105, sensitivity286590629898, verifier888348805607; r
 
 ## Trabalho em andamento na hora do checkpoint
 
-Último followup `runner_final_composition`: mandato GIT-CLOSEOUT-01. Sincronizar planoúltimaversão e âncoras/checklists; inventário metadataREADONLY repoRunner PR548..558/branches/worktrees/commitsconhecidosnãoincorporados/operaçãoprincipal. Arquivo esperado `docs/plan/execution/2026-09-06-git-closeout-inventory.json`. Poritemtipo/id/dono/WPbundle/SHA/dirtyconflito/provaincorporação/destino/ação. Classificar ativoS1/futuroS2S3/aprovadoincorporar/substituídocomprovado/foracampanha/origemdestinoaresolver. Semcodeaudit/fullCI/rm/prune/closePR/push/merge nestaetapainventário; escopofinito/checkpoint30min. Integrador também avisado runtimecc9+infraeacdPROMOVER paraB1. Aguardarretornoeconferir, não duplicar tarefa.
+Último followup `runner_final_composition`: mandato GIT-CLOSEOUT-01 foi concluído no inventário de metadados; a retomada deve trabalhar a partir de B2 `20cc115`, sem reiniciar coleta. O inventário cobre PRs/branches/worktrees/commits conhecidos e ainda possui itens sem destino; resolver por grupos delimitados, preservando material sem prova de redundância. Githugr/Hugit não entram como destino, gate ou bloqueio.
 Demais agentes na maioria completed em tarefas de componente/review; isso NÃO equivale a WPdelivered. Não descrever15agentesativossemconferir. Não abrirnovafrenteparasairdeblockedroot.
 
 ## Regras de ferramentas/ambiente
@@ -93,12 +105,12 @@ Hostmuito sobrecarregado porAtlas/OpenCode/QEMUdeoutrosprojetos, discoquasecheio
 
 1. Receber integrador: validarplanohash, inventárioGit, runtime+infra integração e refs3bundles.
 2. ResolvercontratosfaltantesrootT6W15 e caminhoT9, usando evidênciasexistentes; fornecerpacotesclaroscomaceite aoexecutorWP, nãooutraredecomponentes.
-3. DentroS1, usarvagasparatrabalhosindependentes elegíveis eaceitesplanejados dos10WPscomsourcecomplete; semS2antecipada e semtestepesado.
-4. Fechar12/12sourceS1, CIpesadoúnicoPR, fixesparallelporcausaescopo, aceite, merge1; sóentãoS2. Não marcarWPdone/sprintdoneantesgates.
+3. Dentro da Sprint 2 ativa, concluir os 3 WPs formais restantes com dono e escopo sem conflito; manter o trabalho futuro preservado e não iniciar B3.
+4. Compor um único bundle B2, executar o gate pesado local uma vez, corrigir por causa-raiz em paralelo, aceitar e então fazer o merge 2/3. Só depois iniciar B3. Não marcar WP/sprint como entregue antes dos gates.
 
 ## Atualização final recebida durante a gravação — prevalece sobre o snapshot anterior
 
 Integrador concluiu GIT-CLOSEOUT-01 em `30aa091c8f903002429e633f3bb9545675584e6c`. Plano CANÔNICO agora confirmado idêntico ao pessoal, SHA256 `06307751902236105e09bd17f84915fc0cd7ebb97860fe61124b1cd9914d2477`. Não repetir sincronização/inventário já feitos.
 Inventário existe em `docs/plan/execution/2026-09-06-git-closeout-inventory.json`: 11 PRs, 265 refs, 265 worktrees e 6 fontes conhecidas. **344 itens ainda estão origin_destination_to_resolve**: inventariar não é organizar/limpar concluído. Root deve definir roteamento delimitado por itens/grupos com base nesse arquivo, sem reiniciar coleta ou apagar desconhecidos.
 INGEST/codecs classificados substituted_proven; runtime `cc9fa84` e infra `eacd95` APPROVED_TO_INTEGRATE ainda aguardam incorporação em B1/T6-W15. C1–C5 já aprovados pelo reviewer; não repetir cold review por rotina.
-Nenhuma limpeza/merge/push/closePR/CI foi feita. Primary conflitado preservado. Todos os três bundles continuam sem merge. Integrador terminou essa tarefa; para nova ação autorizada usar followup_task, não send_message.
+Primary conflitado foi preservado; não houve limpeza destrutiva, push, close de PR ou merge durante esta recuperação. O estado confirmado é 1/3 merges (B1), B2 no tip limpo `20cc115` e B3 sem merge. Integrador terminou a tarefa de inventário; não repetir esse ciclo.

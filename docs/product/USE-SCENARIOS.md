@@ -21,7 +21,7 @@ redefined per story.
 | 🟢 | **LIVE-proven** — proven on the live Cloudflare deploy (dogfood/first-party) or by a green test proving the exact behavior. |
 | 🟡 | **built-not-proven** — code + tests exist behind a seam; no live end-to-end proof yet (often DEFAULT-OFF, fail-closed until armed). |
 | 🔵 | **owner-gated** — built or specced, blocked on an owner decision / deploy / purchase / GA-billing flip / real volume. |
-| ⚪ | **X4-external** — provable only with an external credential/dispatch we cannot fabricate here (a real CoreLink PAT, a real hugit dispatch, a live-account Cloudflare SDK smoke). |
+| ⚪ | **X4-external** — provable only with an external credential/dispatch we cannot fabricate here (a real CoreLink PAT, a direct customer fixture, a live-account Cloudflare SDK smoke). |
 | ⚫ | **INERT/planned** — built-but-unwired into the live composition, or planned (Workspaces SKUs, multi-size resolver, durable queue). |
 
 **Standing tense discipline (a single caveat, referenced — never repeated per story).** Production
@@ -40,7 +40,7 @@ both share the spine **lease · isolate · cap · attest · teardown**. See the 
 for Door A / Door B / the moat / mint / env-0 / fence / §13.
 
 **Grounded in.** `docs/whitepaper/corelink-runners-v1.md` (canonical vision) · `docs/product/product.md` ·
-`docs/product/pricing.md` (40/60 ladder) · `docs/spec/hugit-integration-contract.md` v1.4.0 ·
+`docs/product/pricing.md` (40/60 ladder) · the historical external wire/envelope contract snapshot ·
 `docs/api/v1-reference.md` · ADR-0002/0007/0008/0009 · `deploy/cloudflare/src/index.ts` (live
 autoscaler/spawn/billing Worker) · `crates/corelink-fabric-server/src` (lease · moat · §13) · `docs/cli.md`.
 
@@ -58,12 +58,12 @@ autoscaler/spawn/billing Worker) · `crates/corelink-fabric-server/src` (lease �
   - [Theme 1.5 — Trust & verification (direct customer)](#theme-15--trust--verification-direct-customer) — S1.5.1
   - [Theme 1.6 — Real-world workflow shapes & misconfigurations (what breaks a drop-in)](#theme-16--real-world-workflow-shapes--misconfigurations-what-breaks-a-drop-in) — S1.6.1, S1.6.2, S1.6.3, S1.6.4, S1.6.5, S1.6.6, S1.6.7, S1.6.8, S1.6.9, S1.6.10, S1.6.11, S1.6.12, S1.6.13, S1.6.14, S1.6.15
   - [Theme 1.7 — Language / ecosystem drop-in (testing the "unmodified workflow" claim harder)](#theme-17--language--ecosystem-drop-in-testing-the-unmodified-workflow-claim-harder) — S1.7.1, S1.7.2, S1.7.3, S1.7.4, S1.7.5
-- [P2 — hugit customer (agent-fleet CI, via hugit) — ICP-A / ICP-C](#p2--hugit-customer-agent-fleet-ci-via-hugit--icp-a--icp-c) — S2.1.1 … S2.5.2 (10)
+- [P2 — Historical former external memoized-check profile (withdrawn)](#p2--historical-former-external-memoized-check-profile-withdrawn) — S2.1.1 … S2.5.2 (10)
   - [Theme 2.1 — Memoized CI where a re-run is ~free](#theme-21--memoized-ci-where-a-re-run-is-free) — S2.1.1, S2.1.2, S2.1.3
   - [Theme 2.2 — Attested cost & one-bill-downstream](#theme-22--attested-cost--one-bill-downstream) — S2.2.1, S2.2.2
-  - [Theme 2.3 — The agent-exec seam (hugit real-cost gate)](#theme-23--the-agent-exec-seam-hugit-real-cost-gate) — S2.3.1, S2.3.2
-  - [Theme 2.4 — hugit non-interference (tenant of CoreLink)](#theme-24--hugit-non-interference-tenant-of-corelink) — S2.4.1
-  - [Theme 2.5 — hugit as reseller / partner (the packaging seam)](#theme-25--hugit-as-reseller--partner-the-packaging-seam) — S2.5.1, S2.5.2
+  - [Theme 2.3 — The agent-exec seam (historical external consumer)](#theme-23--the-agent-exec-seam-historical-external-consumer) — S2.3.1, S2.3.2
+  - [Theme 2.4 — Tenant non-interference (CoreLink-native)](#theme-24--tenant-non-interference-corelink-native) — S2.4.1
+  - [Theme 2.5 — Withdrawn reseller / partner model (historical)](#theme-25--withdrawn-reseller--partner-model-historical) — S2.5.1, S2.5.2
 - [P3 — CoreLink Workspaces user (campaign #2, on this fabric)](#p3--corelink-workspaces-user-campaign-2-on-this-fabric) — S3.1 … S3.7 (7)
   - [Theme 3.1 — Workspace lifecycle & billing on the fabric](#theme-31--workspace-lifecycle--billing-on-the-fabric) — S3.1, S3.2, S3.3, S3.4, S3.5, S3.6, S3.7
 - [P4 — The AI agent itself (autonomous build/test on a runner)](#p4--the-ai-agent-itself-autonomous-buildtest-on-a-runner) — S4.1 … S4.7 (7)
@@ -117,7 +117,7 @@ The whole catalog at a glance: persona → job-to-be-done → # stories → domi
 | # | Persona | Job-to-be-done | Stories | Dominant reality |
 |---|---|---|---|---|
 | P1 | P1 | Adopt CoreLink Runners direct — one-line `runs-on: corelink`, flat concurrency, cache-warm CI | 46 | 🟡 built-not-proven |
-| P2 | P2 | Run memoized, attested CI through hugit where a re-run is ~free | 10 | 🟡 built-not-proven |
+| P2 | P2 | Historical former external memoized-check profile; withdrawn from the current product | 10 | ⚫ INERT/planned |
 | P3 | P3 | Spin warm dev boxes / agent sandboxes on the same fabric (Workspaces) | 7 | 🔵 owner-gated |
 | P4 | P4 | Let an autonomous agent build/test on a fenced, attested runner | 7 | 🟡 built-not-proven |
 | P5 | P5 | Operate the fabric — provision, scale the singleton→N>1, meter, respond to incidents | 18 | 🟢 LIVE-proven |
@@ -131,7 +131,7 @@ The whole catalog at a glance: persona → job-to-be-done → # stories → domi
 | P13 | P13 | Manage the account lifecycle — upgrade, downgrade, offboard, delete, re-onboard | 5 | 🔵 owner-gated |
 | P14 | P14 | Introspect my own usage, leases, and contention self-serve | 6 | 🟡 built-not-proven |
 | P15 | P15 | Read the golden signals during an incident and roll back the right thing | 5 | 🟢 LIVE-proven |
-| P16 | P16 | Guard the hugit↔fabric conformance-vector drift tripwire | 3 | 🟢 LIVE-proven |
+| P16 | P16 | Guard the CoreLink conformance-vector drift tripwire | 3 | 🟢 LIVE-proven |
 | P17 | P17 | Run the customer-facing outage surface — statuspage, comms, a11y/i18n | 3 | 🔵 owner-gated |
 | — | **Total** | 17 personas · one fabric | **155** | mixed (see Coverage summary) |
 
@@ -249,7 +249,7 @@ this path today (MEMORY: rota-a).
   label outside the corelink family, the Worker refuses to serve it (no partial
   match) so GitHub never assigns a job the runner can't satisfy.
 - *Full cache-warm `[clw] cache hit` smoke* is **⚪ X4-external** — needs a real
-  CoreLink PAT or a real hugit dispatch (MEMORY: rota-a correction-3).
+  CoreLink PAT or a direct customer fixture (MEMORY: rota-a correction-3).
 - *Baked toolchain menu (F4.1)* — 🟢 LIVE. ONE `runs-on: corelink` image serves the
   common toolchain menu, checked on a live lease (run 31743741259). Precisely what
   that run tested: **exercised** (compiled/ran real work) — **Rust 1.96** (`rustc m.rs
@@ -1422,23 +1422,23 @@ Full 500-package smoke is ⚪ X4-external.
 
 ---
 
-# P2 — hugit customer (agent-fleet CI, via hugit) — ICP-A / ICP-C
+# P2 — Historical former external memoized-check profile (withdrawn)
 
-> **hugit (campaign #3) is DISCONTINUED (owner-confirmed 2026-07).** This persona is
-> retained as the historical intended-consumer shape; Runners is now **direct-to-ICP**,
-> and the live mechanisms below (memoized attested check-exec, §13 envelope, attestation)
-> are the fabric's own. The invisible-COGS door (whitepaper §9, interop §1): hugit **was**
-> the intended consumer that would own the memo key + landing; Runners is the execution
-> substrate. A hugit customer would **never see a "Runners" line item.** Execution model
-> here is **memoized attested check-exec**, not the GH-runner fleet. Contract:
-> `hugit-integration-contract.md` v1.4.0 (fabric wire/envelope contract, historical hugit framing).
+> **The former external campaign #3 is discontinued (owner-confirmed 2026-07).**
+> This persona and every card in P2 are retained as historical acceptance vectors
+> for the memoized-check shape. They are inert documentation: they are not a
+> current ICP, consumer, owner, dependency, acceptance source, or go-live gate.
+> The live mechanisms below (memoized attested check-exec, §13 envelope,
+> attestation) are CoreLink-owned and are specified for direct customers. The
+> former invisible-COGS/reseller framing is historical provenance only. The
+> wire/envelope contract snapshot is historical reference material.
 
-## Theme 2.1 — Memoized CI where a re-run is ~free
+## Theme 2.1 — Memoized CI where a re-run is ~free (historical profile)
 
-### S2.1.1 — Cache-hit check: zero execution ⚪ X4-external (hugit-driven)
-**As an** agent-fleet operator on hugit, **I want** a check that's already been computed to return instantly at ~0 cost, **so that** my fleet's constant re-verification is free.
+### S2.1.1 — Cache-hit check: zero execution ⚫ INERT/planned (historical external dispatch)
+**As an** agent-fleet operator in the former external profile, **I wanted** a check that's already been computed to return instantly at ~0 cost, **so that** my fleet's constant re-verification is free.
 **Flow:**
-1. hugit computes `H(tree ‖ check_def ‖ toolchain)`
+1. The former external consumer computed `H(tree ‖ check_def ‖ toolchain)`
 2. asks the Action Cache →
 
 **hit** ⇒ returns the stored `CheckResult` bytes → **no lease is ever requested**
@@ -1446,25 +1446,25 @@ Full 500-package smoke is ⚪ X4-external.
 **Expected:** Most checks in a fleet are hits; "running CI" becomes a lookup. The
 fabric reports truthful exec-vs-hit accounting (no inflating "served from cache" —
 contract §3 honest hit-rate).
-**Acceptance / evidence:** hugit-side memo hit path; **the fabric is not even invoked** on a hit,
-so its evidence is *absence of a lease*. Provable only from a real hugit dispatch —
-**⚪ X4-external.**
+**Acceptance / evidence:** The former external memo hit path is historical; **the fabric is not
+even invoked** on a hit, so its evidence is *absence of a lease*. No external dispatch is a
+current acceptance or go-live requirement — **⚫ INERT/planned.**
 **Variations & failures:**
-- *Any lease requested* — impossible on a hit: the fabric only sees **misses** (interop §1 step 0); a hit returns hugit-side with no lease.
+- *Any lease requested* — impossible on a hit: the fabric only sees **misses** (interop §1 step 0); a hit returns to the consumer with no lease.
 - *Honest accounting* — the fabric never inflates "served from cache" (contract §3, S9.4); a hit is a real hit.
 - *Cache down* — fail-closed explicit error, never a silent cold result dressed as a hit (contract §2, S1.2.1).
-**Feature(s):** F-1.2, F-2.2, F-9.3 — Memoization (hugit-owned key) · honest accounting.
-**Reality:** ⚪ X4-external (hugit-driven).
+**Feature(s):** F-1.2, F-2.2, F-9.3 — Memoization (consumer-owned key) · honest accounting.
+**Reality:** ⚫ INERT/planned (the former external dispatch was withdrawn).
 
-### S2.1.2 — Cache-miss check executed on demand 🟡 built-not-proven / ⚪ hugit-live
-**As hugit's landing queue**, when a PR turns red **I want** to execute the affected uncached checks cache-warm, deterministic, isolated, and attested, **so that** my content-memo stays honest.
+### S2.1.2 — Cache-miss check executed on demand 🟡 built-not-proven / ⚫ external dispatch withdrawn
+**As a** direct CoreLink customer, when a change turns red **I want** to execute affected uncached checks cache-warm, deterministic, isolated, and attested, **so that** my content memo stays honest.
 **Flow:**
-1. hugit `POST /v1/leases` (image sha256-pinned, net_policy, ttl)
+1. The customer `POST /v1/leases` (image sha256-pinned, net_policy, ttl)
 2. `Held`
 3. `POST /v1/leases/{id}/exec` with `{check_def, tree_hash}`
 4. the box runs the check warm
 5. returns `CheckResult` + `AttestationChain` + `result_binding_sig(_v2)`
-6. hugit stores the result under the memo key
+6. The customer stores the result under the memo key
 7. `POST /v1/leases/{id}/close`.
 
 **Expected:** Byte-identical result for the same def+inputs (determinism sacred);
@@ -1472,18 +1472,18 @@ the fabric controls clock/RNG/locale/paths and injects no per-boot value (contra
 §3). Gate order at exec is non-skippable (tenant scope → Held → not-expired →
 execute → attest — api §exec).
 **Acceptance / evidence:** `mock_e2e.rs` / `acceptance_runner_lease.rs` / conformance vectors green
-on CI; live E2E acquire→exec→attest→teardown proven (ROADMAP). Real hugit adoption is
-at **P2** pending the live transport (interop §5) — ⚪.
+on CI; live E2E acquire→exec→attest→teardown proven (ROADMAP). The former external adoption
+was withdrawn; a future direct-customer dispatch remains an owner/product exercise.
 **Variations & failures:**
 - *memo_key lies about its axes* — the close path rejects (400 `invalid`) any
   `CheckResult` whose `memo_key ≠ SHA-256(LP(tree)‖LP(def)‖LP(toolchain))` before
   attesting it (contract §7.1 companion; api §close gate 4).
 - *Cache down* — fail-closed explicit error, never a silent cold result (contract §2).
 **Feature(s):** F-2.2, F-5.1, F-9.5 — Lease lifecycle · exec · determinism · attestation · memo-key integrity.
-**Reality:** 🟡 built-not-proven / ⚪ hugit-live.
+**Reality:** 🟡 built-not-proven / ⚫ former external adoption withdrawn.
 
-### S2.1.3 — Landing-queue auto-trigger + bisect ⚪ X4-external (hugit-driven)
-**As hugit's landing queue**, **I want** to trigger an uncached check for a specific queue item and get a byte-identical result on redelivery, **so that** at-least-once queue semantics don't double-execute or double-bill.
+### S2.1.3 — Landing-queue auto-trigger + bisect ⚫ INERT/planned (historical profile)
+**As a** landing queue in the former external profile, **I wanted** to trigger an uncached check for a specific queue item and get a byte-identical result on redelivery, **so that** at-least-once queue semantics don't double-execute or double-bill.
 **Flow:**
 1. `POST /v1/queue/trigger` with `{entry, check_def, tree_hash, lease_id}`
 2. executes on the leased box
@@ -1492,18 +1492,18 @@ at **P2** pending the live transport (interop §5) — ⚪.
 
 **Expected:** Idempotent under at-least-once; dedup bounded (4096 entries) — at the
 cap, new results serve but later dups re-execute (correct, merely wasteful — api §trigger).
-**Acceptance / evidence:** `TRIGGER_DEDUP_CAP = 4096` insertion-capped dedup on `(tenant, item_id, tree_hash)` (`queue.rs:44-64/84`, S7.15); the trigger executes on a lease acquire already admitted (`trigger_is_tenant_scoped_and_capped`). A real hugit-driven trigger+bisect is ⚪ X4-external.
+**Acceptance / evidence:** `TRIGGER_DEDUP_CAP = 4096` insertion-capped dedup on `(tenant, item_id, tree_hash)` (`queue.rs:44-64/84`, S7.15); the trigger executes on a lease acquire already admitted (`trigger_is_tenant_scoped_and_capped`). The former external trigger+bisect dispatch is historical and withdrawn.
 **Variations & failures:**
 - *Duplicate delivery* — deduped on `(tenant, item_id, tree_hash)`; the same attested `TriggerResponse` returns byte-identically, no re-execute (idempotent under at-least-once).
 - *Dedup cap exhausted* — past 4096 keys a later dup re-executes (correct, merely wasteful, S7.15); bounded memory over perfect dedup.
 - *Cross-tenant item* — the dedup key includes `tenant` and the lease is the caller's; another tenant's item is unreachable (S7.4).
 **Feature(s):** F-2.2 — `QueueApi` trigger · idempotent dedup · attested trigger.
-**Reality:** ⚪ X4-external (hugit-driven).
+**Reality:** ⚫ INERT/planned (former external dispatch withdrawn).
 
 ## Theme 2.2 — Attested cost & one-bill-downstream
 
 ### S2.2.1 — The attested per-job cost (`intent_metrics_sig`) 🟢 LIVE-proven (on wire)
-**As a** hugit cost analyst, **I want** the provider-billed cost of an agent job signed and delivered atomically with the result, **so that** my flat-plan economics are auditable without a separate meter.
+**As a** CoreLink cost analyst, **I want** the provider-billed cost of an agent job signed and delivered atomically with the result, **so that** the economics are auditable without a separate meter.
 **Flow:**
 1. At `close`, the fabric returns `IntentMetrics` (tokens with the mandatory cache split, `wall_ms`/`active_ms`, tool breakdown, `cost_usd_micros`) **atomically** with the `CheckResult` and the attestation (contract §13.1 delivery rule).
 
@@ -1514,7 +1514,7 @@ integer micro-USD (no f64 epsilon). The cache split is **mandatory** for an agen
 **Acceptance / evidence:** The `IntentMetrics` payload is delivered atomically at close and the
 conformance vector (sha256 `2d8d2215…`) is byte-identical both repos. The signed
 `intent_metrics_sig` is **arm-gated** by `FABRIC_EMIT_INTENT_METRICS_SIG`
-(default-**off** in code; `None` is wire-invisible until hugit's verifier adopts
+(default-**off** in code; `None` is wire-invisible until a CoreLink consumer adopts
 the field — `close.rs:368`, `app.rs:511`); it was proven **on the wire in the
 live FLIP-B deploy** (MEMORY: rota-a), so 🟢 for the flip, arm-gated by default.
 **Variations & failures:**
@@ -1524,10 +1524,10 @@ live FLIP-B deploy** (MEMORY: rota-a), so 🟢 for the flip, arm-gated by defaul
 **Feature(s):** F-2.2, F-3.1, F-5.4 — §13.1 IntentMetrics · provider-billed cost · attested cost.
 **Reality:** 🟢 LIVE-proven (on wire).
 
-### S2.2.2 — One product, one bill 🔵 owner-gated (packaging)
-**As a** hugit customer, **I want** to never see a "Runners" line item, **so that** I buy one flat hugit plan and Runners is invisible COGS.
+### S2.2.2 — One product, one bill ⚫ INERT/planned (withdrawn reseller model)
+**As a** customer of a former external reseller, **I wanted** to never see a "Runners" line item, **so that** I bought one flat plan and Runners was invisible COGS.
 **Flow:**
-1. hugit prices flat on top; the fabric meters for COGS/accounting only (contract §10). No per-minute meter is ever exposed to a hugit customer.
+1. The former reseller priced flat on top; the fabric meters for COGS/accounting only (contract §10). No per-minute meter was exposed downstream.
 
 **Expected:** Principle 6 (one product, one bill downstream). The fabric emits raw
 occupancy (`runner_slot_seconds`), never minutes/cost math to the customer.
@@ -1535,64 +1535,67 @@ occupancy (`runner_slot_seconds`), never minutes/cost math to the customer.
 minutes/cost math"); the packaging decision is **owner-gated** (product.md §9.3).
 **Variations & failures:**
 - *Customer asks for a per-minute breakdown* — none exists to expose; the fabric emits only raw `runner_slot_seconds` for COGS (S5.3.1), never a customer-facing minutes meter (Principle 6).
-- *Reseller margin* — hugit prices flat on top; the wholesale attested cost is hugit's to mark up (S2.5.1), invisible to hugit's end customer.
-- *Direct vs via-hugit packaging* — which door bills a workload is the owner-gated packaging call (product.md §9.3).
+- *Reseller margin* — the former reseller priced flat on top; the wholesale attested cost was its decision to mark up (S2.5.1), invisible downstream.
+- *Direct vs reseller packaging* — the current product is direct-to-ICP; the former reseller packaging model is withdrawn.
 **Feature(s):** F-2.2 — Invisible COGS · flat downstream pricing.
-**Reality:** 🔵 owner-gated (packaging).
+**Reality:** ⚫ INERT/planned (withdrawn packaging model).
 
-## Theme 2.3 — The agent-exec seam (hugit real-cost gate)
+## Theme 2.3 — The agent-exec seam (CoreLink-native)
 
-> **hugit (discontinued 2026-07) was the intended consumer of this seam.** Retained as
-> the historical shape; the agent-exec seam is a **live fabric mechanism** now offered
-> direct-to-ICP.
+> The former external project was the intended consumer of this seam. That
+> integration is discontinued; the agent-exec seam is a **CoreLink-owned fabric
+> mechanism** offered direct-to-ICP. The cards below retain the historical shape
+> and do not create an external acceptance or release gate.
 
-### S2.3.1 — Agent-driven check execution (agent-exec) 🟡 built-not-proven / ⚪ hugit-dials-it
-**As hugit's forge** (the discontinued intended consumer), when a job was submitted by an agent fleet, **I want** the runner to execute it under the agent-exec seam and emit real cost, **so that** my real-cost gate is fed.
+### S2.3.1 — Agent-driven check execution (agent-exec) 🟡 built-not-proven / ⚫ historical dispatch
+**As a** direct CoreLink agent-fleet customer, when a job is submitted, **I want** the runner to execute it under the agent-exec seam and emit real cost, **so that** my real-cost accounting is fed.
 **Flow:**
-1. hugit dials the agent-exec path (`req.agent` — was a dead field, now wired: `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store, timeout wrap; `/exec` refuses an agent job)
+1. The customer dials the agent-exec path (`req.agent` — now wired: `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store, timeout wrap; `/exec` refuses an agent job)
 2. the agent loop runs in a fresh microVM
 3. §13 metrics emitted at close.
 
 **Expected:** Default-off, gate-green (11 acceptance + 5 unit tests — MEMORY:
-agent-exec). Real e2e only when hugit dials it — ⚪.
-**Acceptance / evidence:** `req.agent` is wired — `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store with a timeout wrap, and `/exec` refuses an agent job (MEMORY: agent-exec; 11 acceptance + 5 unit tests, default-off). Real hugit-dialed e2e is ⚪ X4-external.
+agent-exec). Real customer e2e remains a direct-product exercise — ⚫.
+**Acceptance / evidence:** `req.agent` is wired — `from_agent_lease` egress box + `POST/GET /agent-exec` async step-store with a timeout wrap, and `/exec` refuses an agent job (MEMORY: agent-exec; 11 acceptance + 5 unit tests, default-off). No external project dispatch is required.
 **Variations & failures:**
 - *`req.agent` unset* — the ordinary `/exec` check path (non-agent).
 **Feature(s):** F-2.5, F-3.2, F-5.1 — Agent-exec seam · §13 emission on the agent path.
-**Reality:** 🟡 built-not-proven / ⚪ hugit-dials-it.
+**Reality:** 🟡 built-not-proven / ⚫ direct customer e2e pending.
 
-### S2.3.2 — Streaming the agent trajectory (§13.2 turn-feed) 🟡 built-not-proven / ⚪ hugit-subscribes
-**As hugit's ledger producer**, **I want** the in-box agent loop to stream its raw transcript out through an authenticated hook, **so that** I can persist both the full and compacted transcript blobs without the runner ever storing bytes.
+### S2.3.2 — Streaming the agent trajectory (§13.2 turn-feed) 🟡 built-not-proven / ⚫ historical dispatch
+**As a** CoreLink telemetry consumer, **I want** the in-box agent loop to optionally stream bounded transcript telemetry through an authenticated hook, **so that** I can observe the agent path without the runner ever storing bytes.
 **Flow:**
-1. At acquire, a `CaptureHook` is registered
-2. the in-box agent loop `POST /v1/leases/{id}/envelope/ingest` (per-lease **write-only ingest token**, NOT the tenant PAT)
-3. hugit polls `GET .../envelope/events` (raw) + `.../envelope/meta` (per-turn metadata) with the tenant PAT
-4. at `close`, the exactly-once job-close signal fires; both blobs finalized before `Released`.
+1. At acquire, a `CaptureHook` is registered for optional telemetry
+2. the in-box agent loop may `POST /v1/leases/{id}/envelope/ingest` (per-lease **write-only ingest token**, NOT the tenant PAT)
+3. A CoreLink consumer may poll `GET .../envelope/events` (raw) + `.../envelope/meta` (per-turn metadata) with the tenant PAT
+4. `close` remains required: teardown completes, the lease is released, and metrics, provider cost, billing, and attestation are finalized atomically.
 
-**Expected:** Bounded in-flight only — **nothing persisted** on the runner (§13.3);
-overflow is honest (`capture_incomplete`), never a silent drop. Redaction is
+**Expected:** Ingest and poll are optional CoreLink telemetry and are not a GA gate.
+The surfaces are bounded in-flight only — **nothing persisted** on the runner (§13.3).
+`capture_incomplete` means actual local overflow, undrained residue, or abnormal
+partial capture; it is never a missing external JobClose ACK. Redaction is
 forge-side; the runner forwards raw bytes.
 **Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; the ingest
 token is `HMAC(derived_key, "envelope-ingest:v1:"+lease_id)` (the P0 fix that replaced
 injecting the tenant PAT into the untrusted box — ROADMAP recursive-audit). Live
-consumption is hugit adopting the endpoint — ⚪.
+consumption by a former external project was withdrawn; direct CoreLink consumption remains the product path.
 **Variations & failures:**
 - *Exfiltrated ingest token* — authorizes ingest to that **one soon-dead lease** only;
   no tenant takeover (api §ingest).
 - *Abnormal close (Expired/Crashed)* — a **partial** envelope is flushed, marked
-  `close_reason` + `capture_incomplete` (§13.5 Option B); fire-and-forget, teardown
-  never waits.
+  `close_reason` + `capture_incomplete` (§13.5 Option B); the flag records the
+  actual abnormal partial, and teardown never waits for an external ACK.
 **Feature(s):** F-2.5, F-4.9 — §13.2 capture hook · scoped ingest token · no-persistence · abnormal-flush.
-**Reality:** 🟡 built-not-proven / ⚪ hugit-subscribes.
+**Reality:** 🟡 built-not-proven / ⚫ direct customer consumption pending.
 
-## Theme 2.4 — hugit non-interference (tenant of CoreLink)
+## Theme 2.4 — Tenant non-interference (CoreLink-native)
 
-> **hugit (discontinued 2026-07) was the intended tenant here.** Retained as the
-> historical shape; the non-interference guarantees are **live fabric mechanisms** that
-> hold for any tenant (the storm story below reads for any agent-fleet tenant, direct-to-ICP).
+> The former external project was the intended tenant here. That integration is
+> discontinued; the non-interference guarantees are **live CoreLink mechanisms**
+> for any tenant, including direct agent-fleet customers.
 
-### S2.4.1 — A hugit storm must not starve other tenants 🟡 built-not-proven
-**As a** CoreLink operator, **I want** an agent-fleet storm (hugit was the intended such tenant) to be structurally bounded, **so that** it can never degrade the cache launch route or another tenant.
+### S2.4.1 — An agent-fleet storm must not starve other tenants 🟡 built-not-proven
+**As a** CoreLink operator, **I want** an agent-fleet storm to be structurally bounded, **so that** it can never degrade the cache launch route or another tenant.
 **Flow:**
 1. Per-tenant **request-rate ceiling** + **concurrency/budget cap** set *before* load (preventive, X10⑤)
 2. under contention, fair-share (no single tenant starves others, p95-wait bound, C7)
@@ -1604,65 +1607,64 @@ per-tenant wait histogram so non-interference is provable, not assumed.
 (`FABRIC_ADMISSION_MODE=queue`) lights up `/v1/metrics/tenant`; **default is `reject`**
 (over-cap = fast 429) — queue vs reject as the product semantics is owner-gated (ADR-0005).
 **Variations & failures:**
-- *Storm hits the tenant's own cap* — refused cleanly at `min(entitlement, FLEET)` (S1.3.2); a hugit storm spends hugit's own N, never another tenant's.
+- *Storm hits the tenant's own cap* — refused cleanly at `min(entitlement, FLEET)` (S1.3.2); a tenant's storm spends its own N, never another tenant's.
 - *Reject vs queue mode* — default `reject` = fast 429 (S1.3.2); `queue` mode populates the per-tenant wait histogram (S14.5); the semantics are owner-gated (ADR-0005).
-- *Fleet-wide saturation* — even hugit is clamped to `FLEET_MAX_CONCURRENCY`; load-shed keeps health answerable (S5.2.3).
+- *Fleet-wide saturation* — every tenant is clamped to `FLEET_MAX_CONCURRENCY`; load-shed keeps health answerable (S5.2.3).
 **Feature(s):** F-2.2, F-5.2 — Preventive caps · fair admission · non-interference surface.
 **Reality:** 🟡 built-not-proven.
 
-## Theme 2.5 — hugit as reseller / partner (the packaging seam)
+## Theme 2.5 — Withdrawn reseller / partner model (historical)
 
-> **hugit (discontinued 2026-07) was the intended reseller.** Retained as the historical
+> The former external project was the intended reseller. Retained as the historical
 > intended-consumer shape; Runners is now **direct-to-ICP**. The partner-economics
 > obligations below (raw-occupancy metering, attested wholesale cost, reseller-margin
 > boundary) are **live fabric mechanisms** that apply to any reseller/packaging arrangement.
-> hugit **was** the reseller that would front Runners as invisible COGS and price its own
-> flat plan on top (Principle 6, contract §10).
+> The former invisible-COGS model is withdrawn and creates no current owner or gate.
 
-### S2.5.1 — hugit resells Runners as invisible COGS under its own plan 🔵 owner-gated (packaging)
-**As hugit (the discontinued intended reseller)**, **I want** to buy fabric capacity wholesale and resell it inside my flat plan, **so that** my customer sees one hugit bill and I keep the margin between my price and my Runners COGS.
+### S2.5.1 — Reseller invisible COGS (withdrawn) ⚫ INERT/planned
+**As a** former external reseller, **I wanted** to buy fabric capacity wholesale and resell it inside my flat plan, **so that** my customer saw one bill and I kept the margin between my price and my Runners COGS.
 **Flow:**
-1. hugit holds a tenant relationship with the fabric
-2. its customers' checks execute on leases hugit owns
-3. the fabric meters **raw occupancy** (`runner_slot_seconds`) + attested per-job cost (`IntentMetrics.cost_usd_micros`, S2.2.1) to hugit
-4. hugit prices flat downstream (contract §10). No per-minute meter is *ever* exposed to hugit's customer.
+1. The former reseller held a tenant relationship with the fabric
+2. its customers' checks executed on leases it owned
+3. the fabric metered **raw occupancy** (`runner_slot_seconds`) + attested per-job cost (`IntentMetrics.cost_usd_micros`, S2.2.1) to the reseller
+4. the reseller priced flat downstream (contract §10). No per-minute meter was exposed to its customer.
 
 **Expected:** The fabric emits COGS/accounting signals to the reseller only, never
-customer-facing cost math (S2.2.2, Principle 6). The reseller margin is hugit's to
+customer-facing cost math (S2.2.2, Principle 6). The reseller margin was the reseller's to
 set; the fabric's obligation is a **truthful, attested** wholesale cost (provider-
-billed, recorded verbatim — S2.2.1), so hugit's unit economics are auditable.
+billed, recorded verbatim — S2.2.1), so the former reseller's unit economics were auditable.
 **Acceptance / evidence:** `PgBillingSink` records raw occupancy only ("no minutes/cost math");
 `IntentMetrics` delivered atomically at close (S2.2.1). The packaging/wholesale-rate
-decision is **owner-gated** (product.md §9.3, "direct-vs-via-hugit packaging").
+decision is withdrawn; the current product is direct-to-ICP.
 **Variations & failures:**
-- *Reseller wants a cost breakdown per end-customer* — hugit owns the memo key +
-  landing, so the end-customer attribution is hugit-side; the fabric attributes to
-  the hugit **tenant**, not hugit's sub-customers (correct boundary — the fabric has
-  no view of hugit's customer list).
+- *Reseller wants a cost breakdown per end-customer* — the reseller owned the memo key +
+  landing, so the end-customer attribution was reseller-side; the fabric attributed to
+  the reseller **tenant**, not its sub-customers (correct boundary — the fabric had
+  no view of the reseller's customer list).
 - *Reseller under-bills its customer* — not the fabric's concern; the fabric's cost
   is verbatim + attested, so a reseller mispricing is a reseller decision, never a
   fabric mis-meter.
 **Feature(s):** F-2.2, F-5.4 — Invisible COGS · wholesale attested cost · reseller margin boundary.
-**Reality:** 🔵 owner-gated (packaging).
+**Reality:** ⚫ INERT/planned (withdrawn packaging model).
 
-### S2.5.2 — Two front doors, one fabric — a customer buys direct AND via hugit 🟡 built-not-proven
-**As HuGR**, **I want** the same fabric to serve a direct `runs-on: corelink` customer and a hugit-resold customer without either leaking into the other, **so that** "two front doors, one fabric" is real and non-interfering.
+### S2.5.2 — Two front doors, one fabric (historical reseller shape) 🟡 built-not-proven
+**As HuGR**, **I wanted** the same fabric to serve a direct `runs-on: corelink` customer and a former reseller customer without either leaking into the other, **so that** "two front doors, one fabric" was real and non-interfering.
 **Flow:**
 1. Direct customer
-2. Door A (GH runner fleet, S1.x). hugit-resold customer
+2. Door A (GH runner fleet, S1.x). Former reseller customer
 3. Door B (memoized check-exec, S2.x). Both hit the same lease · isolate · cap · attest · teardown spine
 4. each is a distinct **tenant** with its own cap/fairness/billing.
 
-**Expected:** A hugit storm cannot degrade a direct tenant and vice-versa
+**Expected:** A former reseller tenant's storm could not degrade a direct tenant and vice-versa
 (non-interference, S2.4.1); the same physical fabric backs both, but tenancy is the
 hard boundary (no cross-tenant, S7.4). A customer could even be *both* (direct CI +
-a hugit-agent workload) — two tenants, two bills, one fabric.
+an agent workload) — two tenants, two bills, one fabric.
 **Acceptance / evidence:** Two doors share the spine (interop §4); per-tenant caps + fair-share
 (S2.4.1); tenant isolation LIVE (S7.4). Full two-door-same-fabric proof under real
 dual load is ⚪ X4-external.
 **Variations & failures:**
-- *A customer that is both direct AND via-hugit* — two distinct tenants (two PATs), two bills, one fabric; no cross-tenant leak between their own workloads (S7.4).
-- *Direct storm vs hugit tenant* — symmetric non-interference (S2.4.1): each tenant's cap + fair-share bounds it; neither door starves the other.
+- *A customer that is both direct AND via the former reseller* — two distinct tenants (two PATs), two bills, one fabric; no cross-tenant leak between their own workloads (S7.4).
+- *Direct storm vs former reseller tenant* — symmetric non-interference (S2.4.1): each tenant's cap + fair-share bounds it; neither door starves the other.
 - *One door down* — the other is unaffected (independent spawn/exec paths); a Door-A outage never touches Door-B leases (S9.3 fail-open).
 **Feature(s):** F-2.1, F-2.2 — Two front doors · one fabric · tenant-boundary partitioning.
 **Reality:** 🟡 built-not-proven.
@@ -1916,19 +1918,20 @@ fence red-team (`C5a`/`C5b`) green; the credential-scan attestation proves
 **Reality:** 🟢 LIVE-proven (isolation).
 
 ### S4.3 — The agent streams its trajectory out (but the box stores nothing) 🟡 built-not-proven
-**As an** agent, **I want** to stream my model turns / tool calls / results as they happen, **so that** the forge captures my full + compacted transcript — while the box I run on never persists a byte.
+**As an** agent, **I want** to optionally stream my model turns / tool calls / results as they happen, **so that** CoreLink can observe bounded telemetry — while the box I run on never persists a byte.
 **Flow:**
-1. The agent loop `POST .../envelope/ingest` per turn (scoped ingest token)
+1. The agent loop may `POST .../envelope/ingest` per turn (scoped ingest token)
 2. the runner forwards in-flight only
-3. hugit persists
-4. at close, `wall_ms`/`active_ms` finalize both blobs atomically.
+3. an optional CoreLink consumer may poll the bounded events/meta surfaces
+4. at close, `wall_ms`/`active_ms` finalize with the required metrics, provider cost, billing, and attestation before release.
 
-**Expected:** The runner never buffers/persists beyond in-flight forwarding (§13.3);
-overflow ⇒ `capture_incomplete`, honest.
-**Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; poll-drain with no durable write on the forward path (`envelope.rs`, `no_durable_write_anywhere_on_forward_path`, S7.13); scoped write-only ingest token (S2.3.2). Live hugit consumption is ⚪ X4-external.
+**Expected:** The telemetry routes are optional and are not a GA gate. The runner
+never buffers/persists beyond in-flight forwarding (§13.3); actual local overflow,
+undrained residue, or abnormal partial capture ⇒ `capture_incomplete`, honestly.
+**Acceptance / evidence:** `acceptance_envelope_e2e` (acquire→ingest→poll→close) green; poll-drain with no durable write on the forward path (`envelope.rs`, `no_durable_write_anywhere_on_forward_path`, S7.13); scoped write-only ingest token (S2.3.2). A former external consumer is not part of current acceptance.
 **Variations & failures:**
 - *Overflow* — the surface latches `raw_overflow`/`meta_overflow` → `capture_incomplete: true` at close (never a silent drop, S7.13).
-- *Abnormal close (Expired/Crashed)* — a partial envelope is flushed, marked `capture_incomplete` (§13.5 Option B, S2.3.2); teardown never waits.
+- *Abnormal close (Expired/Crashed)* — a partial envelope is flushed, marked `capture_incomplete` (§13.5 Option B, S2.3.2); teardown never waits for an external ACK.
 - *Exfiltrated ingest token* — writes to that one soon-dead lease only, no tenant takeover (S7.14).
 **Feature(s):** F-4.9 — §13.2 turn-feed · no-persistence.
 **Reality:** 🟡 built-not-proven.
@@ -1950,9 +1953,9 @@ overflow ⇒ `capture_incomplete`, honest.
   fractional-cent rounding drift can never accumulate across a fleet's millions of
   jobs.
 - *Sig arm-gated* — `intent_metrics_sig` is `None`/wire-invisible until
-  `FABRIC_EMIT_INTENT_METRICS_SIG` is armed + hugit's verifier adopts the field
-  (S2.2.1); proven on the wire in FLIP-B but default-off, so a hugit that hasn't
-  adopted sees the unsigned metrics (backward-compatible), never a broken payload.
+  `FABRIC_EMIT_INTENT_METRICS_SIG` is armed + the CoreLink verifier adopts the field
+  (S2.2.1); proven on the wire in FLIP-B but default-off, so a consumer that has not
+  adopted it sees the unsigned metrics (backward-compatible), never a broken payload.
 - *Runner-specific extra fields* — the forge ignores `cpu_ms` and other
   runner-only fields; only the IntentMetrics vocabulary is contract (S2.2.1).
 **Feature(s):** F-4.9 — §13.1 metrics · cache split · provider-billed cost · arm-gated sig · integer-cost.
@@ -2094,7 +2097,7 @@ upgrade N (S12.3), never to bypass the cap.
 **Acceptance / evidence:** GitHub App live (installation 150584374); dogfood fleet uses it. Full
 cache-hit smoke is ⚪ X4-external.
 **Variations & failures:**
-- *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or hugit dispatch, S1.1.4).
+- *Full cache-hit smoke* — ⚪ X4-external (needs a real CoreLink PAT or direct customer fixture, S1.1.4).
 - *Fall back to the builder Mac* — revert the `runs-on:` label in one line (S9.3); reserved `corelink-builder` is the self-hosted Mac, never a fleet label (S1.1.4).
 - *App creds absent* — the mint path is inert, jobs fall back (S1.1.3 uninstall = fail-safe).
 **Feature(s):** F-7.1 — Autoscaler Stage B · dogfood fleet.
@@ -2144,7 +2147,7 @@ together — **owner-gated on volume** (MEMORY: fabricd-multi-instance-scaling).
 1. A global in-flight concurrency limit sheds excess; `GET /v1/health` is mounted **outside** the limiter so an LB/orchestrator can always probe liveness under saturation (api §health).
 
 **Expected:** Saturation degrades cleanly — the global in-flight limit sheds excess with a `503` while `GET /v1/health` (mounted outside the limiter) still answers 200, so an LB/orchestrator can always distinguish "saturated but up" from "down" (S15.3).
-**Acceptance / evidence:** `load_shedding.rs` acceptance; close ack-window + global-limit/load-shed
+**Acceptance / evidence:** `load_shedding.rs` acceptance; close finalization + global-limit/load-shed
 (ROADMAP audit fixes).
 **Variations & failures:**
 - *Health under saturation* — always answerable (outside the limiter); a 200 = saturated-but-up, a timeout = down (S15.3).
@@ -2752,8 +2755,8 @@ for the untrusted runner/agent paths the wire `net_policy` is overwritten server
 so a malicious request buys nothing (the C2 invariant — isolation is derived from the
 `ContainerSpec` constructor, **never inferred from the wire `net_policy` string**,
 `cloud_exec.rs:639/671`). The only path that honors a caller's `net_policy` verbatim is
-the **plain hugit check-exec** lease — and hugit is a **trusted tenant** setting policy
-on its *own* leases, still isolation-derived-from-the-spec, not from the string. Egress
+the **plain check-exec** lease — a trusted tenant may set policy on its *own* leases,
+still isolation-derived-from-the-spec, not from the string. Egress
 is further shaped by the SDK proxy (S1.6.4) with the honest G2 caveat (S7.6).
 **Acceptance / evidence:** `net_policy` FORCED server-side for runner/agent (`leases.rs:569-593`);
 isolation never inferred from the wire string (C2 invariant, `cloud_exec.rs:639/671`);
@@ -2835,7 +2838,7 @@ hypothetical forged result is caught at the client.
 **Reality:** 🟢 LIVE-proven (content-address + determinism).
 
 ### S7.13 — A malicious / oversized envelope-ingest (the §13.2 turn-feed write side) 🟢 LIVE-proven (bounded surfaces) / 🟡 e2e
-**As a** red-teamer controlling the untrusted in-box agent, **I want** to flood the `envelope/ingest` endpoint with an oversized transcript, thousands of distinct tool names, over-long names, and malformed events, **so that** I test whether the turn-feed can exhaust runner memory, persist to disk, or corrupt hugit's ledger.
+**As a** red-teamer controlling the untrusted in-box agent, **I want** to flood the `envelope/ingest` endpoint with an oversized transcript, thousands of distinct tool names, over-long names, and malformed events, **so that** I test whether the turn-feed can exhaust runner memory, persist to disk, or corrupt the CoreLink ledger.
 **Flow:**
 1. The in-box agent loop `POST /v1/leases/{id}/envelope/ingest` (per-lease write-only ingest token, S2.3.2) with hostile payloads: (a) **a torrent of events**
 2. the mechanism's surfaces are **bounded in-memory** and the adapter holds **no buffer of its own** (poll-drain: a `GET` drains + releases in one step, `no_durable_write_anywhere _on_forward_path`)
@@ -2863,7 +2866,7 @@ envelope — nothing else.
 (`crates/corelink-runner/src/envelope/collector.rs:22-29`,
 `tool_breakdown_is_bounded_against_attacker_tool_names`); `raw_overflow`/`meta_overflow`
 → `capture_incomplete` (`envelope/close.rs:172-182`); malformed event → `400`
-(`envelope.rs` `into_transcript_event`). Live hugit consumption is ⚪ X4-external (S2.3.2).
+(`envelope.rs` `into_transcript_event`). External consumption is not a current acceptance gate (S2.3.2).
 **Variations & failures:**
 - *Overflow then abnormal close* — an Expired/Crashed close flushes a **partial**
   envelope marked `capture_incomplete: true` unconditionally (S2.3.2, §13.5 Option B);
@@ -2948,7 +2951,7 @@ memoizing (`crates/corelink-fabric-server/src/handlers/queue.rs:44-64`); dedup k
 # P8 — Power-user of the `corelink run` / verify primitive
 
 > The re-scoped power-user surface (ADR-0007 decision 2): a "run one attested check"
-> primitive + the verify SDKs — correct and load-bearing for the hugit/campaign-#3
+> primitive + the verify SDKs — correct and load-bearing for the former memoized-check
 > path, explicitly **not** the direct on-ramp.
 
 ## Theme 8.1 — The `corelink run` / verify primitive
@@ -3892,8 +3895,8 @@ handler** — the tracked product gap (this story is its home).
   (S2.1.1); the dedicated metric is the follow-up, the raw truth is available.
 - *Low hit rate on a churning repo* — honestly low (S9.4); the metric would show a real,
   un-flattering number, never inflated (S2.1.1) — trust is built on a number we can't game.
-- *Per-pipeline cost attribution* — for a hugit-resold customer, per-end-customer
-  attribution is hugit-side (S2.5.1 reseller boundary); for a direct customer it's their
+- *Per-pipeline cost attribution* — for a former reseller customer, per-end-customer
+  attribution was reseller-side (S2.5.1 historical boundary); for a direct customer it's their
   own leases (S14.3), the fabric attributes to the tenant.
 - *Cost vs bill* — the breakdown is COGS/usage (raw occupancy, S2.2.2), not a
   customer-facing minutes meter (Principle 6); the *bill* stays the flat tier (S6.1).
@@ -4068,10 +4071,10 @@ S5.2.2).
 
 # P16 — Contract-drift / conformance-vector seam owner (the CLAUDE.md tripwire)
 
-> **hugit is DISCONTINUED (owner-confirmed 2026-07);** the historical cross-repo seam
+> **The former external integration is DISCONTINUED (owner-confirmed 2026-07);** the historical cross-repo seam
 > framing below is retained because the **mechanisms are the fabric's own** and stay LIVE.
 > The wire-contract **law** (CLAUDE.md): types are **transcribed** on the fabric side
-> (hugit-contracts was **frozen, never imported**), and the shared **conformance vectors**
+> (the external contract package was **frozen, never imported**), and the shared **conformance vectors**
 > were committed **byte-identical in both repos** — the **drift tripwire**: the golden
 > tests break on any type divergence, so a difference is **never silent**. This persona
 > owns that tripwire; the fabric now owns both sides of the vector.
@@ -4079,22 +4082,21 @@ S5.2.2).
 ## Theme 16.1 — The conformance-vector drift tripwire
 
 ### S16.1 — A vector diff caught (the drift tripwire fires) 🟢 LIVE-proven (golden tests)
-**As the seam owner**, **I want** any divergence between the fabric's wire types and the frozen contract to **break a test loudly**, **so that** a drift is caught in CI, never shipped as a silent incompatibility with hugit.
+**As the CoreLink contract owner**, **I want** any divergence between the fabric's wire types and the frozen contract to **break a test loudly**, **so that** a drift is caught in CI, never shipped as a silent incompatibility for a downstream client.
 **Flow:**
 1. Someone edits a wire type on the fabric side (adds a field, reorders, changes a tag)
 2. the **golden test** re-serializes the type and compares it **byte-exact** against the committed conformance vector (`conformance/*.json` + `conformance/manifest.sha256`) →
 
 **mismatch ⇒ the golden test FAILS** → CI is red → the drift is **caught before merge**.
-The vectors are **byte-identical in both repos** (CLAUDE.md), so the *same* divergence
-also breaks hugit's golden tests — neither side can drift silently.
+The CoreLink vector and `manifest.sha256` are canonical for this repository; historical
+external copies are provenance and are not release dependencies.
 **Expected:** The tripwire is **structural and bilateral**: a byte-exact round-trip
 against a committed vector (e.g. `RunnerLease.json` `ab1744c9…`, `FenceManifest.json`
 `07940b9a…`, `IntentMetrics.json` `2d8d2215…`) means **any** field/shape/order change
-fails the golden test on **whichever side changed** — and because the vectors are
-committed identically in both repos, hugit's tests break too. A drift is therefore
-**never silent**: it is a red build, not a production incompatibility discovered by a
-hugit customer. The seam owner's job is to **treat a golden-test failure as a
-contract-change gate**, not a test to "fix" by regenerating the vector unilaterally.
+fails the golden test on the changed CoreLink side. A drift is therefore **never
+silent**: it is a red build, not a production incompatibility discovered by a client.
+The contract owner's job is to **treat a golden-test failure as a contract-change
+review**, not a test to "fix" by regenerating the vector without compatibility evidence.
 **Acceptance / evidence:** Byte-exact golden round-trip tests
 (`crates/corelink-runners-contracts/tests/acceptance_cf0_transcriptions.rs` "round-trip is
 not byte-exact"; `acceptance_s13_contracts.rs` "IntentMetrics golden round-trip is not
@@ -4103,11 +4105,11 @@ vectors + `manifest.sha256` (`conformance/`); CLAUDE.md wire-contract law (trans
 frozen, byte-identical, drift-tripwire).
 **Variations & failures:**
 - *A benign-looking field add* — still breaks the byte-exact vector (correct); a new
-  field is a **contract change** that must be coordinated with hugit (S16.3), not slipped
-  in — the tripwire forces the conversation.
+  field is a **contract change** handled by the CoreLink-owned S16.3 process, not slipped
+  in — the tripwire forces the review.
 - *Regenerate the vector to "fix" the red test* — the **anti-pattern**: it hides the
-  drift instead of coordinating it. A vector change is a deliberate, cross-repo,
-  owner/hugit-techlead-gated act (S16.3), never a unilateral green-the-build move.
+  drift instead of reviewing it. A vector change is a deliberate, CoreLink-owned,
+  compatibility-checked act (S16.3), never a unilateral green-the-build move.
 - *Money/type mistyping* — the s13 golden also rejects a `cost_usd_micros` float where an
   integer is required (`float_money`/`int_money` cases, S2.2.1), catching an epsilon-drift
   class of bug.
@@ -4115,10 +4117,10 @@ frozen, byte-identical, drift-tripwire).
 **Reality:** 🟢 LIVE-proven (golden tests).
 
 ### S16.2 — A transcription mismatch (the two sides disagree) 🟢 LIVE-proven (no-import law)
-**As the seam owner**, **I want** the *transcribed* type on the fabric side to be provably faithful to the frozen contract even though I **never import** hugit-contracts, **so that** "transcribe, don't depend" doesn't become "transcribe, and quietly diverge".
+**As the CoreLink contract owner**, **I want** the *transcribed* type on the fabric side to be provably faithful to the frozen contract without importing an external contract package, **so that** "transcribe, don't depend" doesn't become "transcribe, and quietly diverge".
 **Flow:**
-1. The fabric **transcribes** the wire types (RunnerLease, FenceManifest, MaterializedEntry, IntentMetrics/TokenCounts/ToolCount) rather than importing hugit-contracts (which is **frozen, never imported** — `deny.toml` enforces **crates.io only**, no git/path dependency either direction)
-2. the faithfulness is proven **not by a shared dependency but by the shared conformance vector**: the fabric's transcribed type must round-trip **byte-identically** to the same `conformance/*.json` hugit's transcribed type round-trips to
+1. The fabric **transcribes** the wire types (RunnerLease, FenceManifest, MaterializedEntry, IntentMetrics/TokenCounts/ToolCount) rather than importing an external contract package (which is **frozen, never imported** — `deny.toml` enforces **crates.io only**, no git/path dependency)
+2. the faithfulness is proven **not by a shared dependency but by the CoreLink conformance vector**: the fabric's transcribed type must round-trip **byte-identically** to the committed `conformance/*.json`
 3. a transcription that drifts (a typo, a wrong tag, a missing field)
 
 **fails its golden test** (S16.1).
@@ -4128,15 +4130,15 @@ contract's shadow on this side, and the golden test is the proof the transcripti
 it. A transcription mismatch is caught by the *same* tripwire as a type drift (S16.1) —
 there is no separate "did I transcribe it right" risk, because byte-exactness against the
 shared vector **is** the transcription check. This is why the seam was historically
-**frozen on the hugit side** (historical hugit framing — hugit discontinued); the fabric
+**frozen in the historical external integration** (that integration is discontinued); the fabric
 now **owns these mechanisms** and satisfies the vector as its own contract.
-**Acceptance / evidence:** No git/path dep either direction, crates.io-only (`deny.toml`, CLAUDE.md);
-types transcribed on each side, hugit-contracts frozen/never-imported (CLAUDE.md);
+**Acceptance / evidence:** No git/path dependency, crates.io-only (`deny.toml`, CLAUDE.md);
+types are transcribed on the CoreLink side and the external package remains historical;
 byte-exact golden proves the transcription (S16.1,
 `acceptance_cf0_transcriptions.rs`); the conformance vectors are committed byte-identical
 in both repos (CLAUDE.md).
 **Variations & failures:**
-- *Tempted to import hugit-contracts to "stay in sync"* — **forbidden** (`deny.toml`
+- *Tempted to import an external contract package to "stay in sync"* — **forbidden** (`deny.toml`
   crates.io-only); the sync mechanism is the vector + golden test, not a shared crate
   (deliberate: a shared crate would couple release cycles and break the frozen-seam law).
 - *The fabric adds a runner-only field* — allowed if it doesn't change the shared
@@ -4144,47 +4146,41 @@ in both repos (CLAUDE.md).
   so a fabric-only extension isn't a contract break — but a change to a *shared* type is.
 - *Two repos, one vector, out of sync* — impossible to ship silently: the byte-identical
   commitment means a divergence reds one side's CI (S16.1) before it reaches production.
-**Feature(s):** F-3.1, F-3.3 — No-import law (`deny.toml`) · vector-as-contract-shadow · byte-exact = transcription proof · frozen-from-hugit · runner-only-field tolerance.
+**Feature(s):** F-3.1, F-3.3 — No-import law (`deny.toml`) · CoreLink vector-as-contract · byte-exact = transcription proof · historical external freeze · runner-only-field tolerance.
 **Reality:** 🟢 LIVE-proven (no-import law).
 
-### S16.3 — Adding a new conformance vector (a coordinated contract change) 🔵 owner-gated (hugit-side PR first)
-**As the seam owner**, **I want** to add a new shared type/vector (e.g. a new `IntentMetrics` field) **without** unilaterally breaking hugit, **so that** a contract *evolution* is a coordinated, gated act, not a drift.
+### S16.3 — Adding a new conformance vector (CoreLink-owned contract change) 🟡 built-not-proven
+**As the CoreLink contract owner**, **I want** to add a new shared type/vector (e.g. a new `IntentMetrics` field) with explicit compatibility evidence, **so that** contract evolution is deliberate and does not create drift for downstream clients.
 **Flow:**
 1. A new shared vector is needed
-2. the protocol (CLAUDE.md open cross-repo seams):
+2. CoreLink updates the canonical type, versioned vector, and local golden tests:
 
-**the hugit-side PR lands first** (historically the contract was **frozen on the hugit
-side** — hugit discontinued, so the fabric now owns this contract; the fabric never added
-a shared vector unilaterally) → then the fabric transcribes the type +
-commits the **byte-identical** vector under `conformance/` → both sides' golden tests go
-green against the *same* bytes → the drift tripwire (S16.1) now guards the new type too.
-Concretely: the `IntentMetrics` conformance vector and the `hugit-c9-` container-prefix
-decision are **named open seams** that are **owner/hugit-techlead-gated** (CLAUDE.md) —
-added hugit-side-first, never unilaterally.
-**Expected:** *(honest)* A contract change is **owner-gated and ordered**: hugit-side PR
-first (it owns the frozen contract), fabric transcribes second, both commit the vector
-byte-identically. This is the **opposite** of the S16.1 anti-pattern (regenerating a
-vector to green a build): here the vector change is *intentional*, *coordinated*, and
-*gated* — the seam owner's role is to **carry the cross-repo relay** (MEMORY: cross-TL
-relay = a committed handoff doc + the owner as courier), never to edit hugit's
-expectations on this side. Until the hugit-side lands, the fabric does **not** add the
-vector (owner-gated).
-**Acceptance / evidence:** Open cross-repo seams: `IntentMetrics` vector (hugit-side PR first) +
-`hugit-c9-` container-prefix, both owner/hugit-techlead-gated (CLAUDE.md); the seam was
-historically frozen on the hugit side (historical hugit framing — hugit discontinued;
-fabric wire/envelope contract at `docs/spec/hugit-integration-contract.md`); vectors
-committed byte-identical both repos (CLAUDE.md). The `intent_metrics_sig` vector
-(`conformance/intent_metrics_sig.json`) + IntentMetrics (`2d8d2215…`) are the live
-examples of a coordinated add (S2.2.1).
+CoreLink commits the **byte-identical** vector under `conformance/`, runs the local
+golden tests, and publishes the versioned compatibility record before any client
+upgrade. The drift tripwire (S16.1) then guards the new type. The old external
+The former external-side-first process and its namespace are historical provenance only;
+they are not current owner, techlead, PR-order, acceptance, or release gates.
+**Expected:** *(honest)* CoreLink owns and orders the change: update the type and
+vector, prove byte identity and compatibility locally, then publish the contract
+version for clients. This is the **opposite** of the S16.1 anti-pattern (regenerating
+a vector to green a build): the vector change is intentional, reviewable, and
+covered by the local golden test. No external project approval is required to update
+the CoreLink contract.
+**Acceptance / evidence:** `conformance/intent_metrics_sig.json` and the
+`corelink-runners-contracts` golden tests prove the current vector; the historical
+external contract snapshot remains provenance at
+the historical external contract snapshot in `docs/spec/`. The `IntentMetrics` vector
+(`2d8d2215…`) is the existing example of a coordinated add (S2.2.1).
 **Variations & failures:**
-- *Fabric adds the vector first* — **forbidden** (unilateral contract change); it would
-  make the fabric's expectation diverge from hugit's frozen contract. Hugit-side first.
-- *The `hugit-c9-` prefix decision* — a named owner-gated cross-repo decision (CLAUDE.md);
-  the fabric doesn't decide it, it consumes the decision once made.
-- *A new runner-only field* — NOT a shared-vector change (S16.2); the forge ignores it,
-  so it needs no hugit coordination — only *shared* vocabulary changes are gated.
-**Feature(s):** F-3.3 — Hugit-side-PR-first ordering · byte-identical add · owner/hugit-techlead-gated · cross-repo relay discipline · named open seams.
-**Reality:** 🔵 owner-gated (hugit-side PR first).
+- *A client is still on the prior vector version* — retain the prior version and
+  reject incompatible bytes explicitly; no silent reinterpretation.
+- *The historical external prefix decision* — preserved as provenance; current
+  CoreLink runtime namespaces and tests use CoreLink-owned names.
+- *A new runner-only field* — NOT a shared-vector change (S16.2); it can land under
+  CoreLink's normal review without changing the published shared vocabulary.
+**Feature(s):** F-3.3 — CoreLink-owned vector versioning · byte-identical add · local
+golden tests · compatibility evidence · historical external provenance.
+**Reality:** 🟡 built-not-proven (CoreLink-owned process).
 
 ---
 
@@ -4223,9 +4219,9 @@ fail-open-to-cold / fail-safe-to-queued honest posture (S1.4.3/S9.3); tense disc
   or it over-alarms; the north-star framing (S1.4.3) is the honest wording.
 - *A false-positive canary alert* — the operator confirms via counters + boot diagnostic
   (S5.4.6) BEFORE the statuspage says "outage"; a canary blip is not yet a customer incident.
-- *hugit-resold customer* — a hugit-fronted customer sees **hugit's** statuspage, not
-  ours (invisible-COGS, S2.2.2/S2.5.1); the fabric's status feeds hugit as the reseller,
-  hugit owns its customers' comms (the reseller boundary).
+- *Former reseller customer* — a former reseller would have seen its own statuspage,
+  not ours (historical invisible-COGS model, S2.2.2/S2.5.1); direct CoreLink tenants
+  receive CoreLink's status and communications.
 **Feature(s):** F-10.1, F-10.3 — Truthful signal substrate · honest degradation wording (slow-not-down) · tense-discipline-under-pressure · statuspage (owner-gated) · reseller-comms boundary.
 **Reality:** 🔵 owner-gated (comms) / 🟢 signal substrate.
 
@@ -4252,8 +4248,8 @@ result affected" (S11.5). Comms process/SLA = owner-gated (S11.5).
   (content-address + determinism, S7.12).
 - *Over-notify* — a per-tenant `over_cap` (S1.3.2) is NOT an incident (it's the customer's
   own cap); notifying on it would cry wolf. The fleet signals (S15.3) are the incident line.
-- *hugit's customers* — notified by hugit (the reseller, S2.5.1), not us; we notify our
-  **direct** tenants and **hugit-the-tenant**.
+- *Former reseller customers* — the withdrawn reseller would have owned their notices;
+  CoreLink notifies its **direct** tenants.
 **Feature(s):** F-4.2, F-4.10 — Tenancy-bounded blast-radius facts · self-heal "what to do" · attested "was I affected" · tense-discipline comms · reseller-notifies-its-own boundary.
 **Reality:** 🔵 owner-gated (comms process).
 
@@ -4348,9 +4344,9 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | `result_binding_sig_v2` full-outcome | 🟢 LIVE | conformance tamper-rejection + verify_strict |
 | Direct on-ramp spawn/teardown | 🟢 LIVE | dogfood fleet, App installation 150584374 |
 | Spawn retry / reconciler / dead-letter | 🟢 LIVE | #293 deadlock fix + reconcilers |
-| Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or hugit dispatch |
-| Memoized-check consumption (hugit was intended, discontinued) | ⚪ X4 | needs a real hugit / equivalent external dispatch |
-| Agent-exec real e2e | ⚪ X4 | when hugit dials it |
+| Full `[clw] cache hit` smoke | ⚪ X4 | needs a real CoreLink PAT or direct customer fixture |
+| Memoized-check consumption (historical external persona) | ⚪ X4 | needs a direct CoreLink check/SDK or equivalent external fixture |
+| Agent-exec real e2e | ⚪ X4 | needs a direct CoreLink CLI/SDK/customer fixture |
 | Live-account Cloudflare Containers SDK smoke | ⚪ X4 | owner-gated at deploy |
 | vCPU-h loss-impossible wall | 🔵 owner-gated | built default-off; arm `FABRIC_RUNNER_VCPU`+`max_vcpu_h` |
 | CoreLink slot-billing entitlement flip | 🔵 owner-gated | corelink-server lookup + 1st `runners_entitlement` row |
@@ -4372,7 +4368,7 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | GDPR Art. 17 erasure (`billing_events`) | 🔵 owner-gated | `docs/privacy/gdpr-erasure-billing-events.md`; SQL designed, orchestration pending |
 | Data residency / region | 🟡 built / 🔵 multi-region | region-tagged billing (S5.3.1); multi-region = M3 |
 | Tier upgrade/downgrade (live cap change) | 🔵 owner-gated | composite plan source no-restart (S5.1.1); Stripe self-serve GA |
-| Reseller / invisible-COGS (hugit) | 🔵 owner-gated | raw occupancy + attested cost; packaging decision (product.md §9.3) |
+| Reseller / invisible-COGS (historical external proposal) | ⚫ withdrawn | The former external packaging proposal is discontinued; it creates no CoreLink owner or go-live gate |
 | Billing/onboarding failure modes (dunning · trial-expiry) | 🔵 owner-gated | S1.1.5–7; entitlement-revoke = no-plan refusal; CoreLink-server-side Stripe |
 | GPU / capability-gap fallback | 🔵 owner-gated | S1.3.4; subset-gate refuses unofferable kinds; GPU = M4 adjacency |
 | Time/scheduling shapes (cron · dispatch · long-job vs TTL) | 🟢 LIVE (trigger-agnostic) / 🟡 TTL | S1.6.13–14; `workflow_job`-keyed, trigger-blind; hard lease `deadline_ms` |
@@ -4389,10 +4385,10 @@ fail-closed / fail-open-to-cold / fail-safe-to-queued posture (the north star).
 | The 10k-jobs/day customer (sustained throughput) | 🟡 built / 🔵 N>1 | S1.3.5; rate-vs-instantaneous cap; memoization multiplier; N>1 flip trigger |
 | Brokered external network service (registry/license/VPN) | 🟡 built / 🔵 policy | S1.6.15; `net_policy` reach + env-0 cred; VPN/private = capability gap (hybrid) |
 | Power-user run edge cases (retry · partial · SDK drift · flaky) | 🟢 LIVE (exit contract) / ⚪ live-fabric | S8.4–6; total exit contract, no-lease-leak, conformance-locked SDKs |
-| hugit-door NEG (envelope-flood · ingest-replay · dedup-exhaust) | 🟢 LIVE (bounded/scoped) | S7.13–15; bounded surfaces + `MAX_DISTINCT_TOOLS`, lease-folded HMAC, 4096-cap |
+| Memoized-check NEG (envelope-flood · ingest-replay · dedup-exhaust) | 🟢 LIVE (bounded/scoped) | S7.13–15; CoreLink-owned bounded surfaces + `MAX_DISTINCT_TOOLS`, lease-folded HMAC, 4096-cap |
 | Webhook-secret rotation with jobs in flight | 🟡 built-not-proven | S5.4.7; single-secret 401 window fail-safe-to-queued; dual-secret overlap = hardening |
 | SRE runbook-in-anger (mint/spawn/capacity/flap/counter-reset) | 🟢 LIVE (counters+logs) / 🔵 N>1 | P15/S15.1–5; `mint_failures`/`spawn_failed`/`load_shed`/`/internal/v1/status`; counters reset on restart |
-| Conformance-vector drift tripwire (hugit↔fabric seam) | 🟢 LIVE (golden tests) | P16/S16.1–3; byte-exact vectors + `manifest.sha256`; no-import law; hugit-side-PR-first |
+| Conformance-vector drift tripwire (CoreLink contract) | 🟢 LIVE (golden tests) | P16/S16.1–3; CoreLink-owned byte-exact vectors + `manifest.sha256`; no-import law; historical external PR-first process removed |
 | Incident-comms / statuspage / a11y-i18n | 🔵 owner-gated (surfaces) / 🟢 signal substrate | P17/S17.1–3; truthful signals + fail-safe posture built; statuspage/console/comms = org deliverable |
 | User-visible failure vocabulary (exact status/text/latency) | 🟢 documented | consolidated table; every failure loud, no silently-wrong-result row |
 
@@ -4416,18 +4412,18 @@ Coined terms, used verbatim throughout. (Feature mechanics live in `docs/product
 | Term | Meaning |
 |---|---|
 | **Door A / Direct** | The direct front door: a CI team writes `runs-on: corelink[-<size>]`; an ephemeral GitHub-Actions runner fleet spawns cache-warm microVMs per job (ADR-0007). Live path = the Cloudflare autoscaler Worker (`deploy/cloudflare/src/index.ts`). |
-| **Door B / Via hugit** | The invisible execution substrate for memoized attested check-exec (hugit was the discontinued intended consumer; now direct-to-ICP); the customer never sees a "Runners" line item. Live path = the `/v1` fabric + CF-native check-host exec. |
+| **Door B / Direct check-exec** | The execution substrate for memoized attested check-exec; the former reseller door is withdrawn and the current path is direct-to-ICP. Live path = the `/v1` fabric + CF-native check-host exec. |
 | **The moat** | CoreLink's content-addressed cache (CAS + Action Cache). Runners earn their keep by booting cache-warm on it; the per-job CAS-PAT mint + attested cost is the moat's revenue seam. |
 | **Cache-warm boot** | A runner boots with the CAS/AC pre-warmed and the job's inputs local before the first instruction (`boot/mod.rs`, F-4.3). |
-| **Memoization** | Result content-addressed by `H(inputs ‖ command ‖ toolchain)`; on an Action-Cache hit the result is returned and the job never runs. hugit (discontinued) was the intended memo-key owner; the fabric serves misses. |
+| **Memoization** | Result content-addressed by `H(inputs ‖ command ‖ toolchain)`; on an Action-Cache hit the result is returned and the job never runs. CoreLink serves misses and owns the current mechanism. |
 | **Lease** | One `RunnerLease` = one billable concurrency slot for one job's lifetime (acquire → hold → close/teardown). The spine: **lease · isolate · cap · attest · teardown**. |
 | **env-0 / cred-ticket** | The env-0 credential ticket: a lease-bound, single-use ticket the box redeems for a short-lived CAS PAT — the secret is never stored on the box (F-5.9). |
 | **Fence / FenceManifest** | The per-claim isolation manifest that is materialized + enforced fail-closed; a red-team suite proves escape attempts fail (F-4.2/F-4.4). |
 | **The mint** | The per-job minting of a scoped CAS/runner PAT (`mint_attempts`/`mint_failures` counters). A mint failure degrades to a **cold** run (fail-open-to-cold), not an outage. |
-| **§13 envelope** | The hugit-integration §13 mechanism: agent-execution metrics (`IntentMetrics`) + the §13.2 turn-feed capture hook + JobClose ack state machine (F-4.9). |
+| **§13 envelope** | The CoreLink §13 mechanism: agent-execution metrics (`IntentMetrics`) + optional §13.2 turn-feed telemetry + required local close finalization for teardown, release, metrics, provider cost, billing, and attestation (F-4.9). No external JobClose ACK or fixed wait is part of the contract; `capture_incomplete` records actual local loss, residue, or abnormal partial capture. |
 | **`intent_metrics_sig`** | The signature over the attested per-job cost/metrics delivered atomically at close (F-5.4). |
 | **X4** | The supply-chain verify-before-spawn oracle (image pinning / digest verification) + red-team machinery (F-4.5). |
-| **Conformance vector** | Byte-identical golden fixtures committed in both hugit and this repo (`conformance/`); the drift tripwire — either side's golden test breaks on any type divergence (F-3.3). |
+| **Conformance vector** | Byte-identical CoreLink golden fixtures committed under `conformance/`; the drift tripwire breaks on any type divergence (F-3.3). |
 | **Singleton → N>1 flip** | Today's fabricd is a CF singleton (`FABRIC_NUM_SHARDS=1`, in-memory ledger). The flip to N>1 needs Postgres + raised shard count + `max_instances` together (owner-gated on volume). |
 | **Loss-impossible ceiling** | The hard vCPU-h wall per tier that bounds max COGS below price — preventive refusal, never a silent overrun (F-1.4/F-5.2). |
 | **Reality badge** | The five-symbol evidence grade on every story heading and `Reality:` line — see [Appendix A](#appendix-a--legend--badge-vocabulary). |
@@ -4506,9 +4502,9 @@ Round-by-round. Content completeness (the critic-deepen loop) and craft (the DOC
 | Round | Date | What changed |
 |---|---|---|
 | **R1 — built** | 2026-07-16 | Initial catalog: personas P1–P8, the core job journey, the two front doors, first evidence-cited stories. |
-| **R2 — deepened** | 2026-07-17 | Personas P9–P14 (migration · compliance · support · FinOps · lifecycle · self-serve obs); Theme 1.6 (real-world workflow shapes); Theme 2.5 (hugit reseller); inline variation matrices. |
+| **R2 — deepened** | 2026-07-17 | Personas P9–P14 (migration · compliance · support · FinOps · lifecycle · self-serve obs); Theme 1.6 (real-world workflow shapes); historical reseller model; inline variation matrices. |
 | **R3 — deepened** | 2026-07-17 | Billing/onboarding failure modes; developer first-5-minutes; GPU/capability-gap; partial-hydrate; scheduling shapes; Theme 1.7 (per-ecosystem drop-in); P3/P4/P5 depth; competitive bake-off; deeper negative security; SSO/SAML. |
-| **R4 — deepened** | 2026-07-17 | Personas P15–P17 (SRE on-call · conformance-vector seam · incident-comms); P8 power-user depth; hugit-door deep negatives (S7.13–15); data-plane scale extremes; the 10k-jobs/day customer; webhook-secret rotation; the user-visible failure-vocabulary table. |
+| **R4 — deepened** | 2026-07-17 | Personas P15–P17 (SRE on-call · conformance-vector seam · incident-comms); P8 power-user depth; historical external-door deep negatives (S7.13–15); data-plane scale extremes; the 10k-jobs/day customer; webhook-secret rotation; the user-visible failure-vocabulary table. |
 | **R5 — architecture / craft** | 2026-07-17 | Imposed DOC-STANDARD without touching substance: front-matter + single Legend (5 badges, one tense-discipline note); linked TOC (persona → theme → story) with computed anchors; top-of-doc Summary matrix; every one of the 155 stories normalized to the identical card (bolded **As a/I want/so that**, **numbered Flow**, **Acceptance / evidence**, **Variations & failures**, **Feature(s)** with resolving `F-<id>`s inverted from FEATURES.md, a **Reality** line); H2 themes added to every previously theme-less persona (P3–P4, P6–P17) to remove H1→H3 level-skips; appendices added (Legend · Glossary · Feature↔story cross-ref matrix · Change log · Coverage summary). Zero stories lost; all ids preserved. |
 
 ---
@@ -4522,13 +4518,13 @@ Story primary-reality distribution (the leading badge in each story heading; man
 | 🟢 LIVE-proven | 57 | Proven on the live CF path or by a green test — the moat, isolation, attestation, recovery, CLI/verify, drift tripwire. |
 | 🟡 built-not-proven | 55 | Code + tests behind a seam, DEFAULT-OFF/fail-closed; no live e2e yet (billing, ceiling-wall, usage APIs, scale extremes). |
 | 🔵 owner-gated | 41 | Built or specced, blocked on an owner action / GA billing / N>1 flip / Workspaces campaign / legal. |
-| ⚪ X4-external | 2 | Provable only with an external credential/dispatch (real CoreLink PAT, real hugit dispatch, live-account CF SDK). |
+| ⚪ X4-external | 2 | Provable only with an external credential/dispatch (real CoreLink PAT, direct customer fixture, live-account CF SDK). |
 | ⚫ INERT/planned | 0 | Not wired into the live composition / planned. |
 | **Total** | **155** | 155 stories across 17 personas. |
 
 **Honest residual (what is NOT yet 🟢 with an in-repo proof).**
 
-- The full cache-warm `[clw] cache hit` smoke, hugit memoized-check / agent-exec consumption, and the live-account CF SDK smoke are **⚪ X4-external** — un-fabricable in-repo (S1.1.4, S1.2.1, S2.1.x, S2.3.x, S8.4).
+- The full cache-warm `[clw] cache hit` smoke, direct memoized-check / agent-exec customer fixture, and the live-account CF SDK smoke are **⚪ X4-external** — un-fabricable in-repo (S1.1.4, S1.2.1, S2.1.x, S2.3.x, S8.4).
 - GA **billing / entitlement / tiering** (Stripe dunning, trial, upgrade/downgrade, flat-bill forecast) is **🔵 owner-gated** on the CoreLink slot-billing flip (P6, P12, P13, S1.1.x).
 - The **loss-impossible vCPU-h wall** is built but has no armed-live proof (S5.3.2, S1.6.12); **N>1 scale** (shard rebalance, multi-region) is owner-gated on volume (S5.2.4, S5.5.x).
 - **Workspaces** SKUs (P3) and multi-size runners (S1.3.3) ride a LIVE spine but the SKUs are ⚫/🔵 (campaign #2).

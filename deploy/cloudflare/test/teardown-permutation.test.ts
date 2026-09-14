@@ -77,11 +77,14 @@ async function ghSign(secret: string, body: string): Promise<string> {
 
 function fakeKv() {
   const store = new Map<string, string>();
+  const putOptions = new Map<string, unknown>();
   return {
     store,
+    putOptions,
     get: vi.fn(async (k: string) => store.get(k) ?? null),
-    put: vi.fn(async (k: string, v: string) => {
+    put: vi.fn(async (k: string, v: string, options?: unknown) => {
       store.set(k, v);
+      putOptions.set(k, options);
     }),
     delete: vi.fn(async (k: string) => {
       store.delete(k);
@@ -189,7 +192,9 @@ const completed = (jobId: number, runnerName?: string) => ({
   installation: { id: INSTALLATION },
 });
 
-function baseEnv(kv: ReturnType<typeof fakeKv>): Env {
+type TeardownTestEnv = Env & { releaseCalls: unknown[][] };
+
+function baseEnv(kv: ReturnType<typeof fakeKv>): TeardownTestEnv {
   const env = {
     RUNNER_CONTAINER: { _ns: "runner" },
     CHECK_HOST_CONTAINER: { _ns: "check" },
@@ -213,7 +218,7 @@ function baseEnv(kv: ReturnType<typeof fakeKv>): Env {
   const authorities = makeWorkerAuthorities(kv);
   env.CONTAINMENT = authorities.CONTAINMENT as never;
   env.CONCURRENCY_SLOTS = authorities.CONCURRENCY_SLOTS as never;
-  return env;
+  return Object.assign(env, { releaseCalls: authorities.releaseCalls });
 }
 
 /** Spawn one box for `jobId`; returns its container and the name minted for it. */
@@ -280,9 +285,14 @@ describe("teardown correlates on runner_name, not the spawn-request job id", () 
     // ceiling refusal path.
     expect(a.box.teardown).toHaveBeenCalledTimes(1);
     expect(b.box.teardown).toHaveBeenCalledTimes(1);
-    // And no stale pointer survives to be followed by a redelivered completion.
+    // The runner bindings are consumed immediately. The job-scoped aliases are
+    // intentionally retained as a TTL fallback: with runner_name present they
+    // are never consulted, and the generation/owner authority fences any late
+    // completion before it can release a replacement.
     expect([...kv.store.keys()].filter((k) => k.startsWith("rhandle:"))).toHaveLength(0);
-    expect([...kv.store.keys()].filter((k) => k.startsWith("jhandle:"))).toHaveLength(0);
+    expect([...kv.store.keys()].filter((k) => k.startsWith("jhandle:"))).toHaveLength(2);
+    expect(kv.putOptions.get("jhandle:9001")).toEqual({ expirationTtl: 7200 });
+    expect(kv.putOptions.get("jhandle:9002")).toEqual({ expirationTtl: 7200 });
   });
 
   it("FALLBACK: a completion with no runner_name still reclaims via the job id", async () => {
@@ -309,19 +319,83 @@ describe("teardown correlates on runner_name, not the spawn-request job id", () 
     const a = await spawn(env, 9004);
     const b = await spawn(env, 9005);
 
-    // Consume A's box the correct way first, so `jhandle:9004` is gone.
+    // Consume A's box the correct way first. Its job alias remains as a TTL
+    // fallback, but the runner binding is gone and no runner-name completion
+    // may fall back to that alias.
     let ctx = makeCtx();
     await post(env, ctx, completed(9004, a.runnerName));
     await drain(ctx);
     expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(kv.store.get("jhandle:9004")).toBe(a.box.handle);
+    const releaseCountAfterAuthoritativeCompletion = env.releaseCalls.length;
 
     // Now a redelivery of the SAME completion, with a name no longer on file.
+    // Even if the stale job alias has been repointed at B, runner_name lookup
+    // does not fall through to it; B remains alive and its capacity untouched.
+    kv.store.set("jhandle:9004", b.box.handle);
+    const mintCountBeforeStaleCompletion = mintedNames.length;
     ctx = makeCtx();
-    await post(env, ctx, completed(9004, a.runnerName));
+    await post(env, ctx, completed(9004, "runner-no-longer-indexed"));
     await drain(ctx);
 
     // B is still running and must be untouched.
     expect(b.box.teardown).not.toHaveBeenCalled();
     expect(a.box.teardown).toHaveBeenCalledTimes(1); // not double-torn-down
+    expect(kv.store.get("jhandle:9004")).toBe(b.box.handle);
+    expect(env.releaseCalls).toHaveLength(releaseCountAfterAuthoritativeCompletion);
+    expect(mintedNames).toHaveLength(mintCountBeforeStaleCompletion);
+  });
+
+  it("retains the teardown obligation when teardown throws and the provider remains alive", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9006);
+    a.box.teardown.mockRejectedValueOnce(new Error("provider unavailable"));
+    a.box.isAlive.mockResolvedValue(true);
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9006, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(true);
+    expect(kv.store.has("jhandle:9006")).toBe(true);
+    expect(env.releaseCalls).toEqual([]);
+  });
+
+  it("retains the teardown obligation when provider liveness cannot be confirmed", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9007);
+    a.box.isAlive.mockRejectedValueOnce(new Error("liveness unavailable"));
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9007, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(true);
+    expect(kv.store.has("jhandle:9007")).toBe(true);
+    expect(env.releaseCalls).toEqual([]);
+  });
+
+  it("cleans the runner binding and retains the job alias until TTL after teardown confirms down", async () => {
+    const kv = fakeKv();
+    const env = baseEnv(kv);
+    const a = await spawn(env, 9008);
+    a.box.isAlive.mockResolvedValue(false);
+
+    const ctx = makeCtx();
+    await post(env, ctx, completed(9008, a.runnerName));
+    await drain(ctx);
+
+    expect(a.box.teardown).toHaveBeenCalledTimes(1);
+    expect(a.box.isAlive).toHaveBeenCalledTimes(1);
+    expect(kv.store.has(`rhandle:${a.runnerName}`)).toBe(false);
+    expect(kv.store.get("jhandle:9008")).toBe(a.box.handle);
+    expect(kv.putOptions.get("jhandle:9008")).toEqual({ expirationTtl: 7200 });
+    expect(env.releaseCalls).toEqual([["9008"]]);
   });
 });

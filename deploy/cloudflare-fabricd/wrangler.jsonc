@@ -1,8 +1,9 @@
 {
   // corelink-fabricd as a Cloudflare Container (gap-#1 option b, owner 2026-06-25).
   // The Rust control plane (RunnerLease API + §13 envelope + attestation key) runs
-  // as ONE long-lived singleton container; a thin proxy Worker (src/index.ts) routes
-  // every request to it. The runner BOXES still spawn on the separate
+  // as ONE singleton container; the activity-gated proxy Worker (src/index.ts)
+  // routes every request to it and permits keepalive probes only after recent
+  // activity. After 5m idle, the container may scale to zero. The runner BOXES still spawn on the separate
   // corelink-spawn-worker (ADR-0008 moat); this is only the control-plane host.
   //
   // This tracked file is desired configuration, not proof of current deployment
@@ -49,6 +50,14 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
+    // Explicit selector-capable legacy release; B2 activation changes this
+    // together with the reviewed N=2/max_instances=2 configuration.
+    "FABRIC_DATABASE_URL_SLOT": "legacy",
+    // Emergency edge freeze for NEW lease/admission/mint routes. Absent or
+    // exact "0" is fail-open; any other value pauses with 503 + Retry-After.
+    // Leave unset in the normal posture; set through the reviewed config change
+    // procedure when a containment window is required.
+    // "FABRIC_ADMISSION_PAUSED": "0",
     // ⛔ CURRENT CONTAINMENT: the durable PG block is explicitly disabled.
     // Keep this byte-exact value. DATABASE_URL may remain bound, but it NEVER arms
     // PG by itself: pgLedgerEnvVars forwards the PG ledger, vCPU ceiling, and
@@ -102,8 +111,8 @@
     "FABRIC_PUBLIC_BASE_URL": "https://corelink-fabricd.gmhelmold.workers.dev",
     // ── ATTESTED COST — ON (FLIP-B) ───────────────────────────────────────────
     // Emit the signed intent_metrics_sig on CloseResponse (#320). Additive +
-    // wire-invisible when off; ON now so hugit's ✓cas: can render ATTESTED cost
-    // once they pin the conformance vector + consume the field. Signs honest-zero
+    // wire-invisible when off; ON now so the external cost consumer can render
+    // ATTESTED cost once it pins the conformance vector + consumes the field. Signs honest-zero
     // cost until a provider /usage source (never a derived COGS). Prod key faa5b7726.
     "FABRIC_EMIT_INTENT_METRICS_SIG": "true",
     // ── RESILIENCE KNOBS (W1b) — the Rust binary already READS these; they were
@@ -120,7 +129,7 @@
     // bound on the live deploy (a wrangler secret — invisible in this file), but PG
     // and this export remain inert under the current exact "1". 60s is a sane
     // durable-export cadence once deliberately armed (distinct from the always-on
-    // 30s corelink push).
+    // 30s corelink push while the container is active).
     // A 2026-08-31 triage sample observed no change after disarming the exporter,
     // but that sample is not sufficient to attribute the resource burn. D12 keeps
     // PgLedger startup work versus the PG-gated exporter unresolved. The proxy
@@ -208,7 +217,7 @@
       // `wrangler containers push` (tag
       // audit-remediation-20260711). SUPERSEDES 205494de.
       // 2026-07-10 REAPER-COVERAGE binary (205494de): adds leases_expired +
-      // leases_crashed golden counters (#359) — the always-on reaper's terminal
+      // leases_crashed golden counters (#359) — the in-process reaper's terminal
       // reclaims (Held→Expired at deadline, Held→Crashed on dead box) were
       // uncounted, so an abandon-rate rise was invisible. Additive; no behavior
       // change vs 5f1d92db. Built with local Docker, then published via
@@ -280,8 +289,8 @@
       // content-derived and CI-written-once, so it is deterministic in practice, but
       // it is NOT the invariant. RE-PIN to @sha256 immediately after this deploy —
       // `wrangler containers info <app-id>` reports the resolved digest once the
-      // rollout lands. Rollback: the previous pin was
-      // @sha256:db3b03ef829e21d203e1a5ac003a724fe1319eb271d849bd88178f080b468c3d.
+      // rollout lands. Canonical live digest:
+      // @sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565.
       // ⚠️ 2026-08-30 BISECT — TEMPORARY, NOT THE INTENDED STEADY PIN.
       // Both the Inc-3 image (db3b03ef @ e5f07f8, 2026-08-19) and a fresh rebuild
       // from main (8631abb, run 33347304356) fail IDENTICALLY: the container never
@@ -328,14 +337,18 @@
       // difference from the images that do start: the registry path itself.
       //   boots ⇒ the fabricdcontainer repository's pull path is the fault
       //   fails ⇒ the path is fine and the fault is still unlocated
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:2e7bcea926f4ce2b38edb1a381f3821fcf4c898377e4f988b763fd3232c0e565",
+      // build-sha: 01560b697c87b92bf1572ceec175d5350034aebb
+      // image-provenance: digest=sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5 build-sha=01560b697c87b92bf1572ceec175d5350034aebb
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-fabricd-fabricdcontainer@sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5",
       // HTTP control plane. Bumped standard-1 → standard-2 (2026-07-07 acquire-storm
       // hardening): the single-flight singleton must keep /v1/health + lease ops
-      // responsive under a burst of box provisions; 2 vCPU gives headroom so a few
-      // concurrent provisions can't peg the box (paired with the FABRIC_PROVISION_
-      // MAX_INFLIGHT gate that bounds concurrent provisions). Multi-instance (now
-      // pg-enabled) is the next scaling step — see README "Known limit".
+      // responsive under a burst of box provisions. The provider shape for
+      // standard-2 is 1 vCPU / 6 GiB / 12 GB; the FABRIC_PROVISION_MAX_INFLIGHT
+      // gate bounds concurrent provisions. Multi-instance (now pg-enabled) is the
+      // next scaling step — see README "Known limit".
       // Bumped standard-1 → standard-2 (2026-07-07 acquire-storm hardening).
+      // standard-2 currently provides 1 vCPU / 6 GiB / 12 GB; do not infer a
+      // different capacity or alter this instance type as part of pin updates.
       // A 2026-08-30 bisect raised this to standard-4 and PROVED the shape was not
       // the outage cause, so it is reverted rather than left as an unratified cost.
       "instance_type": "standard-2",  // MEASURED: standard-4 changed nothing (0/6)

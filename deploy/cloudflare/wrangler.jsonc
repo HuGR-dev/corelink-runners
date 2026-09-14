@@ -48,6 +48,10 @@
     "RECONCILER_REPOS": "HuGR-Labs/corelink-runners HuGR-Labs/corelink-server",
     "AUTOSCALER_REDRIVE_PAUSED": "1",
     "AUTOSCALER_INTAKE_PAUSED": "1",
+    // Shared emergency edge freeze for NEW admissions across fabricd and this
+    // spawn Worker. Absent or exact "0" is fail-open; any other value pauses
+    // queued webhook intake, /v1/spawn, and scheduled redrives.
+    // "FABRIC_ADMISSION_PAUSED": "0",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
     // dogfood: HuGR-Labs/corelink-runners → installation 150584374 → tenant
@@ -218,7 +222,13 @@
       // is ALSO what evicts those three: no token has instance-delete scope, so a
       // new image is the only lever. Rollback = increment-4 digest
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:2f3dd8a166e890888d026669757c996750b42230a04710fa08f13db56b0cf029",
+      // 2026-09-12 T2-W4/T2-W4 immutable runner refresh. The registry ref was
+      // built and pushed from source commit 192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      // for linux/amd64. This records registry provenance only; deployment and
+      // live runner qualification remain separate gates.
+      // build-sha: 192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      // image-provenance: digest=sha256:6aa0326851c6bca03cf1861393b34a35456a2601efe90e33922fa274044a7815 build-sha=192c71b1218ac27f4bbd2f7475de614dada2e3f4
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer@sha256:6aa0326851c6bca03cf1861393b34a35456a2601efe90e33922fa274044a7815",
       // standard-4 = 4 vCPU / 12 GiB / 20 GB disk — fits CI, clears the runner
       // disk floor (RUNNER_EPHEMERAL_STORAGE_FLOOR_MB).
       "instance_type": "standard-4",
@@ -265,7 +275,9 @@
       // NOTE: live-flip to prod is still separately gated (real toolchain snapshot +
       // owner go) — deploying the app just moves it out of the stuck "provisioning".
       "class_name": "CheckHostContainer",
-      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:4e09fc21ddc437684a921fdeedbf5c98264a7a7db77dbc76dae3a4ea75017851",
+      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
+      // image-provenance: digest=sha256:260bae50075fd6308e9260774176aa731690f6be5638cd6f21ab25837586dbb8 build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-checkhostcontainer@sha256:260bae50075fd6308e9260774176aa731690f6be5638cd6f21ab25837586dbb8",
       "instance_type": "standard-4",
       // 2026-08-02: lowered 4 → 1. A cost audit found this app sitting at
       // `healthy: 4, active: 0, assigned: 0` — FOUR boxes of 4 vCPU / 12 GiB /
@@ -285,32 +297,17 @@
       // not leave it at 1 afterwards.
       "max_instances": 1
     },
-    // ⛔ RunnerDevEnvDO's container entry is REMOVED until its image exists.
-    //
-    // It referenced `corelink-runner-devenv:latest`, and BOTH halves of that were
-    // broken: the Containers API rejects the deploy outright — "VALIDATE_INPUT
-    // image Invalid image. Latest tags are not allowed on images." — and the image
-    // is not in the managed registry at all (`GET /v2/…/manifests/latest` → 404;
-    // `wrangler containers images list` has no `corelink-runner-devenv`). So the
-    // pin could not even be repaired by resolving a digest; there is nothing to
-    // resolve.
-    //
-    // The cost of leaving it here was not the DevEnv feature, which nothing calls
-    // (`RunnerDevEnvDO` is exported and bound, and has no call site in
-    // src/index.ts). The cost was that EVERY `wrangler deploy` of this Worker
-    // failed validation — so no fix to the spawn path, the reaper, or anything else
-    // could reach production. It blocked the runner-leak fix that ships with this
-    // change.
-    //
-    // The DO binding and its `v6` migration stay exactly as they are, so no state
-    // is touched and no migration is rewound. Restore this entry when the DevEnv
-    // image is actually built and pushed — pinned by @sha256, never by a tag.
-    //
-    // That last sentence is now ENFORCED, not advised: `test/container-image-pins.test.ts`
-    // fails the suite on any `"image"` in this file that is not an @sha256 digest,
-    // and fails vacuously-empty scans too. It is what stops a later rebase (PR #516
-    // owns `RunnerDevEnvDO` and touches this file) from re-introducing a tag pin and
-    // breaking every `wrangler deploy` again.
+    {
+      // Registry push is evidenced at T2-W4-image-ship-20260908. This immutable
+      // pin updates desired configuration only; it does not deploy, roll out, or
+      // qualify a live DevEnv runner.
+      "class_name": "RunnerDevEnvDO",
+      // build-sha: eec8afbf481461586ac3a7087f4fcd8c411542c7
+      // image-provenance: digest=sha256:0145e461fc1d35e2672f4a2190008fef4214c691bc8485ec68902cb8852fd441 build-sha=eec8afbf481461586ac3a7087f4fcd8c411542c7
+      "image": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-runner-devenv@sha256:0145e461fc1d35e2672f4a2190008fef4214c691bc8485ec68902cb8852fd441",
+      "instance_type": "standard-4",
+      "max_instances": 10
+    }
   ]
 
   // R2 binding (in-network CAS hydration — the moat win) is a Cache-TL

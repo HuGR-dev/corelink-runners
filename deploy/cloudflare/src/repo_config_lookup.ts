@@ -4,6 +4,21 @@ function canonicalRepoLookupKey(value: string): string | null {
   const canonical = parts.length === 2 ? `${edgeTrim(parts[0]).toLowerCase()}/${edgeTrim(parts[1]).toLowerCase()}` : "";
   return /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$/.test(canonical) ? canonical : null;
 }
+
+/**
+ * GitHub App installation ids are positive JavaScript-safe integers.  Keep the
+ * decimal representation canonical so an alternate spelling cannot bypass a
+ * deletion tombstone or create a second authorization/cache identity.
+ */
+export function canonicalInstallationId(value: unknown): string | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  }
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric > 0 ? value : null;
+}
+
 function canonicalRepoMapEntries(map: Record<string, unknown>): Array<[string, unknown]> | null {
   const seen = new Set<string>();
   const entries: Array<[string, unknown]> = [];
@@ -33,7 +48,7 @@ export function installationIdForRepo(json: string | undefined, repoFullName: st
     if (entries === null) return "";
     for (const [key, value] of entries) {
       if (key !== wanted) continue;
-      return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
+      return canonicalInstallationId(value) ?? "";
     }
     return "";
   } catch {

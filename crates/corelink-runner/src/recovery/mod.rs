@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Crash recovery (WP-C2b item ⑤ / R2).
 //!
 //! A **box crash mid-job is distinct from expiry** (see [`expiry`](crate::expiry)).
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn surfaced_lost_is_not_green() {
         let lj = LostJob {
-            container: "hugit-c2b-x".to_string(),
+            container: "corelink-c2b-x".to_string(),
             lease_id: lease().lease_id,
             disposition: LostDisposition::Requeued,
             lease_state: RunnerState::Crashed,
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn green_state_would_violate_invariant() {
         let lj = LostJob {
-            container: "hugit-c2b-x".to_string(),
+            container: "corelink-c2b-x".to_string(),
             lease_id: lease().lease_id,
             disposition: LostDisposition::Surfaced,
             lease_state: RunnerState::Released, // a false-green would set this
@@ -200,12 +200,12 @@ mod tests {
     #[test]
     fn dirty_residue_fails_invariant() {
         let lj = LostJob {
-            container: "hugit-c2b-x".to_string(),
+            container: "corelink-c2b-x".to_string(),
             lease_id: lease().lease_id,
             disposition: LostDisposition::Surfaced,
             lease_state: RunnerState::Crashed,
             residue: ForensicReport {
-                containers: vec!["hugit-c2b-x".to_string()],
+                containers: vec!["corelink-c2b-x".to_string()],
                 ..Default::default()
             },
         };

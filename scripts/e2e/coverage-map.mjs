@@ -75,7 +75,7 @@ export const CELLS = [
     grade: 'E1', disposition: 'fabricable',
     atoms: ['F-4.2', 'F-4.9', 'F-2.5'],
     prefixes: ['S4.'], // P4 agent — untrusted agent code, isolation, attested metrics
-    note: 'full agent-loop e2e has an X4 tail (hugit dials it); isolation + attested metrics fabricable.' },
+    note: 'full agent-loop e2e has an X4 tail (direct CLI/SDK or customer fixture dials it); isolation + attested metrics fabricable.' },
 
   // ─────────────────────────── TS-1 · correctness (E0/E1) ───────────────────────────────
   { id: 'TS1-contracts', suite: 'TS-1', primary: 'adversarial', directions: D_ALL, grade: 'E0',
@@ -96,11 +96,11 @@ export const CELLS = [
     prefixes: ['S12.'], // P12 finance — cost/vCPU signal, metering logic
     note: 'billing/metering + CoreLink-seam logic; F-5.7 shard contract is E0-fabricable (FNV-1a TS==Rust), N>1 live is owner-gated (RAISE-N); live push exporter armed-OFF (owner).' },
 
-  { id: 'TS1-hugit-contract', suite: 'TS-1', primary: 'adversarial', directions: ['adversarial'],
+  { id: 'TS1-corelink-check-contract', suite: 'TS-1', primary: 'adversarial', directions: ['adversarial'],
     grade: 'E1', disposition: 'x4',
     atoms: ['F-2.2'],
-    prefixes: ['S2.'], // P2 hugit — DISCONTINUED (campaign #3); contract cells only, hugit-driven = X4
-    note: 'hugit is discontinued; these are X4 (no live driver) — kept for contract completeness.' },
+    prefixes: ['S2.'], // P2 CoreLink check/SDK user; direct fixture still needed for live cells
+    note: 'CoreLink-owned memoized-check contract; direct CLI/SDK fixture is the live driver.' },
 
   { id: 'TS1-compliance-comms', suite: 'TS-1', primary: 'edge', directions: ['edge'], grade: 'E1',
     disposition: 'owner-gated',

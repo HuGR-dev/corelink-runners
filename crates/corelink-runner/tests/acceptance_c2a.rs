@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! WP-C2a acceptance oracle — ephemeral runner: lease lifecycle + isolation.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
@@ -9,12 +9,13 @@
 //!      isolated network namespace.
 //!
 //! These are **box-dependent**: they drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
 //! unreachable they **FAIL** (not skip) — per contract, box-dependent tests
 //! must fail, never silently pass.
 
 use corelink_runner::isolation::{DockerEngine, Engine};
 use corelink_runner::lease::{BoxExec, ContainerSpec, SshBox};
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runner::teardown::teardown;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
 
@@ -71,7 +72,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -79,7 +80,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
 /// Whether the box-dependent acceptance lane is active.
 ///
 /// The WP-C2a suite (`tests/acceptance/wp-c2a/run.sh`) always exports
-/// `HUGIT_RUNNER_HOST=91.99.11.196`; inside that lane these tests run and
+/// `CORELINK_RUNNER_HOST=91.99.11.196`; inside that lane these tests run and
 /// **FAIL** if the box is unreachable (contract: fail, not skip). When the var
 /// is **absent** the file is being collected by the bare cargo gate lane
 /// (`cargo test --workspace`, e.g. the WP-01 gate), which must stay green and
@@ -87,7 +88,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
 /// Acceptance completeness is owned by the suite that sets the env, never by
 /// the bare gate.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -95,7 +96,7 @@ fn box_lane_active() -> bool {
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 /// Only called inside the active box lane.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -142,7 +143,7 @@ fn item_1_destroy_leaves_nothing() {
     let job = engine
         .exec(
             &container,
-            &["sh", "-c", "echo job-ran > /hugit/tmp/out && true"],
+            &["sh", "-c", "echo job-ran > /corelink/tmp/out && true"],
         )
         .expect("run job");
     assert_eq!(job, Some(0), "job should exit 0");
@@ -192,7 +193,7 @@ fn item_2_lease_isolation() {
 //
 // `Engine::exec` is exercised only on the live-box lane (item ①), so the
 // captured-output half of the seam is extended here the same way it gates:
-// short-circuit when `HUGIT_RUNNER_HOST` is absent, FAIL (never skip) inside
+// short-circuit when `CORELINK_RUNNER_HOST` is absent, FAIL (never skip) inside
 // the active lane. Hermetic FakeBox units live in `src/isolation.rs`.
 #[test]
 fn exec_captured_separates_streams_on_live_box() {

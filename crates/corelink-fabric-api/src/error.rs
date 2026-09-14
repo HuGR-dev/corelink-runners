@@ -26,7 +26,7 @@ pub enum ApiError {
 
     /// 429 — per-tenant concurrency cap or rate ceiling hit. Admission is
     /// PREVENTIVE: rejected at acquire time, before any box/VM is spawned
-    /// (contract §6; CP2 "enforced before load", hugit X10⑤).
+    /// (contract §6; CP2 "enforced before load", the external consumer's X10⑤).
     OverCap,
 
     /// 503 — a fail-closed dependency (token store, lease ledger, CAS/AC)

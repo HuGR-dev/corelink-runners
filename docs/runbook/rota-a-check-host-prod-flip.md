@@ -51,10 +51,10 @@ For a check-host lease to route to Cloudflare, fabricd's box engine must be CF (
   NOT the CF vars — so confirm the LIVE service has the CF vars (else it's Northflank-only = rota B, and
   check-host never reaches CF).
 
-## Step 3 — Toolchain snapshot in the acquire tenant (#68, hugit-owned)
+## Step 3 — Toolchain snapshot in the acquire tenant (#68, CoreLink-owned)
 A real check-host lease hydrates its toolchain from CAS under the **fabric-authenticated tenant of the
-acquiring PAT** (`leases.rs:741`, see `2026-07-07-REPLY-to-clw-and-hugit-TL-check-host-tenant-coordination…`).
-So hugit snapshots its CI toolchain (recipe: clw #68 b-run, debian:12-slim) and **pushes to the tenant its
+acquiring PAT** (`leases.rs:741`).
+So the CoreLink operator or CLI/SDK client snapshots its CI toolchain (recipe: clw #68 b-run, debian:12-slim) and **pushes to the tenant its
 check leases acquire under**, then hands back the `toolchain_digest` (the snapshot `.root`). Hydrate dest is
 `/toolchain` (Dockerfile `TOOLCHAIN_DIR`), exec cwd `/toolchain`, **PATH not auto-set** → the CheckDef
 command must resolve its tools from `/toolchain`.
@@ -77,7 +77,7 @@ from fabricd (→ Northflank-only) or stop sending `toolchain_digest` on check a
 
 ## Who does what
 - 🔒 Steps 1 + 2 (Northflank rebuild + env): **owner / infra** (Northflank creds).
-- Step 3 (toolchain snapshot): **hugit TL** (their toolchain + their tenant).
-- Step 4 (post-flip smoke): **runners TL** can drive it given a tenant PAT + the digest.
+- Step 3 (toolchain snapshot): **CoreLink operator or CLI/SDK client** (the toolchain + tenant).
+- Step 4 (post-flip smoke): **CoreLink operator** can drive it given a tenant PAT + the digest.
 
 — corelink-runners TL

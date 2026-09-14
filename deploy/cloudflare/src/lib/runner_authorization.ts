@@ -13,6 +13,10 @@ export class RunnerAuthorizationError extends Error {
     this.name = "RunnerAuthorizationError";
   }
 }
+export type RunnerAuthorizationAttempt =
+  | { kind: "authorized"; authorization: RunnerAuthorization }
+  | { kind: "refused"; status: 401 | 403 }
+  | { kind: "unknown"; status?: number };
 
 function required(value: unknown): value is string {
   return typeof value === "string" && value.trim() === value && value.length > 0;
@@ -37,14 +41,14 @@ function validResponse(value: unknown): RunnerAuthorization | null {
   };
 }
 
-export async function authorizeRunner(env: MintEnv, params: MintParams): Promise<RunnerAuthorization> {
+export async function inspectRunnerAuthorization(env: MintEnv, params: MintParams): Promise<RunnerAuthorizationAttempt> {
   const key = env.CORELINK_RUNNER_MINT_AUTH_KEY;
   const jobId = params.jobId;
   const repo = params.repoFullName;
   const installationId = params.installationId;
   const acquiringPat = params.acquiringPat;
   if (!required(key) || !required(jobId) || !required(repo)
-    || (!required(installationId) && !required(acquiringPat))) throw new RunnerAuthorizationError();
+    || (!required(installationId) && !required(acquiringPat))) return { kind: "unknown" };
   const optionC = required(acquiringPat);
   const headers: Record<string, string> = {
     ...cfAccessHeaders(env),
@@ -64,14 +68,20 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
         ...(installationId ? { installation_id: installationId } : {}),
       }),
     });
-    if (!response.ok) throw new RunnerAuthorizationError();
+    if (response.status === 401 || response.status === 403) return { kind: "refused", status: response.status };
+    if (!response.ok) return { kind: "unknown", status: response.status };
     let value: unknown;
-    try { value = await response.json(); } catch { throw new RunnerAuthorizationError(); }
+    try { value = await response.json(); } catch { return { kind: "unknown", status: response.status }; }
     const result = validResponse(value);
-    if (!result) throw new RunnerAuthorizationError();
-    return result;
+    if (!result) return { kind: "unknown", status: response.status };
+    return { kind: "authorized", authorization: result };
   } catch (error) {
-    if (error instanceof RunnerAuthorizationError) throw error;
-    throw new RunnerAuthorizationError();
+    return { kind: "unknown" };
   }
+}
+
+export async function authorizeRunner(env: MintEnv, params: MintParams): Promise<RunnerAuthorization> {
+  const result = await inspectRunnerAuthorization(env, params);
+  if (result.kind !== "authorized") throw new RunnerAuthorizationError();
+  return result.authorization;
 }

@@ -1,10 +1,10 @@
 # cargo-deny configuration — supply-chain policy for the corelink-runners
-# workspace. House policy inherited from hugit (HuGR family discipline).
+# workspace. CoreLink supply-chain policy for the runner workspace.
 # Run: cargo deny check
 
 [licenses]
-# Allow only these SPDX identifiers for dependency licenses (the HuGR house
-# allow-set, kept identical to hugit's).
+# Allow only these SPDX identifiers for dependency licenses (the workspace
+# allow-set).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -30,8 +30,7 @@ private = { ignore = true }
 
 [bans]
 # Deny multiple versions of the same crate. Skips are documented and added ONLY
-# when a transitive duplicate genuinely cannot be collapsed (hugit's deny.toml
-# is the template).
+# when a transitive duplicate genuinely cannot be collapsed.
 multiple-versions = "deny"
 skip = [
     # windows-sys 0.52.0 is pulled by `ring` (← rustls ← ureq, the

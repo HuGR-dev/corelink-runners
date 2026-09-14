@@ -3,25 +3,41 @@
 #
 # CoreLink Runner DevEnv Container (Multi-Stage Build)
 #
-# Stage 1 (clw-builder): builds clw + corelink-check-exec-server
+# Stage 1 (clw-builder): validates the pinned clw artifact + builds the
+# corelink-check-exec-server
 # Stage 2 (bin-downloader): downloads ttyd + code-server
-# Stage 3 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
+# Stage 3 (runtime): Ubuntu 24.04 + Chromium + Xvfb + noVNC + non-root user coder
+# Supply-chain contract: every base image is digest-pinned, every downloaded
+# release artifact is SHA-256 verified, and the final build requires OCI
+# revision/date metadata.
 
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 1: Download verified clw binary (from corelink-workspaces releases)
+# STAGE 1: Download and validate the verified clw binary
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS clw-download
+# clw v0.1.5 is a dynamically-linked GNU/Linux binary with a GLIBC_2.39
+# floor.  Debian 12 ships glibc 2.36, so using Debian for this stage would
+# only postpone the failure until runtime.  Keep the builder and runtime on
+# the same pinned glibc floor.
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS clw-download
 ARG CLW_VERSION=0.1.5
 ARG CLW_SHA256=95a05db35e4e5be50a104acb7c30466ff7ec5f7a154403943aca24279b5d8bf2
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends curl ca-certificates binutils \
+ && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${CLW_VERSION}/clw-${CLW_VERSION}-x86_64-unknown-linux-gnu" -o /clw \
  && echo "${CLW_SHA256}  /clw" | sha256sum -c - \
- && chmod +x /clw
+ && chmod +x /clw \
+ && test "$(readelf --version-info /clw | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)" = GLIBC_2.39 \
+ && /clw --version
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1b: Build in-container exec-server from Rust source (musl static)
 # ══════════════════════════════════════════════════════════════════════
-FROM rust:1.82-alpine AS exec-builder
+# Official Docker Hub library/rust:1.96-alpine multi-arch manifest digest,
+# resolved 2026-09-07 from registry-1.docker.io. Keep the manifest-level pin
+# so the requested target platform selects its corresponding image.
+FROM rust:1.96-alpine@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS exec-builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static git make perl
 
@@ -47,7 +63,9 @@ RUN mkdir -p /out \
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 2: Download pre-built ttyd + code-server binaries
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim AS bin-downloader
+# Official Docker Hub library/debian:12-slim multi-arch manifest digest,
+# resolved 2026-09-07 from registry-1.docker.io.
+FROM debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS bin-downloader
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -59,7 +77,7 @@ WORKDIR /out
 
 # ttyd v1.7.7
 ARG TTYD_VERSION=1.7.7
-ARG TTYD_SHA256=174ff46b7a2dce51d9ad0b368731551a37c35bd28ab837fec39e7c53d10cf6e3
+ARG TTYD_SHA256=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
 RUN curl -fsSL -o /out/ttyd \
     "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
  && echo "${TTYD_SHA256}  /out/ttyd" | sha256sum -c - \
@@ -67,17 +85,39 @@ RUN curl -fsSL -o /out/ttyd \
 
 # code-server v4.95.3
 ARG CODE_SERVER_VERSION=4.95.3
-ARG CODE_SERVER_SHA256=d6fe02db2e6dbefcce178d227b686d116238b1f8fb8be9be173428d00922d109
+ARG CODE_SERVER_SHA256=7b60ae570dc8a4a5e56ddfdd73a7cce40b2b155b390dffa6897f815e9510a0eb
 RUN curl -fsSL -o /tmp/code-server.tar.gz \
     "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
  && echo "${CODE_SERVER_SHA256}  /tmp/code-server.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/code-server.tar.gz -C /out --strip-components=1 \
+ && mkdir -p /out/code-server \
+ && tar -xzf /tmp/code-server.tar.gz -C /out/code-server --strip-components=1 \
+ && fixture_dir=/out/code-server/node_modules/httpolyglot/test/fixtures \
+ && test -d "${fixture_dir}" \
+ && find "${fixture_dir}" -type f -delete \
+ && find "${fixture_dir}" -depth -type d -empty -delete \
+ && test ! -e "${fixture_dir}" \
  && rm -f /tmp/code-server.tar.gz
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 3: Final Runtime Image
 # ══════════════════════════════════════════════════════════════════════
-FROM debian:12-slim
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+ARG VCS_REF
+ARG BUILD_DATE
+ARG OCI_SOURCE=https://github.com/HuGR-Labs/corelink-runners
+
+# A deployable image must carry provenance. Reject missing/default metadata so
+# local or CI builds cannot silently produce an untraceable artifact.
+RUN test -n "${VCS_REF:-}" \
+ && test "${VCS_REF}" != unknown \
+ && test -n "${BUILD_DATE:-}" \
+ && test "${BUILD_DATE}" != unknown
+
+LABEL org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.source="$OCI_SOURCE" \
+      org.opencontainers.image.created="$BUILD_DATE"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -108,25 +148,89 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm1 \
     libpango-1.0-0 \
     libcairo2 \
-    libasound2 \
+    libasound2t64 \
     libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user coder (uid 1000)
-RUN groupadd --system --gid 1000 coder \
- && useradd --system --uid 1000 --gid coder --create-home --shell /bin/bash coder
+# Non-root user coder (uid/gid 1000). Ubuntu may already allocate this ID to
+# its stock user/group, so normalize the existing identity instead of blindly
+# creating a duplicate. An unexpected pre-existing `coder` with another UID
+# is rejected rather than silently changing ownership semantics.
+RUN set -eux; \
+    group_1000="$(getent group 1000 | cut -d: -f1 || true)"; \
+    if getent group coder >/dev/null; then \
+      test "$(getent group coder | cut -d: -f3)" = 1000; \
+    elif [ -n "${group_1000}" ]; then \
+      groupmod --new-name coder "${group_1000}"; \
+    else \
+      groupadd --system --gid 1000 coder; \
+    fi; \
+    user_1000="$(getent passwd 1000 | cut -d: -f1 || true)"; \
+    if getent passwd coder >/dev/null; then \
+      test "$(id -u coder)" = 1000; \
+      usermod --gid coder --shell /bin/bash coder; \
+      coder_home="$(getent passwd coder | cut -d: -f6)"; \
+      if [ "${coder_home}" != /home/coder ]; then \
+        usermod --home /home/coder --move-home coder; \
+      fi; \
+    elif [ -n "${user_1000}" ]; then \
+      usermod --login coder --gid coder --home /home/coder --move-home \
+        --shell /bin/bash "${user_1000}"; \
+    else \
+      useradd --system --uid 1000 --gid coder --create-home \
+        --home-dir /home/coder --shell /bin/bash coder; \
+    fi; \
+    mkdir -p /home/coder; \
+    chown -R coder:coder /home/coder; \
+    test "$(id -u coder)" = 1000; \
+    test "$(id -g coder)" = 1000; \
+    test "$(getent passwd coder | cut -d: -f6)" = /home/coder
 
 # Binaries from builder stages
 COPY --from=clw-download /clw /usr/local/bin/clw
 COPY --from=exec-builder /out/exec-server /usr/local/bin/exec-server
 COPY --from=bin-downloader /out/ttyd /usr/local/bin/ttyd
-COPY --from=bin-downloader /out/bin/code-server /usr/local/bin/code-server
+COPY --from=bin-downloader /out/code-server /opt/code-server
 
 # Entrypoint & Supervisord configs
 COPY entrypoint.sh /entrypoint.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-RUN chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd /usr/local/bin/code-server \
+RUN set +e; \
+    candidate_files="$(grep -RIlE --binary-files=without-match -- '^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$' /opt/code-server)"; \
+    scan_rc=$?; \
+    scanner_error=0; \
+    private_key_files=''; \
+    if [ "${scan_rc}" -gt 1 ]; then \
+      scanner_error="${scan_rc}"; \
+    elif [ "${scan_rc}" -eq 0 ]; then \
+      while IFS= read -r candidate; do \
+        [ -n "${candidate}" ] || continue; \
+        awk 'BEGIN { in_pem=0; found=0 } { line=$0; sub(/\r$/, "", line); if (line ~ /^[[:space:]]*-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { in_pem=1; next } if (in_pem && line ~ /^[[:space:]]*-----END (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[[:space:]]*$/) { found=1; exit } if (in_pem) { payload=line; gsub(/[[:space:]]/, "", payload); if (length(payload) >= 16 && payload ~ /^[A-Za-z0-9+\/=]+$/) { found=1; exit } } } END { exit(found ? 0 : 1) }' "${candidate}" >/dev/null 2>&1; \
+        candidate_rc=$?; \
+        if [ "${candidate_rc}" -eq 0 ]; then \
+          private_key_files="${private_key_files}${candidate}"$'\n'; \
+        elif [ "${candidate_rc}" -gt 1 ]; then \
+          scanner_error="${candidate_rc}"; \
+        fi; \
+      done <<< "${candidate_files}"; \
+    fi; \
+    private_name_files="$(find /opt/code-server -type f \( -iname '*.key' -o -iname '*.key.pem' -o -iname 'id_rsa' -o -iname 'id_dsa' -o -iname 'id_ecdsa' -o -iname 'id_ed25519' -o -iname 'private.key' -o -iname 'private.pem' \) -print)"; \
+    find_rc=$?; \
+    if [ "${find_rc}" -ne 0 ]; then scanner_error="${find_rc}"; fi; \
+    private_key_files="${private_key_files}${private_name_files}"; \
+    if [ "${scanner_error}" -ne 0 ]; then \
+      echo "private-key scanner failed (rc=${scanner_error})" >&2; \
+      exit 1; \
+    elif [ -n "${private_key_files}" ]; then \
+      echo "private-key material found in /opt/code-server:" >&2; \
+      printf '%s\n' "${private_key_files}" >&2; \
+      exit 1; \
+    fi; \
+    set -e \
+ && ln -s /opt/code-server/bin/code-server /usr/local/bin/code-server \
+ && chmod 0755 /usr/local/bin/clw /usr/local/bin/exec-server /usr/local/bin/ttyd \
+              /opt/code-server/bin/code-server /opt/code-server/lib/node \
  && chmod 0755 /entrypoint.sh
 
 # Data & Runtime directories

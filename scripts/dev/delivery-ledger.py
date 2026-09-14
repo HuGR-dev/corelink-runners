@@ -400,6 +400,8 @@ def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None
             errors.require(by_sprint.get(prior, {}).get("state") == "delivered",
                            f"sprint {sprint}: cannot enter a gate before sprint {prior} is merged")
         selected = [i for i in item_map.values() if i.get("sprint") == sprint]
+        sprint_row = by_sprint.get(sprint, {})
+        tip = sprint_row.get("tip_commit")
         errors.require(len(selected) == {1: 12, 2: 14, 3: 28}.get(sprint, -1), f"sprint {sprint}: wrong item count")
         for item in selected:
             ident = item["id"]
@@ -407,15 +409,18 @@ def validate(repo: Path, ledger_path: Path, mode: str, target: int | None = None
             errors.require(item.get("state") in {"ready", "delivered"}, f"{ident}: item is not ready/delivered")
             errors.require(not item.get("blockers"), f"{ident}: blockers remain")
             review = item.get("review", {})
-            errors.require(review.get("status") == "approved" and sha(review.get("commit")) and review.get("commit") in item.get("commits", []), f"{ident}: approved review commit is missing from commits")
+            review_commit = review.get("commit")
+            errors.require(
+                review.get("status") == "approved" and valid_commit(repo, review_commit) and
+                valid_commit(repo, tip) and ancestors(repo, review_commit, tip),
+                f"{ident}: approved review commit is not valid for sprint tip",
+            )
             for dep in item["dependencies"]:
                 if dep in item_map:
                     predecessor = item_map[dep]
                     allowed = {"recorded_delivered"} if predecessor["sprint"] == 0 else {"ready", "delivered"}
                     errors.require(predecessor["state"] in allowed,
                                    f"{ident}: dependency {dep} is not ready")
-        sprint_row = by_sprint.get(sprint, {})
-        tip = sprint_row.get("tip_commit")
         errors.require(valid_commit(repo, tip), f"sprint {sprint}: tip_commit is not an existing commit")
         for item in selected:
             for commit in item.get("commits", []):

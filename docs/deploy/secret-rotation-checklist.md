@@ -1,4 +1,10 @@
-# Secret-rotation checklist — CoreLink Runners (Northflank fabric)
+# Secret-rotation checklist — CoreLink Runners (Northflank fallback fabric)
+
+> **Scope: FALLBACK / ALTERNATIVE PATH.** The canonical production edge is the
+> Cloudflare `fabricd` + spawn-Worker deployment. This checklist covers secrets
+> mounted on the Northflank `corelink-runners` fallback service only. For the
+> canonical Worker secret inventory and rotation procedure, use
+> `docs/runbook/secret-inventory.md` and `docs/runbook/cloudflare-go-live.md`.
 
 > Per-variable runbook for rotating every live secret in `corelink-fabricd`.
 > Source of truth for variable semantics: `crates/corelink-fabric-server/src/server.rs`
@@ -59,11 +65,11 @@ yet — update `DATABASE_URL` in the same save if you are rotating both together
 
 1. Generate the new key offline (`openssl rand -base64 32`).
 2. The published attestation-verification key at `GET /v1/attestation/key`
-   changes on the next boot. Any consumer that has cached the old key
-   (e.g. hugit's `hugit-invariants` wire oracle) will reject attestations
-   signed with the new key until it re-fetches.
-3. Notify upstream consumers (hugit techlead) before rotating. Agree on a
-   coordination window: new value set → NEW BUILD → consumers re-fetch.
+   changes on the next boot. Any configured CoreLink verifier that has cached
+   the old key will reject attestations signed with the new key until it
+   re-fetches.
+3. Notify configured CoreLink verifiers before rotating. Agree on a
+   coordination window: new value set → NEW BUILD → verifiers re-fetch.
 4. Set the new value in Northflank env, trigger a NEW BUILD (see §9).
 5. Immediately after boot: `curl https://<service-host>/v1/attestation/key`
    to confirm the published key changed.
@@ -103,7 +109,7 @@ Same service → Environment → `FABRIC_PAT`. Set the new value.
 **Order and coordination (NOT zero-downtime in static mode).**
 
 1. Generate new token.
-2. Update every client (hugit's fence broker, any CI script) to use the new
+2. Update every configured client (for example, a CI script) to use the new
    token BEFORE the NEW BUILD, or coordinate a cutover window:
    - option A (rolling): clients update token, then deploy. Brief window where
      the old token is still live; new token rejected until deploy.
@@ -341,8 +347,8 @@ incident).
    attestation chain. A green smoke confirms all secrets are accepted and the
    execution path is end-to-end live.
 6. For `FABRIC_SIGNING_KEY` rotations: verify `GET /v1/attestation/key`
-   returns the new public key, and confirm upstream consumers (hugit) have
-   re-fetched it.
+   returns the new public key, and confirm every configured CoreLink verifier
+   has re-fetched it.
 7. Revoke or delete the old secret value at its source (old Northflank API
    token, old Postgres password) after you have confirmed the new build is
    healthy. Do NOT revoke before the build is live — there is a brief window
@@ -354,7 +360,7 @@ incident).
 
 | Variable | Zero-downtime? | Notes |
 |---|---|---|
-| `FABRIC_SIGNING_KEY` | **No** — brief service degradation + consumer re-fetch | Highest priority; coordinate with hugit before rotating |
+| `FABRIC_SIGNING_KEY` | **No** — brief service degradation + verifier re-fetch | Highest priority; coordinate configured CoreLink verifiers before rotating |
 | `FABRIC_PAT` | **No** — client cutover window | Coordinate client update with build |
 | `DATABASE_URL` | **No** — pool reconnect gap between addon reset and NEW BUILD | Minimize the credential-reset → NEW BUILD window |
 | `NORTHFLANK_API_TOKEN` | **Yes** — rolling (old instances drain, new boot with new token) | Revoke old token only after old instances terminate |

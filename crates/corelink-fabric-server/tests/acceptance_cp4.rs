@@ -1,5 +1,5 @@
 //! WP-CP4 acceptance — the non-interference measurement surface
-//! (contract §6; hugit X6/X10 "other-tenant latency unmoved under load").
+//! (contract §6; X6/X10 "other-tenant latency unmoved under load").
 //!
 //! Two layers under test, both strictly tenant-scoped:
 //!

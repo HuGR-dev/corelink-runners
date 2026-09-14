@@ -1393,7 +1393,7 @@ pub fn build_app_and_state(cfg: &ServerConfig) -> anyhow::Result<(axum::Router, 
             // ONE persistent ureq transport, SHARED (cloned) into BOTH stores so
             // the plan introspect reuses the auth introspect's warm connection
             // pool within a single acquire — closing the cold-start
-            // `/readyz`-warm / `/v1/leases`-cold 503 differential (hugit-TL
+            // `/readyz`-warm / `/v1/leases`-cold 503 differential (the contract-owner
             // FINDING 2026-06-28: the only difference between the working auth
             // call and the 503ing plan call was a SECOND, cold ureq agent; body +
             // URL + secret + timeout are identical). The clone shares the

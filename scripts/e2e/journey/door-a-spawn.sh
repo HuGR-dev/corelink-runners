@@ -26,8 +26,7 @@ set +e
 gh run watch "$rid" --interval 20 --exit-status >/dev/null 2>&1
 set -e
 
-read -r status conclusion title < <(gh run view "$rid" --json status,conclusion,displayTitle \
-  -q '"\(.status) \(.conclusion) \(.displayTitle)"')
+conclusion="$(gh run view "$rid" --json conclusion -q '.conclusion')"
 
 # Audit F1: SUCCESS alone does NOT prove a fresh ephemeral cache-warm spawn — a job could land
 # on a stale/persistent runner carrying the label. Pull the ACTUAL runner + machine from the

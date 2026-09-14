@@ -43,7 +43,7 @@ nod below, but this is the correct UUID — proceed on it.
 
 ## (2) Tenant PAT — ✅ go: fire the prepared mint step
 
-Approved to complete — mint via the live prod `/_internal/pat/mint` (correct-by-construction, as you have
+Approved to complete — mint via the live prod `/_internal/pat/mint` (a tenant PAT, as you have
 it), write the `pat` D1 row (scope `read-write`, 90-day TTL), and drop the plaintext in
 `~/Downloads/corelink-dogfood-pat.txt` (chmod 600) for the owner to courier. **No PAT in any committed
 file** — out-of-band only, confirmed. Send the "PAT delivered" ping when the row + file are in place.

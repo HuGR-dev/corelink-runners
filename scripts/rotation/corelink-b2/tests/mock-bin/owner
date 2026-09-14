@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 1 ] || exit 2
+[ "${MOCK_SCENARIO:-success}" != bad_owner ] || { printf 'someone-else\n'; exit 0; }
+id -un

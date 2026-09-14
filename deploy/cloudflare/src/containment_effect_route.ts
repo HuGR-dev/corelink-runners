@@ -53,6 +53,9 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   release?: () => Promise<void>;
   /** Authority-only admission fence; runs before every mutable external seam. */
   admit?: () => Promise<boolean>;
+  /** Durable admission generation fence, checked before every mutable seam. */
+  fence?: () => Promise<boolean>;
+  releaseFence?: () => Promise<void>;
   beforeClaim?: () => Promise<void>;
   /**
    * Undo credentials prepared by this invocation when the provider was never
@@ -129,9 +132,14 @@ export async function runCanonicalEffect<TOpts extends object>(
   const req = request(tuple);
   let claimAdmitted = false;
   let effectStarted = false;
+  // A recovered or newly-marked DRIVING owner may have a provider call in
+  // flight. Keep the deletion fence until a later canonical recovery proves a
+  // terminal receipt; never use a TTL to guess that fact.
+  let retainFence = false;
   const releaseClaim = async () => {
     if (claimAdmitted && deps.release) { await deps.release().catch(() => undefined); claimAdmitted = false; }
   };
+  const fenced = async () => !deps.fence || await deps.fence();
 
   try {
     if (deps.admit && !(await deps.admit())) return { status: "busy" };
@@ -142,20 +150,28 @@ export async function runCanonicalEffect<TOpts extends object>(
     const recovered = existing.kind === "committed" || (existing.kind === "owned" && existing.state === "DRIVING")
       ? terminal(existing) : null;
     if (recovered) {
+      if (existing.kind === "owned" && existing.state === "DRIVING") retainFence = true;
       if (recovered.status === "committed" && deps.finalize) recovered.finalized = await deps.finalize(recovered.receipt);
       return recovered;
     }
     const resumable = existing.kind === "owned" && (existing.state === "PREPARED" || existing.state === "CLAIM_ACQUIRED" || existing.state === "PERMIT_ISSUED" || existing.state === "BOUND");
     let state: "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND" = (resumable ? existing.state : "PREPARED") as "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND";
     let ownerRecord: any = resumable ? existing.record : undefined;
-    if (deps.beforeClaim) await deps.beforeClaim();
+    if (!(await fenced())) return { status: "busy" };
     claimAdmitted = await deps.claim();
     // A persisted tuple does not transfer or replace the external claim. Every
     // invocation must win the claim in this invocation; only that claim may be
     // released on an abortable failure.
     if (!claimAdmitted) return { status: "claim_refused" };
+    // The external claim is the first side effect fence. Preparation may
+    // authorize, reserve capacity, mint credentials, or create JIT state, so
+    // it must never run before this authority has admitted the attempt.
+    if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
+    if (deps.beforeClaim) await deps.beforeClaim();
+    if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
     if (deps.beforeDrive && !(await deps.beforeDrive())) { await releaseClaim(); return { status: "before_drive_refused" }; }
     if (!resumable) {
+      if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
       const prepared = await deps.ledger.ownerPrepare(req);
       const previous = prepared.kind === "committed" || (prepared.kind === "owned" && prepared.state === "COMMITTED") ? terminal(prepared) : null;
       if (previous) {
@@ -166,6 +182,7 @@ export async function runCanonicalEffect<TOpts extends object>(
       ownerRecord = prepared.record;
     }
     if (state === "PREPARED") {
+      if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
       const acquired = await deps.ledger.ownerAcquire(req);
       if (acquired.kind !== "acquired" && !(acquired.kind === "owned" && acquired.state === "CLAIM_ACQUIRED")) {
         await releaseClaim(); return acquired.kind === "busy" ? { status: "busy" } : (terminal(acquired) ?? { status: "busy" });
@@ -225,6 +242,7 @@ export async function runCanonicalEffect<TOpts extends object>(
         await releaseClaim();
         return { status: "unavailable", reason: "legacy permit unavailable" };
       }
+      if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
       const confirmed = await deps.ledger.ownerConfirm(
         { ...req, observation_kind: mirrored.kind, observation_digest: mirrorDigest }, mirrorDigest, mirrorDigest, externalPermitId,
       );
@@ -240,6 +258,7 @@ export async function runCanonicalEffect<TOpts extends object>(
       permit = persisted.permit;
     }
     if (state === "PERMIT_ISSUED") {
+      if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
       if (deps.beforeBegin && !(await deps.beforeBegin(permit))) {
         await releaseClaim(); return { status: "before_drive_refused" };
       }
@@ -263,6 +282,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     }
     let boundBinding = binding;
     if (state === "PERMIT_ISSUED") {
+      if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
       const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
       if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
       boundBinding = (bound.record as any)?.binding ?? binding;
@@ -273,6 +293,7 @@ export async function runCanonicalEffect<TOpts extends object>(
       }
       boundBinding = persistedBinding;
     }
+    if (!(await fenced())) { await releaseClaim(); return { status: "busy" }; }
     const driving = await deps.ledger.ownerMarkDriving(req, permit.permit_id, proof.proof_id);
     // A concurrent retry that observes an already-started transition is
     // terminal uncertainty, never permission to invoke the provider again.
@@ -284,8 +305,10 @@ export async function runCanonicalEffect<TOpts extends object>(
       return terminal(driving) ?? { status: "unknown_terminal" };
     }
     effectStarted = true;
+    retainFence = true;
     let provider: ProviderDriveResult;
     try {
+      if (!(await fenced())) return { status: "busy" };
       provider = await deps.drive({
         ...deps.opts,
         containment_event_id: tuple.event_id,
@@ -294,6 +317,7 @@ export async function runCanonicalEffect<TOpts extends object>(
         effect_proof_id: proof.proof_id,
         effect_binding: boundBinding,
       });
+      retainFence = false;
     } catch (error) {
       return { status: "unknown_terminal", reason: error instanceof Error ? error.message : "provider failed" };
     }
@@ -333,6 +357,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (!effectStarted) await releaseClaim();
     return { status: "unavailable", reason: error instanceof Error ? error.message : "route failure" };
   } finally {
+    if (!retainFence && deps.releaseFence) await deps.releaseFence().catch(() => undefined);
     // Preparation can mint a credential before this route wins the external
     // spawn claim. If the provider was not started, revoke only that exact
     // invocation's credential. Cleanup failures are recorded by its durable

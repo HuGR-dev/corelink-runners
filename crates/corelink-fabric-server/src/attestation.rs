@@ -1,11 +1,11 @@
 //! WP-ATT1+ATT2 — signed execution attestation at the API surface
 //! (contract §7: the runner must attest what it ran, signed; a result
-//! without a valid attestation is rejected by hugit, so emission is
+//! without a valid attestation is rejected by the external verifier, so emission is
 //! mandatory).
 //!
 //! ## The honest composition (frozen chain untouched, result bound)
 //!
-//! The frozen `AttestationChain` shape (transcribed from hugit-contracts;
+//! The frozen `AttestationChain` shape (transcribed from frozen wire-contracts;
 //! pre-image frozen in [`corelink_runner::attest::sig_preimage`]) carries
 //! `tree`/`def`/`runner`/`model`/`principal` only. The contract §7 coverage
 //! set {image digest, resolved inputs, result hash} maps onto it WITHOUT
@@ -20,7 +20,7 @@
 //! - **executor** — `runner` covers the executor identity
 //!   (`CheckResult.runner_ref`).
 //! - **image digest** — pinned at acquire (`ContainerSpec::from_lease`
-//!   refuses unpinned images, hugit X4) and recorded in the fabric's
+//!   refuses unpinned images, per the X4 supply-chain pin) and recorded in the fabric's
 //!   acquire-time registry; threaded through [`build_attestation`] so the
 //!   FC3-era enrichment can fold it into a content-addressed runner link.
 //!   At M1 it is NOT a cryptographically covered chain field — the frozen
@@ -44,8 +44,9 @@
 //! fabric key ([`FabricSigner::sign_raw`]) and published on the SAME
 //! response as the chain. This is the fabric's result-binding extension —
 //! it never touches the frozen `AttestationChain` shape, and it is flagged
-//! for §12 amendment-log discussion with hugit (the chain stays verifiable
-//! by hugit's X8 verifier unchanged; the binding is additional evidence).
+//! for §12 amendment-log discussion with external consumers (the chain stays
+//! verifiable by the existing X8 verifier unchanged; the binding is additional
+//! evidence).
 //!
 //! **v1 does NOT cover the verdict.** `CheckResult.exit` (the pass/fail
 //! verdict) and `CheckResult.artifacts` (the output digests) are signed by
@@ -73,8 +74,9 @@
 //! `result_binding_sig`. v2 is a DISTINCT pre-image from v1 (it appends the
 //! exit + artifact frames), so a v1 signature never validates as v2 and vice
 //! versa — there is no cross-version confusion. This is a wire/seam formula:
-//! **hugit must mirror it byte-exactly to add a v2 verifier** (§12 amendment;
-//! v1 stays emitted until hugit confirms v2 adoption — no flag-day).
+//! **External verifiers must mirror it byte-exactly to add a v2 verifier** (§12
+//! amendment; v1 stays emitted until consumers confirm v2 adoption — no
+//! flag-day).
 //!
 //! Key custody per ratified decision #2: ed25519, one fabric signing key
 //! per region (M1: single region); the public key is published at
@@ -127,7 +129,7 @@ pub fn result_binding_preimage(memo_key: &str, stdout_ref: &str, stderr_ref: &st
 /// order (the order is part of the binding — reordering changes the
 /// pre-image). The first three frames are identical to v1, but v2 is a
 /// strictly longer, DISTINCT message — a v1 signature never validates as v2.
-/// This is a wire/seam formula hugit must mirror byte-exactly.
+/// This is a wire/seam formula external verifiers must mirror byte-exactly.
 pub fn result_binding_preimage_v2(result: &CheckResult) -> Vec<u8> {
     let mut out = Vec::new();
     lp(&mut out, &result.memo_key);
@@ -149,7 +151,7 @@ pub fn result_binding_preimage_v2(result: &CheckResult) -> Vec<u8> {
 /// Sign the v1 result-binding pre-image over `result`'s content identity
 /// (`memo_key`, `stdout_ref`, `stderr_ref`) with the fabric key; returns
 /// the detached standard-base64 signature — the `result_binding_sig` (v1)
-/// wire field. UNCHANGED for back-compat (hugit's current verifier mirrors
+/// wire field. UNCHANGED for back-compat (the current external verifier mirrors
 /// this exact formula; v2 is emitted alongside, never instead).
 pub fn sign_result_binding(signer: &FabricSigner, result: &CheckResult) -> String {
     signer.sign_raw(&result_binding_preimage(
@@ -179,7 +181,7 @@ pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> St
 /// metrics for exactly this lease.
 ///
 /// Byte formula (same LP framing + big-endian integers as the chain/result
-/// pre-images, so hugit mirrors it with the identical primitives):
+/// pre-images, so external verifiers mirror it with the identical primitives):
 ///
 /// ```text
 /// LP(lease_id) ‖ LP(tenant)
@@ -192,7 +194,7 @@ pub fn sign_result_binding_v2(signer: &FabricSigner, result: &CheckResult) -> St
 /// ```
 ///
 /// `tool_breakdown` is appended in `Vec` order — the order is part of the
-/// binding. This is a wire/seam formula hugit must mirror byte-exactly to
+/// binding. This is a wire/seam formula external verifiers must mirror byte-exactly to
 /// verify. ADDITIVE + independent of the v1/v2 result bindings (a distinct
 /// message; never validates as either).
 pub fn intent_metrics_preimage(lease_id: &str, tenant: &str, m: &IntentMetrics) -> Vec<u8> {
@@ -225,7 +227,7 @@ pub fn intent_metrics_preimage(lease_id: &str, tenant: &str, m: &IntentMetrics) 
 /// Sign the intent-metrics pre-image (the attested cost, bound to lease +
 /// tenant) with the fabric key; returns the detached standard-base64 signature
 /// — the `intent_metrics_sig` wire field (emitted only when
-/// `FABRIC_EMIT_INTENT_METRICS_SIG` is on, pending hugit's verifier adopting
+/// `FABRIC_EMIT_INTENT_METRICS_SIG` is on, pending external verifier adoption of
 /// the field — additive, so default-off is wire-invisible).
 pub fn sign_intent_metrics(
     signer: &FabricSigner,
@@ -378,8 +380,8 @@ pub fn verify_execution(
 /// Verify the frozen chain AND the **v2** full-outcome result-binding
 /// signature: like [`verify_execution`] but the binding recomputes the v2
 /// pre-image, so it covers `exit` + ordered `artifacts` in addition to the
-/// three v1 fields. This is the binding a verdict-trusting consumer (hugit,
-/// once it adopts v2) must check — a flipped `exit` or a rewritten artifact
+/// three v1 fields. This is the binding a verdict-trusting external consumer
+/// (once it adopts v2) must check — a flipped `exit` or a rewritten artifact
 /// digest breaks it, where v1 would still accept the forgery.
 ///
 /// Returns `Ok(true)` iff both the chain and the v2 binding verify;
@@ -405,8 +407,8 @@ pub fn verify_execution_v2(
 
 /// `GET /v1/attestation/key` — the published well-known fabric attestation
 /// key set (ATT2 amendment, reshaped to a key-set for rotation
-/// forward-compatibility, lead-ratified). UNAUTHENTICATED: hugit needs to
-/// fetch the public key without a tenant PAT (key rotation bootstrap).
+/// forward-compatibility, lead-ratified). UNAUTHENTICATED: external consumers
+/// need to fetch the public key without a tenant PAT (key rotation bootstrap).
 /// The body is the region's public key(s), nothing tenant-scoped. At M1
 /// the set is always exactly 1 entry (no rotation machinery built).
 pub(crate) async fn key(State(state): State<AppState>) -> Response {
@@ -822,12 +824,14 @@ mod tests {
         exit_or_artifacts: bool, // exit / artifacts (v2-only coverage)
     }
 
-    /// Apply one random mutation to `r`, returning what it touched and whether
-    /// it actually changed the relevant bytes (a mutation can be a no-op,
-    /// e.g. re-rolling a token to the same value or reordering a 1-elem vec).
-    fn mutate(rng: &mut Rng, r: &mut CheckResult) -> Touched {
+    /// Apply one explicit mutation class to `r`, returning what it touched.
+    ///
+    /// The property test runs every class for every generated result. Keeping
+    /// the mutation selector explicit avoids silently losing coverage to a
+    /// random no-op (for example, trying to reorder an empty artifact list).
+    fn mutate(rng: &mut Rng, r: &mut CheckResult, kind: u32) -> Touched {
         let mut t = Touched::default();
-        match rng.below(8) {
+        match kind {
             0 => {
                 // Flip exit to a DIFFERENT value (the classic verdict forgery).
                 let old = r.exit;
@@ -836,17 +840,21 @@ mod tests {
             }
             1 => {
                 // Edit an existing artifact's digest (rewrite an output hash).
-                if let Some(a) = r.artifacts.first_mut() {
-                    a.digest.push('!'); // guaranteed-different (alphabet excludes '!')
-                    t.exit_or_artifacts = true;
-                }
+                let a = r
+                    .artifacts
+                    .first_mut()
+                    .expect("property fixtures contain an artifact");
+                a.digest.push('!'); // guaranteed-different (alphabet excludes '!')
+                t.exit_or_artifacts = true;
             }
             2 => {
                 // Edit an existing artifact's path.
-                if let Some(a) = r.artifacts.first_mut() {
-                    a.path.push('!');
-                    t.exit_or_artifacts = true;
-                }
+                let a = r
+                    .artifacts
+                    .first_mut()
+                    .expect("property fixtures contain an artifact");
+                a.path.push('!');
+                t.exit_or_artifacts = true;
             }
             3 => {
                 // Add an artifact.
@@ -858,18 +866,14 @@ mod tests {
             }
             4 => {
                 // Remove an artifact.
-                if !r.artifacts.is_empty() {
-                    r.artifacts.remove(0);
-                    t.exit_or_artifacts = true;
-                }
+                r.artifacts.remove(0);
+                t.exit_or_artifacts = true;
             }
             5 => {
-                // Reorder artifacts (only a real change with >= 2 distinct).
-                if r.artifacts.len() >= 2 {
-                    r.artifacts.swap(0, 1);
-                    // Distinctness check: a swap of equal elements is a no-op.
-                    t.exit_or_artifacts = r.artifacts[0] != r.artifacts[1];
-                }
+                // Reorder two distinct artifacts. The fixture normalization
+                // below guarantees this is a real change.
+                r.artifacts.swap(0, 1);
+                t.exit_or_artifacts = true;
             }
             6 => {
                 // Mutate a v1-covered field (stdout/stderr/memo) — guaranteed-
@@ -909,19 +913,34 @@ mod tests {
     /// The headline assertion: NO exit/artifact mutation EVER survives v2.
     #[test]
     fn prop_v2_unforgeable_v1_blind() {
-        // 1024 deterministic cases: a forgery/framing bug fails on its first
-        // adversarial input, so this is ample coverage while keeping debug-mode
-        // ed25519 (slow, unoptimized) fast enough for the gate/CI.
-        const ITERS: u32 = 1_024;
+        // 64 deterministic results × 8 explicit mutation classes = 512
+        // adversarial cases. Every result exercises each v2-covered axis and
+        // the documented v1 gap, while each expensive signature is generated
+        // only once per base result.
+        const CASES: u32 = 64;
         let signer = FabricSigner::new_from_bytes(&SEED);
         let pk = signer.public_key_b64();
         let mut rng = Rng::new(0xC0DE_F00D_1234_5678);
 
         let mut survived_v2 = 0u32; // must remain 0 — the security invariant
         let mut exit_artifact_cases = 0u32;
+        let mut v1_cases = 0u32;
+        let mut unbound_cases = 0u32;
 
-        for _ in 0..ITERS {
-            let result = rng.check_result();
+        for _ in 0..CASES {
+            let mut result = rng.check_result();
+            // The artifact mutation classes must always be real changes. Keep
+            // the result generation random, but normalize this fixture's
+            // minimum shape and distinctness once before signing it.
+            while result.artifacts.len() < 2 {
+                result.artifacts.push(Artifact {
+                    path: format!("fixture-path-{}", result.artifacts.len()),
+                    digest: format!("fixture-digest-{}", result.artifacts.len()),
+                });
+            }
+            if result.artifacts[0] == result.artifacts[1] {
+                result.artifacts[1].path.push('!');
+            }
             let att = build_attestation(
                 &signer,
                 "alpine@sha256:d9e8",
@@ -939,42 +958,54 @@ mod tests {
                 "honest result must pass v1"
             );
             assert!(
-                verify_execution_v2(&att, &sig_v2, &result, &pk).unwrap(),
+                verify_raw(&result_binding_preimage_v2(&result), &sig_v2, &pk).unwrap(),
                 "honest result must pass v2"
             );
 
-            let mut forged = result.clone();
-            let touched = mutate(&mut rng, &mut forged);
+            for kind in 0..8 {
+                let mut forged = result.clone();
+                let touched = mutate(&mut rng, &mut forged, kind);
+                let v1_ok = verify_raw(
+                    &result_binding_preimage(
+                        &forged.memo_key,
+                        &forged.stdout_ref,
+                        &forged.stderr_ref,
+                    ),
+                    &sig_v1,
+                    &pk,
+                )
+                .unwrap();
+                let v2_ok = verify_raw(&result_binding_preimage_v2(&forged), &sig_v2, &pk).unwrap();
 
-            let v1_ok = verify_execution(&att, &sig_v1, &forged, &pk).unwrap();
-            let v2_ok = verify_execution_v2(&att, &sig_v2, &forged, &pk).unwrap();
-
-            if touched.exit_or_artifacts {
-                exit_artifact_cases += 1;
-                // THE P0 INVARIANT: every exit/artifact change breaks v2.
-                if v2_ok {
-                    survived_v2 += 1;
+                if touched.exit_or_artifacts {
+                    exit_artifact_cases += 1;
+                    // THE P0 INVARIANT: every exit/artifact change breaks v2.
+                    if v2_ok {
+                        survived_v2 += 1;
+                    }
+                    assert!(
+                        !v2_ok,
+                        "FORGERY SURVIVED v2: an exit/artifact mutation passed the \
+                         full-outcome binding — forged={forged:?}"
+                    );
+                    // And v1 is documented-blind to exactly these — it still accepts.
+                    assert!(
+                        v1_ok,
+                        "v1 must be blind to exit/artifacts (the documented gap v2 \
+                         closes) — forged={forged:?}"
+                    );
+                } else if touched.v1_field {
+                    v1_cases += 1;
+                    // memo/stdout/stderr are covered by BOTH versions.
+                    assert!(!v1_ok, "v1 must reject a v1-field mutation");
+                    assert!(!v2_ok, "v2 must reject a v1-field mutation");
+                } else {
+                    unbound_cases += 1;
+                    // A non-bound field both bindings intentionally leave
+                    // unchanged in their verification result.
+                    assert!(v1_ok, "v1 must accept a non-bound-field change");
+                    assert!(v2_ok, "v2 must accept a non-bound-field change");
                 }
-                assert!(
-                    !v2_ok,
-                    "FORGERY SURVIVED v2: an exit/artifact mutation passed the \
-                     full-outcome binding — forged={forged:?}"
-                );
-                // And v1 is documented-blind to exactly these — it still accepts.
-                assert!(
-                    v1_ok,
-                    "v1 must be blind to exit/artifacts (the documented gap v2 \
-                     closes) — forged={forged:?}"
-                );
-            } else if touched.v1_field {
-                // memo/stdout/stderr are covered by BOTH versions.
-                assert!(!v1_ok, "v1 must reject a v1-field mutation");
-                assert!(!v2_ok, "v2 must reject a v1-field mutation");
-            } else {
-                // A non-bound field (or a no-op mutation): both still accept —
-                // the bindings cover only the documented frames.
-                assert!(v1_ok, "v1 must accept a non-bound-field change");
-                assert!(v2_ok, "v2 must accept a non-bound-field change");
             }
         }
 
@@ -983,11 +1014,15 @@ mod tests {
             "{survived_v2} forgeries survived v2 — the P0 unforgeability \
              guarantee is BROKEN"
         );
-        // Sanity: the fuzz actually exercised the verdict-forgery path.
+        // Sanity: every bounded mutation class ran for every generated result.
         assert!(
-            exit_artifact_cases > 500,
-            "too few exit/artifact mutations sampled ({exit_artifact_cases}) — \
-             the fuzz did not meaningfully exercise the P0 path"
+            exit_artifact_cases == CASES * 6,
+            "unexpected exit/artifact mutation count ({exit_artifact_cases})"
+        );
+        assert_eq!(v1_cases, CASES, "every result must exercise a v1 mutation");
+        assert_eq!(
+            unbound_cases, CASES,
+            "every result must exercise an unbound mutation"
         );
     }
 

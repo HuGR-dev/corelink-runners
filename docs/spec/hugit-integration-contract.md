@@ -1,24 +1,22 @@
-# Fabric wire + envelope contract (v1.4.0) — historically "what hugit needs"
+# Fabric wire + envelope contract (v1.4.0) — historical provenance
 
 > ⚠️ **HISTORICAL FRAMING (2026-07).** hugit + githugr (campaign #3) are **DISCONTINUED**.
 > This was the hugit↔Runners integration contract ("frozen from hugit's side"); that
 > consumer is gone, so the "what hugit needs / frozen from hugit's side" framing is **dead**.
-> The mechanisms it specifies, however — §13 envelope emission, attestation/result-binding,
-> `intent_metrics_sig` — are now the **fabric's own and LIVE** (the cache-moat uses them,
-> armed in prod). Kept as the spec for those live mechanisms; read it as the fabric's own
-> wire contract, not a cross-repo obligation. Current status: `docs/product/FEATURES.md`.
+> The mechanisms it describes — §13 envelope telemetry, attestation/result-binding, and
+> `intent_metrics_sig` — are owned by CoreLink, but this file remains historical provenance
+> only. It is not an active cross-repo contract or release gate. Current behavior and
+> status: `docs/api/v1-reference.md` and `docs/product/FEATURES.md`.
 
-> **Version note — WP-R6 draft (2026-06-10):** this file is the WP-R6
-> deliverable: a draft amendment that the hugit lead will review, then apply
-> to `corelink-runners/docs/spec/hugit-integration-contract.md` once WP-R4
-> frees that tree. The v1.0 body below is REPRODUCED VERBATIM and is
-> READ-ONLY in this file; the amendment is ADDITIVE — a new section (§13)
-> plus the amendment log appended here. Nothing in §0–§12 is edited.
+> **Historical version note — WP-R6 draft (2026-06-10):** this file preserves the
+> draft amendment and the v1.0 body REPRODUCED VERBATIM. It is READ-ONLY provenance;
+> no external review, application, or cross-repo synchronization is required. The
+> amendment is ADDITIVE — a new section (§13) plus the amendment log appended here.
+> Nothing in §0–§12 is edited.
 >
-> **How to apply:** replace the v1.0 header (first paragraph and the version
-> implied by the date) with the header below, append §13 and the amendment
-> log, commit on branch `integ/seed-runner` with the normal fixup discipline
-> (no amend, status/log sanity first).
+> **Historical application note:** the old replacement, append, and
+> `integ/seed-runner` workflow is retained as provenance and must not be treated
+> as a current CoreLink task.
 
 ---
 

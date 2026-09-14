@@ -2,10 +2,11 @@
 
 > The seam between the Rust `CloudflareEngine` (this repo, `corelink-cloud-engine`) and the
 > Cloudflare **spawn-Worker + Container Durable Object** (`deploy/cloudflare/`, implemented in this
-> repository; live deployment and lifecycle remain separately unverified).
+> repository; production deployment and lifecycle evidence are maintained
+> separately in `docs/runbook/cloudflare-go-live.md`).
 > Per ADR-0008, Cloudflare Containers spawn via a Worker/DO (not REST), so this small authenticated
-> HTTP surface is what the autoscaler/Engine calls. **TRANSCRIBED on each side** (mirrors the
-> hugit/clw discipline) — a conformance vector keeps them from drifting. v0 = runner-direct (the
+> HTTP surface is what the autoscaler/Engine calls. **TRANSCRIBED on each side** (CoreLink's
+> contract discipline) — a conformance vector keeps them from drifting. v0 = runner-direct (the
 > spawned container runs the GH-Actions agent via its image entrypoint; there is no post-spawn exec).
 
 ## Auth
@@ -78,12 +79,12 @@ The repository implementation routes these three endpoints to a **Container Dura
 (`class extends Container`):
 `/v1/spawn` → `getContainer(...)` + `ctx.container.start({ image, env })`; `/v1/status` → DO liveness;
 `/v1/teardown` → stop. Co-located with R2 (in-network CAS hydration — the moat win). Instance type
-`standard-4` (4 vCPU / 12 GiB / 20 GB disk). **Live deployment and the lifecycle are unverified**
-in this repository (wrangler auth + image push are still required) — see ADR-0008's gated items
-(isolation review, R2 seam, lifecycle fit).
+`standard-4` (4 vCPU / 12 GiB / 20 GB disk). Production deployment and lifecycle
+evidence are maintained in `docs/runbook/cloudflare-go-live.md`; this frozen
+contract does not replace that operational evidence.
 
 ## Drift control
 When both sides exist, commit a conformance vector (`conformance/cloudflare-spawn.json`: a canonical
 spawn request + response) byte-identical in this repo and the Worker's, with golden tests on each side —
-the same tripwire used for hugit/clw. Until the Worker exists, this spec IS the frozen contract; changes
+the same CoreLink contract tripwire. Until the Worker exists, this spec IS the frozen contract; changes
 go through ADR-0008's owner/cross-TL review, never unilaterally.

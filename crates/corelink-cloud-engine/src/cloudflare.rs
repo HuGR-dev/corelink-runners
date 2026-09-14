@@ -48,6 +48,7 @@ use anyhow::{Result, bail};
 use corelink_runner::ContainerSpec;
 use corelink_runner::isolation::{Engine, IsolationProbe, RunningContainer};
 use corelink_runner::lease::CmdOutput;
+use corelink_runner::namespace::validate_corelink_owned_name;
 use corelink_runner::pin::PinnedImageRef;
 
 use crate::http::{HttpResponse, HttpTransport, Method};
@@ -554,6 +555,7 @@ impl<H: HttpTransport> CloudflareEngine<H> {
 
 impl<H: HttpTransport> Engine for CloudflareEngine<H> {
     fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+        validate_corelink_owned_name(&spec.name)?;
         // ── Isolation floor (parity with NorthflankEngine / DockerEngine) ──────
         // A `no_network == false` spec is admitted ONLY when it also carries the
         // egress grant `allow_egress == true` — which only `from_runner_lease`
@@ -767,7 +769,7 @@ mod tests {
     /// A CHECK-style pinned spec (`allow_egress == false`, `no_network == true`).
     fn spec(env: Vec<(String, String)>) -> ContainerSpec {
         ContainerSpec {
-            name: "hugit-job-x".to_string(),
+            name: "corelink-job-x".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),
@@ -1122,6 +1124,17 @@ mod tests {
             format!("{err:#}").contains("not content-pinned"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn spawn_rejects_foreign_resource_name_before_worker_contact() {
+        let engine = CloudflareEngine::new(ExplodingTransport, cfg());
+        let mut bad = runner_spec();
+        bad.name = "foreign-job-foreign".to_string();
+        let err = engine
+            .spawn(&bad)
+            .expect_err("foreign resource names must fail before Worker contact");
+        assert!(format!("{err:#}").contains("CoreLink-owned namespace"));
     }
 
     #[test]

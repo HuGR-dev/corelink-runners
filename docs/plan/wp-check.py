@@ -187,9 +187,9 @@ WP = {
     "T6-W9": (["A6.12"], ["INV-5"], "probe:alert-rules", 3),
 }
 
-JUDGED_TO_OWNER = {"A4.9", "A5.1", "A7.3"}
-WITHDRAWN = {"A2.2", "A5.7"}
-ITEM_KINDS = {"test", "probe", "test+probe", "judged", "—"}
+JUDGED_TO_OWNER = {"A4.9", "A5.1"}
+WITHDRAWN = {"A2.2", "A5.7", "A7.3"}
+ITEM_KINDS = {"test", "probe", "test+probe", "judged", "withdrawn", "—"}
 
 # This is the frozen principal suite, not a set of labels learned from the
 # document being checked.  In particular, changing a row from test to probe
@@ -285,7 +285,7 @@ FROZEN_ITEM_KINDS = {
     "A6.19": "test",
     "A7.1": "test",
     "A7.2": "test",
-    "A7.3": "judged",
+    "A7.3": "withdrawn",
     "A7.4": "test",
     "A7.5": "test",
     "A7.6": "test",
@@ -407,7 +407,7 @@ DAG_FILENAME = "2026-09-01-reconciled-dispatch-dag.md"
 HANDOFF_FILENAME = "2026-09-01-session-state-go-live-remediation.md"
 DAG_SCHEMA_MARKER = (
     "**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · "
-    "**Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**"
+    "**Status: PROMOTED · FROZEN · DISPATCHABLE · post-promotion quiet count 2**"
 )
 DAG_TABLE_HEADING = "## Canonical node table"
 DAG_BATCH_HEADING = "## Deterministic ready sets and proof"
@@ -3141,14 +3141,16 @@ for heading, stop_heading, expected_header, expected_ids in ACCEPTANCE_TABLES:
 # Reconcile the rendered mechanical summary with the same frozen catalogue.
 # Whitespace and Markdown wrapping do not matter; every word and count does.
 kind_counts = Counter(FROZEN_ITEM_KINDS.values())
+withdrawn_kinds = {"—", "withdrawn"}
+withdrawn_count = sum(kind_counts[kind] for kind in withdrawn_kinds)
 expected_summary = plain_markdown(
     f"""**{len(FROZEN_ITEM_KINDS)} rows — {kind_counts["test"]} `test`,
     {kind_counts["probe"]} `probe`, {kind_counts["test+probe"]} `test+probe`,
     {kind_counts["judged"]} `judged` ({", ".join(sorted(JUDGED_TO_OWNER))}), plus
-    {kind_counts["—"]} withdrawn rows ({", ".join(sorted(WITHDRAWN))});
+    {withdrawn_count} withdrawn rows ({", ".join(sorted(WITHDRAWN))});
     {len(FROZEN_ITEM_KINDS) - len(WITHDRAWN)} rows are live.** `wp-check.py`
     reports {len({i for v, _, _, _ in WP.values() for i in v})} non-judged items
-    owned exactly once and routes the three judged rows to their owners. The
+    owned exactly once and routes the two remaining judged rows to their owners. The
     separate `AU` intake is not part of these rows."""
 )
 rendered_summaries = [
@@ -3161,7 +3163,7 @@ if rendered_summaries != [expected_summary]:
         f"expected {expected_summary!r}, got {rendered_summaries}"
     )
 
-withdrawn = {i for i, k in items.items() if k == "—"}
+withdrawn = {i for i, k in items.items() if k in withdrawn_kinds}
 if withdrawn != WITHDRAWN:
     fail.append(
         f"WITHDRAWN label mismatch: expected {sorted(WITHDRAWN)}, got {sorted(withdrawn)}"

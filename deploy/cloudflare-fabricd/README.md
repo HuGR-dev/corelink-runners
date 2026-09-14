@@ -1,7 +1,10 @@
 # Deploying `corelink-fabricd` on Cloudflare Containers (gap-#1 option b)
 
-The Rust control plane (RunnerLease API · §13 envelope · attestation key) as ONE
-singleton CF Container, fronted by a thin proxy Worker. The minute cron is an
+The Rust control plane (RunnerLease API · §13 envelope telemetry · required close
+finalization · attestation key) runs as
+ONE singleton CF Container, fronted by a thin proxy Worker. The container stays
+available while real activity is recent; after 5m without a real request it may
+scale to zero and cold-start on the next request. The minute cron is an
 activity-gated watchdog: it probes only after a recent real request and refuses
 to wake an idle or uncertain shard. The runner BOXES still spawn on
 `../cloudflare` (the spawn-Worker); this is only the control-plane host. Env
@@ -27,12 +30,12 @@ npm install
 
 # 1. Secrets (NEVER in wrangler.jsonc). Values come from the OOB secrets dir;
 #    piped from file so the value is never echoed.
-npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.hugit/secrets/corelink/fabric-signing-key-prod
-npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.hugit/secrets/corelink/fabric-introspect-key
-npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.hugit/secrets/corelink/billing-ingest-key
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-spawn-token
-npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-exec-token
-npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.hugit/secrets/corelink/cf-lifecycle-token
+npx wrangler secret put FABRIC_SIGNING_KEY        < ~/.corelink/secrets/fabric-signing-key-prod
+npx wrangler secret put FABRIC_INTROSPECT_AUTH_KEY < ~/.corelink/secrets/fabric-introspect-key
+npx wrangler secret put BILLING_INGEST_AUTH_KEY    < ~/.corelink/secrets/billing-ingest-key
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN < ~/.corelink/secrets/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN < ~/.corelink/secrets/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN < ~/.corelink/secrets/cf-lifecycle-token
 
 # 2. Deploy (builds + pushes the image, creates the Worker + container + DO + cron).
 npm run deploy
@@ -41,7 +44,7 @@ npm run deploy
 The prod signing key was generated 2026-06-25 (32-byte ed25519, fingerprint
 `9f54d5ee`); its PUBLIC half — `key_id faa5b7726ccd2c52`,
 `pubkey_b64 Mo4wTL2QDnjL0inY7vasKHt1Jw7YIbAX3w2trY8824o=` — is what
-`GET /v1/attestation/key` will serve and what hugit's v2 verifier pins. Setting a
+`GET /v1/attestation/key` will serve and what the CoreLink CLI/SDK verifier pins. Setting a
 DIFFERENT key changes that pubkey, so use that exact file.
 
 ## Optional arming vars (default-off; now forwarded into the container)
@@ -66,12 +69,33 @@ of these was a silent no-op):
 Set secrets via `wrangler secret put <NAME>`; set vars in `wrangler.jsonc`'s `vars`
 block.
 
+## Emergency admission freeze
+
+Set the non-secret Worker var `FABRIC_ADMISSION_PAUSED=1` to pause new work at
+the proxy edge. The Worker returns `503` with `Retry-After: 60` before looking
+up or waking a container for these routes:
+
+- `POST /v1/leases` (new lease acquire)
+- `POST /webhooks/github` workflow_job.queued and other non-completion events
+  (autoscaler-driven new lease acquire)
+- `POST /v1/test/mint-cred-ticket` (dev/test ticket mint)
+
+The default is fail-open only when the binding is absent or exactly `0`. Any
+other value, including a malformed or whitespace-padded value, is treated as
+paused. A `workflow_job.completed` webhook is parsed at the edge and still
+forwards to Rust so credential revocation and runner teardown can complete.
+Health, attestation, lease reads, existing lease execution and credential
+redemption, cancel/teardown, and close continue through the normal proxy path
+so already-issued leases can drain. Set the var back to exactly `0` to resume
+admissions; applying the change still requires the normal owner-approved
+Worker rollout.
+
 ## Smoke (checkpoint A/B/C)
 ```sh
 HOST="https://corelink-fabricd.<account-subdomain>.workers.dev"   # printed by deploy
 curl -s $HOST/v1/health                       # → ok
 curl -s $HOST/v1/attestation/key              # → key_id faa5b7726ccd2c52 (the prod pubkey)
-# acquire with a real tenant PAT → 200 Held; GET .../envelope/meta → 200 (not 404)
+# acquire with a real tenant PAT → 200 Held; envelope/meta is optional telemetry
 ```
 
 These application-route calls are wake-capable. Use them only while validating
@@ -79,8 +103,9 @@ an approved rollout or an already-active service. During containment or an idle
 scale-to-zero check, use provider control-plane reads and do not call `/`,
 `/health`, `/v1/health`, `/v1/usage`, or internal status routes.
 
-Then hand `$HOST` to the hugit TL as `HUGIT_RUNNER_HOST` + the spawn/lease PAT
-(`HUGIT_RUNNER_PAT`), per the frozen Seam 1.
+Use `$HOST` as the CoreLink fabric URL for the direct CLI/SDK smoke. Set
+`CORELINK_URL=$HOST` and provide the tenant credential through `CORELINK_PAT`;
+there is no external-project handoff.
 
 ## Container health probe (historical behavior; not current-state evidence)
 
@@ -103,25 +128,22 @@ instance. Two failure modes were observed + closed on 2026-07-07/08:
   box**; (b) provision HTTP bounded to 30s; (c) a **`FABRIC_PROVISION_MAX_INFLIGHT`
   semaphore** (default 16) bounds concurrent provisions (excess awaits a permit
   async, not on a thread).
-- **Single close wedged the plane** (2026-07-07): ONE off-box close black-holed
+- **Single close wedged the plane** (historical implementation incident, 2026-07-07): ONE off-box close black-holed
   `/v1/health` on the 1-vCPU box. Root cause: the close's `block_in_place` pg
   work (`pg_ledger.rs`) runs ON a runtime worker; on 1 vCPU (1 worker) the whole
-  runtime stalls. Closed by **`standard-2` (2 vCPU / 2 workers)**: the blocking
-  work pins one worker, the other keeps `/v1/health` alive. **Verified 2026-07-08:**
+  runtime stalls. The configured **`standard-2` provider shape is 1 vCPU / 6 GiB /
+  12 GB**; keep the `FABRIC_PROVISION_MAX_INFLIGHT` gate and the observed health
+  probe evidence tied to that shape. **Verified 2026-07-08:**
   health stayed `200` across all 30 polls (0.4–1.0s) through a 32s close.
 
-**Close latency — diagnosed, NOT a bug (2026-07-08).** A raw close (e.g. `curl`)
-takes ~32s, but that is the **§13.2 JobClose ack window** (`ack_timeout`, hardcoded
-`Duration::from_secs(30)` at `leases.rs:964`): every off-box/agent lease registers
-a §13 CaptureHook at acquire, and the close blocks up to 30s (fail-closed) waiting
-for the client's **JobClose ack**. A non-acking test client waits the full 30s; a
-REAL acking client (hugit's A-path — proven metrics round-trip) collapses the
-window to ~0 and the close returns in **~2.7s** (teardown + attestation + 3 pg
-writes). So the close is fast for real traffic — the "slow close" was a
-non-acking-test artifact, not pg latency. The pg work itself is ~2.7s; no offload
-needed at current scale. The real requirement — the plane staying UP during any
-long ack-wait — is handled (`close_ack_gate` bounds concurrent ack-waits +
-`standard-2` keeps a worker for health; verified).
+The dated probe recorded health at `200` across 30 polls during a roughly 32-second
+close. That is historical implementation evidence, not the production contract.
+The current close contract is deterministic about ownership: close tears down the
+box, finalizes metrics, provider cost, billing, and attestation, then releases the
+lease. It does not require or await an external JobClose ACK and has no fixed
+30-second wait. Envelope ingest and poll are optional telemetry; local overflow,
+undrained residue, or an abnormal partial flush is reported through
+`capture_incomplete`.
 
 **Scaling path (not yet done):** the singleton was required only by the in-memory
 ledger. The **pg ledger has two gates**: a non-empty `DATABASE_URL` secret **and**
@@ -153,29 +175,31 @@ broke prod once (#195).** `CloudflareEngine` v0 remains **runner-only by design*
 the spawn-Worker's only container is the GitHub-Actions runner image). So:
 
 - **Cloudflare ONLY** (`CLOUDFLARE_SPAWN_WORKER_URL` var + `CLOUDFLARE_SPAWN_AUTH_TOKEN`
-  secret) → **runner** leases spawn on Cloudflare, but a **CHECK-exec** lease
-  (`allow_egress=false`) **fails CLOSED at spawn** (#198). The killer (memoized CI /
-  per-PR attested cost) dispatches CHECK-exec leases → **Cloudflare-only does NOT serve
-  the killer.** Wiring CF alone and pointing the killer at it is the #195 regression.
+  secret) → **runner** leases spawn on Cloudflare, but a **check-exec** lease
+  (`allow_egress=false`) **fails closed at spawn** (#198). The direct CoreLink
+  check/exec path therefore requires the second substrate; Cloudflare-only is a
+  runner-only configuration. Wiring CF alone and routing check/exec work to it is
+  the #195 regression.
 
 - **Rota B — BOTH substrates** (`CLOUDFLARE_SPAWN_*` **and** `NORTHFLANK_API_TOKEN`
   + `NORTHFLANK_PROJECT_ID`) → the composition selects the **Hybrid** backend
   (`select_backend(true,true)`): **runner→Cloudflare** (the R2-co-located moat),
-  **check-exec→Northflank**. This path supplies the killer's required substrate. Set all four and redeploy.
+  **check-exec→Northflank**. This is the supported dual-backend configuration for
+  the two CoreLink lease kinds. Set all four and redeploy.
 
 ```bash
 # wrangler.jsonc vars:  CLOUDFLARE_SPAWN_WORKER_URL, NORTHFLANK_PROJECT_ID
 # (+ NORTHFLANK_RUNNER_* tuning as needed; see docs/deploy/fabric-server.md)
-npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.hugit/secrets/corelink/cf-spawn-token
-npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.hugit/secrets/corelink/cf-exec-token
-npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.hugit/secrets/corelink/cf-lifecycle-token
+npx wrangler secret put CLOUDFLARE_SPAWN_AUTH_TOKEN       < ~/.corelink/secrets/cf-spawn-token
+npx wrangler secret put CLOUDFLARE_EXEC_AUTH_TOKEN        < ~/.corelink/secrets/cf-exec-token
+npx wrangler secret put CLOUDFLARE_LIFECYCLE_AUTH_TOKEN   < ~/.corelink/secrets/cf-lifecycle-token
 npx wrangler secret put NORTHFLANK_API_TOKEN          < <northflank token, OOB>
 # envVars are read at container start. Applying them requires an owner-approved
 # rollout with preflight, monitoring, and rollback; never delete/restart/deploy
 # merely to diagnose whether a variable is present.
 ```
 
-After the env becomes active, smoke BOTH kinds before handing the host to the killer: a runner
+After the env becomes active, smoke BOTH kinds before promoting the host: a runner
 acquire → 200 Held + a CF `/v1/spawn` fired; a check acquire → 200 Held + provisioned on
 Northflank (not Cloudflare). The `tests/hybrid_flip_e2e.rs` e2e pins this routing offline;
 the live smoke confirms the real backends. **Never claim boxes work off the boot log alone
@@ -185,9 +209,10 @@ the live smoke confirms the real backends. **Never claim boxes work off the boot
 
 On 2026-07-09, a bounded validation at
 `https://corelink-fabricd.gmhelmold.workers.dev` recorded the moat path working.
-The image observed in that snapshot was `@sha256:91f4b7ea…` (the #332
-cred-redemption-fix binary, tag
-`golive-20260709-credredemption` — see wrangler.jsonc for the pin). It adds the
+That snapshot used the #332 cred-redemption-fix binary, tag
+`golive-20260709-credredemption`. The canonical configured image reference is
+the `containers[0].image` value in [`wrangler.jsonc`](./wrangler.jsonc); this
+README intentionally does not duplicate a digest that can become stale. It adds the
 `validate_mint_arm` boot guard: a successful boot checks that
 `FABRIC_PUBLIC_BASE_URL` is wired when mint is armed (the earlier `cb6fca46…`
 moat-fix binary minted a
@@ -206,9 +231,10 @@ forward the mint/cred/emit vars into the CONTAINER (only the Worker saw them) �
 fail-closed on every real mint. Lesson: a 200 on a hydrating acquire does NOT prove a mint — only a
 mint-armed 503→200 transition (or a server-side mint-request log) does.
 
-**Not yet cut over:** hugit still points at the Northflank fabricd. Cutover = repoint
-`HUGIT_RUNNER_HOST` + re-pin the pubkey (`b1eba792…` → `faa5b7726…`); PAT unchanged (same introspect).
-See `docs/handoff/2026-07-07-CUTOVER-READY-to-hugit-TL-…`. Trigger is the owner's.
+The historical Northflank cutover record is retained in dated handoffs. Current
+operation is the Cloudflare fabric directly; validate it with the CoreLink CLI/SDK
+and the public API, then re-pin the returned attestation key if the approved
+CoreLink deployment changes it.
 
 **Controlled-change note:** to rebuild the binary from the repository root, run
 `docker build -f crates/corelink-fabric-server/Dockerfile -t corelink-fabricd-fabricdcontainer:<tag> .`

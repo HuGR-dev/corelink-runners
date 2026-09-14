@@ -1,0 +1,43 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "b2-fabricd-sleepwake-fixture-red",
+  "kind": "probe",
+  "status": "RED",
+  "observed_at": "2026-09-08T04:44:29.000000Z",
+  "contract": {
+    "attempts_required": 10,
+    "phase": "candidate",
+    "matrix_id": "run-producer-red",
+    "wake_route": "/health",
+    "health_path": "/health",
+    "fabric_origin": "https://fabric.example",
+    "fabric_url": "https://fabric.example",
+    "expected_digest": "sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5",
+    "mutating_operations": []
+  },
+  "preflight": {
+    "provenance": {
+      "source_repo": "test-checkout"
+    }
+  },
+  "failure": {
+    "kind": "assertion",
+    "message": "fabricd health wake did not return HTTP 200"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "attempt_id": "run-producer-red-candidate-01",
+      "started_at": "2026-09-08T00:00:00Z",
+      "finished_at": "2026-09-08T00:01:00Z",
+      "phase": "candidate",
+      "matrix_id": "run-producer-red",
+      "outcome": "RED",
+      "expected_worker_version": "candidate-version",
+      "failure": {
+        "kind": "assertion",
+        "message": "fabricd health wake did not return HTTP 200"
+      }
+    }
+  ]
+}

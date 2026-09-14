@@ -2,8 +2,9 @@
 
 **Ephemeral, cache-warm CI/build compute — billed by concurrency, not minutes.**
 
-CoreLink expansion campaign #1. The compute substrate beneath CoreLink Cache and
-beneath hugit's memoized-CI forge:
+CoreLink expansion campaign #1. The compute substrate for CoreLink Cache and
+direct CoreLink consumers. A former memoized-CI integration was a discontinued
+external design and is retained only in historical provenance:
 
 ```
 HuGR (the company / brand)
@@ -11,7 +12,6 @@ HuGR (the company / brand)
      ├─ Cache        — content-addressed CAS + Action Cache   (live)
      ├─ Runners      — ephemeral compute on the cache         (THIS REPO)
      └─ Workspaces   — workspace-as-object                    (campaign #2)
-   hugit (the forge for agent fleets)                         (BUILT)
 ```
 
 ## What it is
@@ -66,15 +66,15 @@ Eight crates in one Cargo workspace (`crates/`):
 
 | Crate | Role |
 |---|---|
-| `corelink-runner` | Execution core: lease lifecycle, isolation, teardown, boot, concurrency/expiry/recovery, Actions-YAML shim, fence enforcement (`materialize`/`enforce`), X4 supply-chain oracle, §13 envelope (derivation collector, CaptureHook, JobClose ack). |
+| `corelink-runner` | Execution core: lease lifecycle, isolation, teardown, boot, concurrency/expiry/recovery, Actions-YAML shim, fence enforcement (`materialize`/`enforce`), X4 supply-chain oracle, §13 envelope (derivation collector, CaptureHook, local close finalization). |
 | `corelink-fabric` | Control-plane core: `LeaseLedger` trait + in-memory and Postgres (`PgLedger`) implementations, `SlotMeter` bounded billing journal, `FairScheduler` (CP4), plan/tier types, `BoxRegistry`, crash/expiry reaper. |
 | `corelink-fabric-server` | HTTP server binary (`corelink-fabricd`): axum router, auth middleware, lease/exec/attestation handlers, tower load-shed, global concurrency limit, admin tenant endpoint, cloud backend wiring. |
 | `corelink-fabric-api` | Frozen wire DTOs: `AcquireRequest`, `ExecRequest`, `CloseResponse`, etc. Shared by the server and the CLI — no drift possible. |
 | `corelink-cloud-engine` | Northflank Job-run adapter behind the `Engine` seam; `HttpTransport` trait quarantines `ureq`; swap-in for Firecracker when bare-metal arrives. |
 | `corelink-cli` | The `corelink` client/ops binary: `smoke` (post-deploy health + fail-closed gate verification) and `verify` (customer-trust primitive: verify `result_binding_sig_v2` against the published ed25519 key). |
-| `corelink-runners-contracts` | Frozen wire-contract types transcribed from hugit-contracts (`RunnerLease`, `RunnerState`, `FenceManifest`, `MaterializedEntry`, `IntentMetrics`). Byte-identical conformance vectors under `conformance/`; golden tests verify SHA-256 + membership + tamper rejection. |
+| `corelink-runners-contracts` | Frozen wire-contract types transcribed from the frozen contract snapshot (`RunnerLease`, `RunnerState`, `FenceManifest`, `MaterializedEntry`, `IntentMetrics`). Byte-identical conformance vectors under `conformance/`; golden tests verify SHA-256 + membership + tamper rejection. |
 
-**Wire-contract law:** types are transcribed on each side; `hugit-contracts` is
+**Wire-contract law:** types are transcribed on each side; the frozen contract snapshot is
 frozen and never imported. `deny.toml` enforces crates.io-only external deps (no
 `git`/`path` dep in either direction). The conformance vectors are the drift
 tripwire — either side's golden tests go red on any type divergence.
@@ -118,7 +118,8 @@ Northflank remains the ADR-0008 fallback substrate (not the live one) — see
 
 What remains before paying customers: the CoreLink auth+billing flip
 (`FABRIC_AUTH_BACKEND=corelink`, pending corelink-server `runners_entitlement`),
-hugit adopting `result_binding_sig_v2`, and M2 self-serve onboarding.
+external verifier adoption of `result_binding_sig_v2`, M2 self-serve onboarding,
+and the direct customer validation/GA checklist.
 
 ## Quickstart — local single-tenant fabric
 
@@ -174,8 +175,9 @@ free plan + private repo, no branch protection).
 | [`docs/product/pricing.md`](docs/product/pricing.md) | Pricing model: full rationale, loss-impossible guarantee, competitive position |
 | [`docs/cli.md`](docs/cli.md) | `corelink` CLI reference (`smoke`, `verify`) |
 | [`docs/api/v1-reference.md`](docs/api/v1-reference.md) | Full `/v1` HTTP API reference — every endpoint, DTO, auth, status code |
-| [`docs/spec/hugit-integration-contract.md`](docs/spec/hugit-integration-contract.md) | fabric wire + envelope contract v1.4.0 (historical hugit framing — hugit discontinued; the §13/attestation mechanisms it specs are the fabric's own + live) |
-| [`docs/spec/corelink-fabric-stub.md`](docs/spec/corelink-fabric-stub.md) | CoreLink-side fabric/scheduler/billing stub |
+| [Legacy integration contract](docs/spec/hugit-integration-contract.md) | Historical wire + envelope provenance (v1.4.0); the active contract is owned by CoreLink |
+| [Historical fabric design stub](docs/spec/corelink-fabric-stub.md) | Retired CoreLink-side fabric/scheduler/billing design skeleton |
+| [Historical seam map](docs/interop.md) | Retired M0 interop map; current seams are documented by the API and ADRs |
 | [`docs/deploy/fabric-server.md`](docs/deploy/fabric-server.md) | `corelink-fabricd` env vars and Docker deploy |
 | [`docs/deploy/northflank-postgres-runbook.md`](docs/deploy/northflank-postgres-runbook.md) | Northflank + Postgres production deploy runbook |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Full item-by-item roadmap: closed, in-flight, remaining |

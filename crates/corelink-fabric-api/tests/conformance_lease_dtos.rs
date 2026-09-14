@@ -3,18 +3,18 @@
 //!
 //! ## Why these exist (the drift tripwire)
 //!
-//! The hugit lease-client drifted from these DTOs THREE times (acquire-req,
+//! The external lease client drifted from these DTOs THREE times (acquire-req,
 //! acquire-resp, close) because there were no canonical vectors. These golden
 //! byte-exact tests close that gap. The committed
 //! `conformance/{AcquireRequest,AcquireResponse,CloseRequest,CloseResponse}.json`
-//! files are **byte-identical in both repos**: the hugit lease-client
+//! files are **byte-identical in both repos**: the external lease client
 //! transcribes them verbatim, and either side's golden test breaks on ANY type
 //! divergence — so a difference is never silent. This is the same drift-tripwire
 //! discipline as `conformance/RunnerLease.json` and
 //! `conformance/result_binding_v2.json`.
 //!
 //! Wire-contract law (`CLAUDE.md`): types are TRANSCRIBED on each side;
-//! hugit-contracts is frozen, never imported; conformance vectors are committed
+//! the frozen contract snapshot is frozen, never imported; conformance vectors are committed
 //! byte-identical in both repos and are the drift tripwire. A diff on either
 //! side is the trip.
 //!

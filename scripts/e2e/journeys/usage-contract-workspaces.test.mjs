@@ -322,9 +322,9 @@ test('JOURNEY · the no-import law holds and the sig-vector keyset is served liv
     .step('deny.toml enforces crates.io-only (no git/path dep either direction)', async (ctx) => {
       let deny = '';
       try { deny = readFileSync(new URL('../../../deny.toml', import.meta.url), 'utf8'); } catch { /* absent */ }
-      // The no-import law: hugit-contracts is frozen/never-imported; sync is the vector, not a shared crate.
+      // The no-import law: the former external contract crate is never imported; sync is the vector, not a shared crate.
       const guardsSources = /unknown-registry|allow-registry|unknown-git|\[sources\]/.test(deny) || deny.length > 0;
-      return check(guardsSources, `deny.toml present and gating dependency sources (crates.io-only; hugit-contracts never imported)`, { denyBytes: deny.length, note: 'the vector IS the contract shadow on this side — byte-exactness is the transcription proof, not a shared dependency' });
+      return check(guardsSources, `deny.toml present and gating dependency sources (crates.io-only; external contract crate never imported)`, { denyBytes: deny.length, note: 'the vector IS the contract shadow on this side — byte-exactness is the transcription proof, not a shared dependency' });
     })
     .step('the attestation keyset the sig-vector describes is served LIVE (200)', async (ctx) => {
       // intent_metrics_sig / attestation_key_set are conformance vectors; the live endpoint serves the keyset.
@@ -338,12 +338,12 @@ test('JOURNEY · the no-import law holds and the sig-vector keyset is served liv
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // S16.3 — "Adding a new shared vector is a coordinated, gated act."  PURE GAP (owner-gated).
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-test('JOURNEY · adding a new conformance vector is owner-gated, hugit-side-first (GAP)', { skip }, async () => {
+test('JOURNEY · adding a new conformance vector is CoreLink-owned and contract-first (GAP)', { skip }, async () => {
   await new Journey('Adding a conformance vector is owner-gated', { sid: ['S16.3'], persona: 'P16 seam owner', atoms: ['F-3.3'] })
     .step('the live example of a coordinated add is committed (intent_metrics_sig + IntentMetrics)', async (ctx) => {
       const m = manifestText();
       const present = m.includes('intent_metrics_sig.json') && m.includes('IntentMetrics.json');
-      return check(present, `intent_metrics_sig.json + IntentMetrics.json are committed vectors (the coordinated-add exemplar)`, { present, GAP: 'adding a NEW shared vector = owner/hugit-techlead-gated, hugit-side-PR-FIRST; the fabric never adds one unilaterally. hugit is DISCONTINUED ⇒ no new shared vectors are minted — this seam is frozen by construction' });
+      return check(present, `intent_metrics_sig.json + IntentMetrics.json are committed vectors (the coordinated-add exemplar)`, { present, GAP: 'adding a NEW shared vector = CoreLink contract-owner review first; the vector must land in this repository before clients consume it. The seam is frozen by construction until the CoreLink contract owner approves an additive vector' });
     })
     .run();
 });

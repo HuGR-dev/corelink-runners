@@ -161,6 +161,8 @@ export interface AuthorizedDevenvStart {
     readonly casPat: string;
     readonly patId: string;
     readonly expiresAtMs: number;
+    /** Server W5 includes this field; optional only for pre-W5 stored/test grants. */
+    readonly lifecycleGeneration?: string;
     readonly computeReservationId?: string;
   };
 }

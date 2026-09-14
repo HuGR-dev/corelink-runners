@@ -29,6 +29,7 @@ interface DrainEvent {
   pause_seq: number;
   repo: string;
   job_id: string;
+  installation_id: string;
   effect_id: string;
   state: "QUEUED" | "CLAIMED" | "EFFECT_COMMITTED";
   claim: { owner: string; lease_epoch: number } | null;
@@ -38,6 +39,7 @@ interface DrainEvent {
 const metaKey = "containment:v1:meta";
 const eventKey = (eventId: string) => `containment:v1:event:${eventId}`;
 const pauseKey = (sequence: number) => `containment:v1:pause:${String(sequence).padStart(20, "0")}`;
+const installationTombstoneKey = (installationId: string) => `normal-inbox:v1:installation-tombstone:${encodeURIComponent(installationId)}`;
 
 function exactDrainTuple(value: unknown): OwnerTuple | null {
   const tuple = normalizeTuple(value);
@@ -86,6 +88,10 @@ export async function admitDrainOwnerInTransaction(
     || event.claim.lease_epoch !== tuple.lease_epoch
     || event.effect_permit !== null || event.repo !== tuple.repo || event.job_id !== tuple.job_id
     || event.effect_id !== tuple.effect_id) return false;
+  // This transaction is the admission linearization point for every contained
+  // drain path. A deletion that committed before it cannot be followed by an
+  // external claim or provider effect.
+  if (await storage.get(installationTombstoneKey(event.installation_id)) !== undefined) return false;
 
   const pointerKey = activeKey(tuple);
   const pointer = await storage.get<OwnerPointerV1 | null | unknown>(pointerKey);

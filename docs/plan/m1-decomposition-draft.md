@@ -1,4 +1,4 @@
-# M1 — the production fabric: decomposition DRAFT
+# M1 — the production fabric: decomposition DRAFT (retired historical plan)
 
 > ⚠️ **hugit / campaign #3 is DISCONTINUED (owner-confirmed 2026-07).** This draft was
 > authored when hugit was the intended anchor consumer, so it frames the M1 done-gate and
@@ -7,12 +7,17 @@
 > own and live; the fabric is now direct-to-ICP. The seam is no longer "frozen from an
 > external hugit side" — it is the fabric's own wire/envelope contract.
 >
-> status: PROPOSAL for owner review · author: techlead session 2026-06-12 · not yet critic-reviewed
+> **RETIRED HISTORICAL DRAFT — NOT AN ACTIVE PLAN OR RELEASE GATE.** ADR-0014
+> supersedes its external-consumer framing. The dated decomposition and citations
+> remain for provenance; current status and acceptance criteria live in
+> `docs/ROADMAP.md` and the CoreLink API/feature docs.
+>
+> status: historical proposal · author: techlead session 2026-06-12 · not an active gate
 >
 > Inputs: `docs/whitepaper/corelink-runners-v1.md` (canonical) · `docs/product/product.md` ·
 > `docs/ROADMAP.md` (M1 epic list, agreed) · `docs/spec/hugit-integration-contract.md` v1.2.0
-> (the fabric wire/envelope contract — historical hugit framing; hugit discontinued) ·
-> `docs/spec/corelink-fabric-stub.md` · `docs/interop.md` ·
+> (historical wire provenance) · `docs/spec/corelink-fabric-stub.md` (retired stub) ·
+> `docs/interop.md` (retired M0 seam map) ·
 > code on `integ/seed-runner` post `v0.1.0-seed`. Decided principles are respected, not
 > reargued: concurrency pricing never per-minute · cache-warm boot · fail-closed isolation ·
 > M1 replaces the transport, not the contract · identity via the HuGR account (ADR-0002) ·

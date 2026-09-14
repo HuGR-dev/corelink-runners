@@ -1,17 +1,30 @@
 # Reconciled dispatch DAG — rev6 Round-12 repair draft
 
-**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: NOT FROZEN · NOT DISPATCHABLE · quiet count 0**
+**Date:** 2026-09-01 · **Schema:** `dispatch-dag/v1` · **Status: PROMOTED · FROZEN · DISPATCHABLE · post-promotion quiet count 2**
 
 This is the sole canonical dispatch registry. Every plan, delta, triage table, handoff and
-dispatcher must reference this file and must not restate its DAG. The current Round-12 repair tree
-has not received a cold review and is **NOT QUIET**, so the table is a schedule calculation and no
-row is authorized yet. This staged
-input must first receive two consecutive quiet reviews over byte-identical bytes. Promotion is a
-normative new snapshot, resets quiet count to zero, and must itself receive two consecutive quiet
-reviews over byte-identical promoted bytes before the one clean post-incident baseline can be
-captured and the dispatch freeze discussed. After that sequence lifts the freeze, a row may run when
-its own hard predecessors are satisfied: an unrelated decision/obstacle/relay token does not stop
-the whole graph.
+dispatcher must reference this file and must not restate its DAG. The staged input
+`fdf3a27fab6aa2231323ed6a95af369ae46f136a` received two valid, independent
+`QUIET_PROMOTE` conclusions over byte-identical bytes and is promoted as the normative snapshot.
+Promotion reset the counter. Two independent POST reviews of
+`220090f8d9a0408c955d2f7a915308f6496028f8` then concluded
+`QUIET_ENABLE_DISPATCH`, and that clean exact-target snapshot is the post-incident baseline.
+The canonical dispatch lock is lifted. A row may run only when its own hard predecessors and
+per-WP gates are satisfied: an unrelated decision/obstacle/relay token does not stop the whole
+graph.
+
+## Promotion record — 2026-09-07
+
+The valid PRE reviews targeted `fdf3a27fab6aa2231323ed6a95af369ae46f136a`:
+`b2_quiet_pre_2` and `b2_quiet_pre_replacement`, each concluded `QUIET_PROMOTE`.
+`b2_quiet_pre_1` targeted an unrelated root SHA (`19eb…`) without the target worktree and is
+recorded without quiet credit. POST review `b2_quiet_post_1` concluded
+`QUIET_ENABLE_DISPATCH` with 182/182 `gates-selftest` PASS (credit 1/2), and
+`b2_gate_adjudicator` independently concluded `QUIET_ENABLE_DISPATCH` with WP/ledger PASS
+(credit 2/2), both on `220090f8d9a0408c955d2f7a915308f6496028f8`.
+`b2_quiet_post_2` is discarded HOLD/no credit. The clean post-incident baseline is captured at
+that same SHA. The freeze fixes canonical bytes and scope and enables dispatch calculation only;
+it grants no product, CI, live or delivery credit and does not waive any row blocker.
 
 `FABRIC_PG_DISABLED=1` is a production durability and green-credit interlock, not an implementation
 lock. It blocks T1-W6 durable-PG success, every dependent production proof, and the final live flip;
@@ -693,15 +706,15 @@ B22: T1-W4
 
 The checker validates that every predecessor token is in the registry, every WP appears exactly
 once in the ready-set output, no batch exceeds eight, and the final emitted count equals the table
-vertex count. This rendering has 22 batches, 69 unique emissions and maximum width eight. Kahn's
+vertex count. This rendering has 23 batches, 70 unique emissions and maximum width eight. Kahn's
 algorithm consumed all vertices (no residual indegree), proving this version acyclic. A future
 change must regenerate the batches and update `schema: dispatch-dag/v1`; hand-edited edges or
 repeated DAG text in another document are invalid.
 
-The table and batches remain **NOT DISPATCHABLE** until the staged snapshot has two quiet rounds,
-the normative promotion has reset quiet count, the byte-identical promoted snapshot has two more
-quiet rounds, and the clean post-incident baseline exists. After that freeze lifts, an unresolved
-D/O/R token blocks only the rows that name it and their descendants. `FABRIC_PG_DISABLED=1` may
+The table and batches are **DISPATCHABLE** because the staged snapshot received two quiet rounds,
+the normative promotion reset the count, the byte-identical promoted snapshot received two more
+quiet rounds, and the clean post-incident baseline exists. An unresolved D/O/R token blocks only
+the rows that name it and their descendants. `FABRIC_PG_DISABLED=1` may
 remain armed during implementation and safety containment; it blocks T1-W6 durable-PG green,
 dependent production proof credit and the final production live flip, not unrelated code/test
 dispatch.

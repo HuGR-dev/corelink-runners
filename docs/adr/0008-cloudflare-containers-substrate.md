@@ -89,8 +89,9 @@ this swap.
 ### The spawn-Worker HTTP contract IS the new seam
 
 `deploy/cloudflare/` (Worker) and `corelink-cloud-engine` (Rust client) are TRANSCRIBED against this
-contract on each side (mirrors the hugit/clw discipline). Freeze it before either side builds against
-it; a conformance vector keeps them from drifting.
+contract on each side (the CoreLink contract discipline). Freeze it before either side builds against
+it; a conformance vector keeps them from drifting. Any former external consumer is historical
+provenance only and cannot gate this contract.
 
 ## What is buildable now (weekend, no Northflank, no live account) vs gated
 
@@ -138,7 +139,9 @@ it; a conformance vector keeps them from drifting.
 
 **Decision.** `CloudflareEngine` v0 is **runner-only by design** (ADR-0007): the spawn-Worker's
 only container is the GitHub-Actions runner image, so a CHECK-exec spec (`allow_egress=false`) fails
-CLOSED at spawn (hardened in #198). The killer (githugr/hugit memoized CI) needs CHECK-exec boxes.
+CLOSED at spawn (hardened in #198). The former external memoized-CI use case is discontinued and
+cannot gate CoreLink; the accepted architecture still supports CHECK-exec boxes where the product
+requires them.
 Rather than build a native CF CHECK-exec endpoint now (**rota A** — multi-day, deferred), the fabric
 routes by lease KIND:
 

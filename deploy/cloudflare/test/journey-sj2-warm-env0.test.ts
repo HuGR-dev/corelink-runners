@@ -236,6 +236,11 @@ let billStatus = 200;
 let mintTenant = "acme";
 let mintMaxConcurrency: number | undefined = 5;
 let mintBodies: unknown[] = [];
+// GitHub returns the numeric runner identity alongside a JIT config.  The
+// retry path must delete that registration before it is allowed to mint the
+// next attempt; omitting it makes the production fail-closed fence stop after
+// the first failed start and turns this fixture into a false one-attempt test.
+let jitMinted = 0;
 const issuedOperations = new Map<string, string>();
 let revokeBodies: unknown[] = [];
 let billBodies: unknown[] = [];
@@ -256,7 +261,17 @@ function installFetchRouter() {
       fetchCalls.push(url);
       if (url.includes("generate-jitconfig")) {
         if (jitStatus !== 200) return new Response("jit boom", { status: jitStatus });
-        return new Response(JSON.stringify({ encoded_jit_config: "jit-encoded-xyz" }), { status: 200 });
+        jitMinted += 1;
+        return new Response(JSON.stringify({
+          encoded_jit_config: "jit-encoded-xyz",
+          runner: { id: 900 + jitMinted },
+        }), { status: 200 });
+      }
+      // A failed start owns a real GitHub runner registration.  The worker
+      // deletes that exact registration before retrying, so the fixture must
+      // model the successful 204 fence as well as the mint response.
+      if (/\/actions\/runners\/\d+$/.test(url) && (init?.method ?? "GET").toUpperCase() === "DELETE") {
+        return new Response(null, { status: 204 });
       }
       if (url.includes("/internal/v1/runner/authorize")) {
         return new Response(JSON.stringify({
@@ -462,6 +477,7 @@ beforeEach(() => {
   billStatus = 200;
   mintTenant = "acme";
   mintMaxConcurrency = 5;
+  jitMinted = 0;
   startWithEnvBehavior = async () => {};
   teardownBehavior = async () => {};
   vi.mocked(getContainer).mockClear();

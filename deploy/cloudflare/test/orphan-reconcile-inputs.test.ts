@@ -6,7 +6,7 @@
 // injects fakes for both and so never exercised the real helpers).
 //
 //  1. listRunningInstances MUST scope to the runner app only. The CF account also
-//     hosts corelink-prod-* (customer-serving), githugr-*, fabricd, and this
+//     hosts corelink-prod-* (customer-serving), unrelated apps, fabricd, and this
 //     worker's own checkhost app — none write `sbox:`, so an unscoped sweep flags
 //     every long-running instance of them as a false orphan.
 //  2. listSpawnedBoxHandles MUST paginate the `sbox:` KV list and fail closed. A
@@ -73,25 +73,25 @@ const enumEnv = () =>
 describe("listRunningInstances — app scoping", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("returns ONLY runner-app instances; prod/githugr names never surface", async () => {
+  it("returns ONLY runner-app instances; unrelated app names never surface", async () => {
     const apps = [
       { id: RUNNER_APP_ID, name: "corelink-spawn-worker-runnercontainer" },
       { id: "prod-app-id", name: "corelink-prod-corelinkserver-prod" },
-      { id: "githugr-app-id", name: "githugr-githugrcontainer" },
+      { id: "unrelated-app-id", name: "unrelated-app-container" },
     ];
     vi.stubGlobal(
       "fetch",
       mockCfFetch(apps, {
         [RUNNER_APP_ID]: { instances: [runInst("runner-box-1"), runInst("runner-box-2")] },
         "prod-app-id": { instances: [runInst("prod-server-live")] },
-        "githugr-app-id": { instances: [runInst("githugr-live")] },
+        "unrelated-app-id": { instances: [runInst("unrelated-live")] },
       }),
     );
     const out = await listRunningInstances(enumEnv());
     const names = out.map((i) => i.name).sort();
     expect(names).toEqual(["runner-box-1", "runner-box-2"]);
     expect(names).not.toContain("prod-server-live");
-    expect(names).not.toContain("githugr-live");
+    expect(names).not.toContain("unrelated-live");
   });
 
   it("runner app absent ⇒ returns [] and logs orphan_scan_runner_app_missing (fail-quiet, loud)", async () => {

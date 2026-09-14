@@ -5,6 +5,11 @@
 > pricing goes public. This is the "what & why & how-much"; the integration mechanics
 > live in `docs/spec/`.
 
+> **Product boundary (current):** CoreLink Runners is specified and sold directly
+> to CoreLink customers. Hugit and Githugr are discontinued external projects;
+> neither is a current ICP, consumer, owner, dependency, or go-live gate. The
+> former integration and reseller shape is retained only as historical provenance.
+
 ---
 
 ## 1. The one-sentence product
@@ -60,15 +65,15 @@ both price and speed, and the gap widens exactly as fleets scale.
 - *"Every job re-downloads the same 1.2 GB of deps. I want runners that already have
   them warm so a build starts in seconds, not minutes."*
 
-### ICP-C — hugit (campaign #3, DISCONTINUED — retained as the historical anchor-tenant profile)
-> hugit / campaign #3 is discontinued (owner-confirmed 2026-07); this ICP is kept as the
-> historical memoized-check profile the fabric was built to serve. The same shape is now
-> served direct-to-ICP.
+### Historical profile — former memoized-check tenant (withdrawn)
+> The former external campaign #3 is discontinued (owner-confirmed 2026-07).
+> This profile remains only as historical context for the memoized-check shape;
+> the same technical capability is specified for direct CoreLink customers.
 - *"As a landing queue, when a PR turns red I must execute the affected memoized
   checks on demand: cache-warm, deterministic (byte-identical so my content-memo holds),
   isolated, attested — and get the CheckResult bytes back. I do not want to operate
-  metal. Runners is my execution substrate."* (See `docs/spec/hugit-integration-contract.md` —
-  the fabric wire/envelope contract, historical hugit framing.)
+  metal. Runners is my execution substrate."* (See the historical integration
+  contract snapshot in `docs/spec/`; it is not a current product dependency.)
 
 ### ICP-D — Finance / eng-leadership (the buyer)
 - *"I want one predictable line item, not a usage graph that spikes when the team ships.
@@ -84,7 +89,7 @@ both price and speed, and the gap widens exactly as fleets scale.
 | **Cache-warm boot** | A runner spins up with CAS/AC pre-warmed; deps/toolchain local. | Only possible because we own the cache. |
 | **Memoized execution** | If `action_digest` is already in the AC ⇒ return the stored result, 0 exec. | The cache turns compute into a lookup. |
 | **Ephemeral microVMs** | Each job in a fresh, isolated, fail-closed sandbox; torn down after. | Untrusted/agent code runs safely; dense packing = margin. |
-| **Secrets broker** | Secrets resolved into the job without ever landing on the box image/disk. | Inherited from hugit's C5b discipline; agent-safe. |
+| **Secrets broker** | Secrets resolved into the job without ever landing on the box image/disk. | CoreLink's C5b discipline; agent-safe. |
 | **Attestation** | The runner signs *what it ran* (image digest + inputs + result hash). | Feeds provenance / transparency-log consumers (attestation is the fabric's own). |
 | **REAPI-ish exec contract** | Bazel-class remote-execution semantics on top of the cache. | Slots under existing build tools. |
 
@@ -128,8 +133,9 @@ The COGS of a parallel-runner slot:
 
 Target: **> 50% gross margin at realistic utilization**, same bar as the cache product,
 *without* a markup on minutes (the value is the cache + the flat predictability, not a
-per-minute spread). **Action for the CoreLink techlead:** put real metal/density numbers
-behind this in `docs/spec/corelink-fabric-stub.md`.
+per-minute spread). **Historical design reference:** the former metal/density
+skeleton is retained in [`docs/spec/corelink-fabric-stub.md`](../spec/corelink-fabric-stub.md)
+and is not an active work item.
 
 ---
 
@@ -153,13 +159,14 @@ cross-tenant lever only deepens the gap when it lands.
 
 ## 8. Roadmap (campaign #1)
 
-- **M0 — Spec lock (now):** this repo. Freeze the fabric wire contract (historical hugit
-  framing; hugit discontinued); CoreLink techlead fills the fabric stub; agree COGS/pricing
+- **M0 — Spec lock (now):** this repo. Freeze the CoreLink fabric wire contract;
+  historical external framing is preserved only in the contract snapshot. CoreLink
+  techlead fills the fabric stub; agree COGS/pricing
   with the owner.
 - **M1 — MVP fabric:** single region, 2/4-vCPU ephemeral microVMs, cache-warm boot off
   CAS/AC, the exec/lease/attestation contract green against the runner client,
   per-tenant concurrency caps + fairness. **Replaces the interim SSH transport**
-  (`hugit-runner-01`, the historical interim box) **with the production fabric — same
+  (the historical interim SSH box) **with the production fabric — same
   `RunnerLease` semantics, production grade, multi-tenant.**
 - **M2 — Direct GA:** self-serve concurrency plans, the GitHub-Actions-shim front door,
   billing meters, dashboards, SLOs. Onboarding via the **HuGR account** (ADR-0002).
@@ -172,7 +179,6 @@ cross-tenant lever only deepens the gap when it lands.
 
 1. **Slot price + size ladder** (§5) and the GitHub-anchor discount target.
 2. **Oversubscription policy** (§6 lever 3) — how aggressively to resell idle within SLO.
-3. **Packaging** — direct-to-ICP front door on one fabric (the via-hugit reseller door is
-   moot: hugit discontinued). The historical "hugit customer never sees a Runners line item"
-   invisible-COGS rule is retained as the reseller-packaging pattern should one recur.
+3. **Packaging** — direct-to-ICP front door on one fabric. The former invisible-COGS
+   reseller model is withdrawn; its pricing lesson remains historical context only.
 4. **Free-tier shape** — shared fair-use vs none (abuse surface for untrusted compute).

@@ -42,7 +42,7 @@ Probed against the live fabric (`corelink-fabricd.gmhelmold.workers.dev`) at rev
   authenticates live. (Caveat: a *valid* acquire spawns a real box — real cost/side-effect; and the moat
   test-mint endpoint is currently **disarmed**, so moat-mint cells either re-arm `FABRIC_TEST_MINT_KEY`
   or ride the Door-A dogfood path.)
-- **MULTI-TENANT UNLOCK (D2 is no longer X4), 2026-07-19:** the CoreLink e2e env (`~/.hugit/secrets/
+- **MULTI-TENANT UNLOCK (D2 is no longer X4), 2026-07-19:** the CoreLink e2e env (`~/.corelink/secrets/
   e2e-prod-env.sh`) carries **multiple real tenant/tier PATs** (Free/Solo/Pro/Enterprise + a **second
   tenant B**), all introspect-valid → all authenticate against fabricd. Proven live (no spawn):
   **entitlement scales per-tenant** (`plan_cap` Free=1 · TenantB=2 · Pro=10 · Enterprise=100 — the
@@ -57,7 +57,7 @@ Not an estimate — counted from the H3 badges (55 F + 155 S):
 - **Owner/external-gated = 43** (🔵). Contains BOTH pure owner-flips (GA billing, vCPU-wall, RAISE-N)
   AND the external-actor-gated cells (external-org install click, 2nd real tenant). These are the
   load-bearing X4 dependencies even though the ledger badges them 🔵.
-- **X4-pure = 2** (⚪ — S2.1.1, S2.1.3, hugit-driven, campaign #3 discontinued).
+- **X4-pure = 2** (⚪ — S2.1.1, S2.1.3, direct CoreLink check/SDK cells awaiting their live fixture; no external project is required).
 - **Planned / campaign #2 = 2** (⚫ — F-2.4 Workspaces door, F-5.10 multi-size resolver).
 
 A few 🟡 carry an X4 *tail* (e.g. full `[clw] cache hit`, S2.5.2 two-front-doors) — reflected per-atom
@@ -205,7 +205,7 @@ Extracted verbatim from `FEATURES.md`. Each maps to `>= 1` suite cell (enforced 
 | F-1.5 entitlement | 🟡 | DEFAULT-OFF | TS-1 | E1 | fabricable |
 | F-1.6 anti-abuse rails | 🟡 | LIVE/PLANNED | TS-3/TS-5 | E2 | fabricable (mining=planned) |
 | F-2.1 direct front door | 🟢 | LIVE dogfood | TS-2 | E3 | fabricable (external=X4) |
-| F-2.2 hugit door (discont.) | 🟢 | discont. | TS-1 | E1 | X4 (hugit dead) |
+| F-2.2 CoreLink memoized-check API/SDK | 🟢 | LIVE | TS-1 | E1 | fabricable through the direct CoreLink contract |
 | F-2.3 `corelink run` | 🟢 | LIVE | TS-2 | E3 | fabricable |
 | F-2.4 Workspaces door | ⚫ | PLANNED | TS-1 | E0 | campaign #2 |
 | F-2.5 agent-exec seam | 🟡 | built | TS-1 | E1 | fabricable (e2e=X4) |
@@ -259,12 +259,18 @@ Extracted verbatim from `FEATURES.md`. Each maps to `>= 1` suite cell (enforced 
 Extracted verbatim from `USE-SCENARIOS.md`. Per-persona coverage + the explicit X4/owner call-outs.
 The critic (§4) enforces **per-S-id** cell existence; this table is the human-readable disposition.
 
+**P2 provenance/disposition.** The P2 S-ids remain verbatim historical atoms from
+`USE-SCENARIOS.md`; that source records the discontinued external persona. This active
+suite maps those atoms to a direct CoreLink CLI/SDK fixture so the coverage ledger stays
+complete. That mapping is an explicit test transformation with historical provenance;
+it does not claim Hugit/githugr adoption, ownership, dispatch, or external live evidence.
+
 | Persona | S-ids | primary suite | fabricable live | X4 / owner-gated (the honest residual) |
 |---|---|---|---|---|
 | P1 dev (46) | S1.1.1–S1.7.5 | TS-2/TS-3 | dogfood job, warm/cold boot, matrix, ceiling, recovery | external install (S1.1.1/2), full cache-hit smoke (S1.2.1 tail), multi-size (S1.3.3/4), GPU/arch (S1.3.4) |
-| P2 hugit (10) | S2.1.1–S2.5.2 | TS-1 | contract/attested-cost cells | **all hugit-driven = X4** (campaign #3 discontinued) |
+| P2 CoreLink check/SDK user (10) | S2.1.1–S2.5.2 | TS-1 | contract/attested-cost cells | direct CoreLink CLI/SDK fixture |
 | P3 workspaces (7) | S3.1–S3.7 | TS-1 | spine E0 | **campaign #2** (SKUs planned) |
-| P4 agent (7) | S4.1–S4.7 | TS-1/TS-5 | isolation, attested metrics, contention | full agent-loop e2e = X4 (hugit dials) |
+| P4 agent (7) | S4.1–S4.7 | TS-1/TS-5 | isolation, attested metrics, contention | full agent-loop e2e = X4 until a direct CoreLink CLI/SDK fixture is armed |
 | P5 operator (18) | S5.1.1–S5.5.2 | TS-2/TS-4 | counters, boot-diag, egress-cut, image-upgrade, chaos-recovery | RAISE-N (S5.2.2/4), vCPU wall arm (S5.3.2), multi-region (S5.5.x) |
 | P6 buyer (4) | S6.1–S6.4 | TS-1 | mechanism-proven | pricing/positioning = owner (GA) |
 | P7 attacker (15) | S7.1–S7.15 | **TS-5** | fence escape, secret exfil, forge, cross-tenant, supply-chain, replay, net_policy, single-use — **live adversarial** | IMDS/G2 probe (S7.6) tracked-gap |

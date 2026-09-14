@@ -1,4 +1,9 @@
-# RUNBOOK — Northflank + Postgres + multi-instance fabric deploy
+# RUNBOOK — Northflank + Postgres + multi-instance fabric fallback
+
+> **Status: FALLBACK / ALTERNATIVE PATH.** The canonical production deployment
+> uses Cloudflare `fabricd` plus the spawn-Worker. This Northflank + Postgres
+> playbook remains for the explicitly selected interim backend and is not a
+> Cloudflare go-live gate. It has no dependency on discontinued external projects.
 
 > Operational playbook for running `corelink-fabricd` on Northflank with the
 > **persistent Postgres ledger** and **≥2 instances**. The env-var reference is
@@ -166,8 +171,9 @@ abnormal flush** (ADR-0004 Decision-2):
    `no_capture=true`) — the loss is **recorded, never silent** (owner-ratified
    Decision-3b).
 
-So at-least-once delivery is now guaranteed (hugit dedups by `lease_id`); the abnormal
-forensic envelope is **never silently dropped**, regardless of which instance reaps.
+The envelope delivery contract remains at-least-once; configured CoreLink consumers
+must deduplicate by `lease_id`. The abnormal forensic envelope is **never silently
+dropped**, regardless of which instance reaps.
 Proven by `durable_checkpoint_survives_instance_boundary_cross_instance` (real
 Postgres) and the in-crate tier-1/2/3 + cross-instance reaper tests.
 
@@ -176,7 +182,8 @@ Postgres) and the in-crate tier-1/2/3 + cross-instance reaper tests.
   tier 2 fires only once that feed lands (ADR-0004 Phase 2b). Until then a non-owning
   reaper emits tier 3 (`no_capture`) rather than tier 2; the envelope is still emitted,
   never dropped. The durable storage + read-on-reap path is in place and tested now.
-- **Billing impact: none.** hugit prices flat; the envelope is forensic provenance.
+- **Billing impact: none.** CoreLink concurrency billing is independent of the
+  forensic envelope.
 
 A normal close (client calls `POST /v1/leases/{id}/close`) is unaffected — it is
 served by, and finalizes on, the instance the client is talking to, and the

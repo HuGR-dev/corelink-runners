@@ -195,7 +195,7 @@ fn case_4_invalid_resolves_no_tenant_no_cap() {
 
 /// The ratified `corelink-introspect.json` vector parses under the strict
 /// typed lens ([`IntrospectBody`] + `deny_unknown_fields`) AND re-serializes
-/// byte-identically — the same drift tripwire the hugit-side
+/// byte-identically — the same drift tripwire the external-consumer side
 /// `RunnerLease`/`FenceManifest`/`IntentMetrics` goldens carry, now around the
 /// corelink-server auth/billing seam vector. A field added or renamed in
 /// corelink-server's frozen shape breaks `deny_unknown_fields` here; any

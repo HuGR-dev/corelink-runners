@@ -1,8 +1,8 @@
-// Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
+// Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
 
 //! CheckResult — memoised result of a check (decomposition §1, item 2; X9①).
 //!
-//! Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) per the
+//! Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) per the
 //! wire-contract rule — no git dep.
 
 use serde::{Deserialize, Serialize};
@@ -30,8 +30,8 @@ pub struct CheckResult {
     ///
     /// # FROZEN FORMULA (BYTE-EXACT, single-sourced)
     ///
-    /// On the hugit side this is computed only by
-    /// `hugit_refstore::compute_memo_key`; on this side the formula is
+    /// The external refstore computes this only with
+    /// the external refstore compute_memo_key implementation; on this side the formula is
     /// transcribed below and any implementation must match it byte-exactly
     /// (conformance vectors are the tripwire).
     ///

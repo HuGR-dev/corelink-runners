@@ -68,10 +68,10 @@ describe("T3-W3 integrated authorization candidate redrive", () => {
       GITHUB_APP_ID: "app-id",
       GITHUB_APP_PRIVATE_KEY: "test-private-key",
     });
-    runtime.CONCURRENCY_SLOTS = {
-      idFromName: vi.fn(() => "global"),
-      get: vi.fn(() => ({ recordRetry: vi.fn(async () => ({ attempts: 1, recorded: true })), readRetry: vi.fn(async () => 1) })),
-    };
+    // Use the real ConcurrencySlotsDO test binding.  The reconciler now takes
+    // its atomic generation/owner claim through this authority before any
+    // provider effect; a retry-only mock would drift from that contract and
+    // fail closed with `acquireSpawnClaim is not a function`.
 
     await redriveOrphanedJobs(runtime, execution as never, undefined, T0, { driveSpawn: drive });
     await settle(execution);
@@ -105,10 +105,6 @@ describe("T3-W3 integrated authorization candidate redrive", () => {
       GITHUB_APP_ID: "app-id",
       GITHUB_APP_PRIVATE_KEY: "test-private-key",
     });
-    runtime.CONCURRENCY_SLOTS = {
-      idFromName: vi.fn(() => "global"),
-      get: vi.fn(() => ({ recordRetry: vi.fn(async () => ({ attempts: 1, recorded: true })), readRetry: vi.fn(async () => 1) })),
-    };
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.startsWith("https://registry.test")) return json(registry);
@@ -160,16 +156,6 @@ describe("T3-W3 integrated authorization candidate redrive", () => {
       CORELINK_RUNNER_MINT_AUTH_KEY: "runner-mint-key",
       SPAWN_WORKER_PUBLIC_URL: "https://worker.test",
     });
-    runtime.CONCURRENCY_SLOTS = {
-      idFromName: vi.fn(() => "global"),
-      get: vi.fn(() => ({
-        recordRetry: vi.fn(async () => ({ attempts: 1, recorded: true })),
-        readRetry: vi.fn(async () => 1),
-        acquire: vi.fn(async () => ({ admitted: true })),
-        release: vi.fn(async () => {}),
-        releasePreparation: vi.fn(async () => {}),
-      })),
-    };
 
     await redriveOrphanedJobs(runtime, execution as never, undefined, T0);
     await settle(execution);
