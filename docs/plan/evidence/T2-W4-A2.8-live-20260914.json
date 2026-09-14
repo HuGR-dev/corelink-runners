@@ -1,0 +1,32 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t2-w4-a2.8-live-20260914",
+  "kind": "probe",
+  "status": "BLOCKED",
+  "observed_at": "2026-09-14T14:14:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f",
+    "path": "docs/plan/evidence/T2-W4-A2.8-live-20260914.json"
+  },
+  "claims": ["T2-W4:image-push", "T2-W4:worker-pin", "T2-W4:worker-roll"],
+  "evidence": {
+    "fleet_idle": {"busy": 0, "unverifiable": 0, "checked": 0, "runners": 0},
+    "application_id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
+    "application_version": 27,
+    "worker_version": "4a36870a-ebb4-4255-ba1e-7728adb4bf1f",
+    "rollout_id": "95b39bf5-2ca8-41e1-936d-0ca82297875b",
+    "configured_digest": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330",
+    "health": {"healthy": 18, "failed": 0, "active": 0, "assigned": 0},
+    "dogfood_run": {
+      "workflow": "dogfood-smoke.yml",
+      "run_id": 34854188040,
+      "status": "completed",
+      "conclusion": "startup_failure",
+      "jobs": 0,
+      "logs": "unavailable"
+    },
+    "blocker": "The deployed Worker vars AUTOSCALER_INTAKE_PAUSED=1 and AUTOSCALER_REDRIVE_PAUSED=1 prevent the dogfood webhook spawn path; the dispatch failed at startup before a job was created.",
+    "scope_note": "Pin/deploy/roll evidence is recorded. A2.8 behavioral credit remains pending a real job boot on the new digest; no pause override was performed."
+  }
+}
