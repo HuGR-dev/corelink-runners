@@ -1,0 +1,29 @@
+{
+  "artifact_id": "b2-au1.8-fixture-hang",
+  "source_sha": "6ab4db54637da6d071590de7b7fa478753647284",
+  "path": "scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+  "root_cause": "The temporary Wrangler fixture was executed directly as a shell script. On this local macOS runner, direct exec of temporary shell scripts blocks before the first command; invoking the same fixture through /bin/bash exits immediately.",
+  "fix": "Run only the unset_local_regression mock through /bin/bash while preserving the production run_wrangle contract.",
+  "tests": [
+    {
+      "command": "bash -n scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+      "status": "PASS"
+    },
+    {
+      "command": "shellcheck scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+      "status": "PASS_WITH_PREEXISTING_SC2016_INFO"
+    },
+    {
+      "command": "focused unset_local_regression helper reproduction under timeout 10s",
+      "status": "PASS",
+      "elapsed_seconds": 0.7
+    },
+    {
+      "command": "bash scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+      "status": "BLOCKED",
+      "detail": "Remaining dispatch_case mocks are direct executable shell files and hit the same local runner exec block before the target fixture; no provider calls or writes occurred."
+    }
+  ],
+  "provider_writes": false,
+  "commit": "pending"
+}
