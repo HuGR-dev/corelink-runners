@@ -110,19 +110,22 @@ MOCK_BIN="${VALIDATION_TMP}/mock-bin"
 mkdir "${MOCK_BIN}"
 # shellcheck disable=SC2016 # These are literal lines for the generated mock.
 printf '%s\n' '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
   'case "$*" in' \
-  '  *"/v1/teardown"*) printf "%s" "${MOCK_TEARDOWN_STATUS}" ;;' \
-  '  *"/v1/status/"*) printf "%s" "${MOCK_STATUS_CODE}" ;;' \
+  '  *"/v1/teardown"*) printf "teardown:%s\\n" "${MOCK_TEARDOWN_STATUS}" >>"${MOCK_CALLS_FILE}"; printf "%s" "${MOCK_TEARDOWN_STATUS}" ;;' \
+  '  *"/v1/status/"*) printf "status:%s\\n" "${MOCK_STATUS_CODE}" >>"${MOCK_CALLS_FILE}"; printf "%s" "${MOCK_STATUS_CODE}" ;;' \
   '  *) exit 99 ;;' \
   'esac' >"${MOCK_BIN}/curl"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${MOCK_BIN}/gh"
 chmod 700 "${MOCK_BIN}/curl" "${MOCK_BIN}/gh"
 run_cleanup_mock() {
-  local name="$1" expected_rc="$2" teardown_status="$3" status_code="$4" out rc case_tmp
+  local name="$1" expected_rc="$2" teardown_status="$3" status_code="$4" out rc case_tmp calls_file
   case_tmp="${VALIDATION_TMP}/${name}"
+  calls_file="${VALIDATION_TMP}/${name}.calls"
   mkdir "${case_tmp}"
   : >"${case_tmp}/teardown.json"
   : >"${case_tmp}/lifecycle.header"
+  : >"${calls_file}"
   set +e
   # shellcheck disable=SC2016 # The child shell intentionally expands $1.
   out="$(MOCK_TEARDOWN_STATUS="${teardown_status}" MOCK_STATUS_CODE="${status_code}" \
@@ -130,7 +133,8 @@ run_cleanup_mock() {
     LIFECYCLE_AUTH_HEADER_FILE="${case_tmp}/lifecycle.header" \
     TEARDOWN_BODY_FILE="${case_tmp}/teardown.json" HANDLE=synthetic-handle \
     RUNNER_ID=runner-id GH_REPO=test/repo TMP_DIR="${case_tmp}" \
-    timeout 8 bash -c 'source "$1"; cleanup' -- "${CLEANUP_FUNCTION_FILE}" 2>&1)"
+    MOCK_CALLS_FILE="${calls_file}" \
+    timeout 4 bash -c 'source "$1"; cleanup' -- "${CLEANUP_FUNCTION_FILE}" 2>&1)"
   rc=$?
   set -e
   [[ "${rc}" -eq "${expected_rc}" ]] || {
@@ -143,6 +147,12 @@ run_cleanup_mock() {
     [[ "${out}" == *"teardown HTTP ${teardown_status}"* ]] || exit 1
     [[ "${out}" == *"status HTTP ${status_code}"* ]] || exit 1
   fi
+  # The case must traverse both real cleanup HTTP paths, in order. Keeping
+  # this ledger outside TMP_DIR lets us prove it after cleanup removes it.
+  [[ "$(<"${calls_file}")" == $'teardown:'"${teardown_status}"$'\nstatus:'"${status_code}" ]] || {
+    echo "${name}: cleanup HTTP mock calls were incomplete or out of order" >&2
+    exit 1
+  }
 }
 run_cleanup_mock cleanup-success 0 204 404
 run_cleanup_mock cleanup-failure 1 401 200
