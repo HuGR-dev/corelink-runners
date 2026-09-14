@@ -23,6 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
+      - name: Install deploy/cloudflare deps for PAT-map selftest
+        working-directory: deploy/cloudflare
+        run: npm ci --ignore-scripts
+
       - name: Discover and run every tracked selftest
         shell: bash
         run: |

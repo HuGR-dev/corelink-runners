@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/tests/acceptance_c5b.rs (item ⑤ + its box-lane helpers) @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10); removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence acceptance_c5b test (item ⑤ + its box-lane helpers) @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10); removed external-consumer side by WP-R4②.
 //! WP-C5b item ⑤ acceptance oracle — the active escape red-team, in its new
 //! home WITH the fence enforcement it drives.
 //!
@@ -14,14 +14,14 @@
 //! `materialize`/`enforce` so this assertion keeps red-teaming the REAL
 //! classifier in-process. Its hermetic load-bearing twin (FakeFsBox, bare
 //! gate, no box) rides inside `src/redteam.rs` unchanged. The broker items
-//! ②③④⑥ stay hugit-side with the broker.
+//! ②③④⑥ stay external-consumer side with the broker.
 //!
 //! **Box-dependent**: drives the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (env name preserved exactly across the transfer).
+//! `CORELINK_RUNNER_HOST` (env name preserved exactly across the transfer).
 //! When the box is unreachable it **FAILS** (not skip) — per contract. It
-//! skips only when `HUGIT_RUNNER_HOST` is unset (the bare cargo gate lane).
+//! skips only when `CORELINK_RUNNER_HOST` is unset (the bare cargo gate lane).
 //!
-//! Box-sharing: everything here is namespaced with the prefix `hugit-c5b-`;
+//! Box-sharing: everything here is namespaced with the prefix `corelink-c5b-`;
 //! spawn/probe/teardown touch only that prefix.
 
 use corelink_runner::lease::{BoxExec, SshBox};
@@ -31,14 +31,14 @@ const IMAGE: &str = "alpine:3.20";
 
 /// Whether the box-dependent acceptance lane is active.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -111,7 +111,7 @@ fn item_5_escape_redteam_all_attacks_contained() {
     result.expect("escape red-team: all vectors contained");
     assert!(
         residue.is_zero(),
-        "box must have ZERO hugit-c5b-* residue; remaining: {:?}",
+        "box must have ZERO corelink-c5b-* residue; remaining: {:?}",
         residue.remaining
     );
 }

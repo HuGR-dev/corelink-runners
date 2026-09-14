@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/src/util.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence `src/util.rs` module @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! Crate-private utilities shared by `enforce`, `materialize`, and `redteam`.
 
 /// POSIX single-quote a string for safe interpolation into a remote `sh -c`.

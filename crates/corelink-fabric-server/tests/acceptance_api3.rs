@@ -254,7 +254,7 @@ async fn exec_returns_checkresult_with_content_digest() {
     assert_eq!(calls[0].1, vec!["sh", "-lc", def.command.as_str()]);
 }
 
-/// The hugit B2b oracle at mechanism level: the same `CheckDef` producing
+/// The external B2b oracle at mechanism level: the same `CheckDef` producing
 /// the same bytes on two DIFFERENT runners yields a byte-identical memo key
 /// AND byte-identical content refs — the runner's identity never leaks into
 /// the memoisable surface.

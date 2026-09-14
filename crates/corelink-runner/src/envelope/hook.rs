@@ -35,14 +35,16 @@ use super::event::TranscriptEvent;
 
 /// Runner configuration for the envelope capture hook.
 ///
-/// `ack_timeout` is the **runner-configured** job-close ack window of §13.2
-/// item 3: how long the close state machine waits for the forge-side
-/// subscriber to acknowledge the close signal before closing anyway
-/// (fail-closed). `buffer_capacity` bounds EACH in-flight surface (raw and
-/// metadata) — the §13.3 "bounded FIFO" allowance.
+/// A nonzero `ack_timeout` enables the legacy in-process job-close ack seam:
+/// it is how long the close state machine waits for a subscriber before
+/// closing anyway. `Duration::ZERO` is the standalone runtime mode: the close
+/// signal is still published for local observers, but no external ack is
+/// expected or required. `buffer_capacity` bounds EACH in-flight surface (raw
+/// and metadata) — the §13.3 "bounded FIFO" allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvelopeConfig {
     /// How long a close waits for the subscriber's ack before fail-closing.
+    /// `Duration::ZERO` disables the ack wait for standalone runtime.
     pub ack_timeout: Duration,
     /// Capacity of each in-flight surface (raw events / per-turn metadata).
     pub buffer_capacity: usize,
@@ -171,6 +173,16 @@ pub struct CaptureHook {
 }
 
 impl CaptureHook {
+    /// Whether this hook has an explicit in-process ack wait configured.
+    ///
+    /// Production standalone hooks use [`Duration::ZERO`], because there is
+    /// no deployed ack transport or consumer. Nonzero values remain a narrow
+    /// compatibility seam for in-process tests that exercise the old handshake.
+    #[must_use]
+    pub fn ack_required(&self) -> bool {
+        !self.shared.lock().cfg.ack_timeout.is_zero()
+    }
+
     /// Allocate the hook in the **not-yet-open** state: writes are refused
     /// until [`complete_open`](Self::complete_open).
     ///

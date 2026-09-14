@@ -74,5 +74,6 @@ cross-tenant isolation and on identity.
   (would remove the identity bound — re-open this decision); (b) a concrete
   exfiltration/abuse incident; (c) a customer egress-lockdown requirement
   (route to BYOC). Any of these re-opens the posture.
-- This is a posture decision, not a contract change — the hugit integration
-  contract and the wire types are untouched.
+- This is a posture decision, not a contract change — the frozen CoreLink
+  integration contract and the wire types are untouched. Historical external
+  integration framing does not create a current consumer or launch gate.

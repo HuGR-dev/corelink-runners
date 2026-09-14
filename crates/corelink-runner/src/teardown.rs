@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Teardown + forensic re-scan: destroy the per-job container and prove the
 //! box has **zero residue** afterwards.
 //!
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn report_dirty_when_container_remains() {
         let r = ForensicReport {
-            containers: vec!["hugit-job-x".to_string()],
+            containers: vec!["corelink-job-x".to_string()],
             ..Default::default()
         };
         assert!(!r.is_clean());
@@ -260,7 +260,7 @@ mod tests {
 
     fn container() -> RunningContainer {
         RunningContainer {
-            name: "hugit-job-rescan".to_string(),
+            name: "corelink-job-rescan".to_string(),
         }
     }
 

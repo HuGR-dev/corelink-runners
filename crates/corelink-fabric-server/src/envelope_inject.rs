@@ -118,7 +118,7 @@ mod tests {
 
     fn bare_spec() -> ContainerSpec {
         ContainerSpec {
-            name: "hugit-job-x".to_string(),
+            name: "corelink-job-x".to_string(),
             image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
                 .to_string(),
             tmp_root: "/tmp/job".to_string(),

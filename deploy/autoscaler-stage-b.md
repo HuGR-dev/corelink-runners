@@ -1,6 +1,16 @@
-# ADR-0007 Stage B — the autoscaler (go-live runbook)
+# ADR-0007 Stage B — the fabricd autoscaler (fallback runbook)
 
-The Stage-B autoscaler turns a queued GitHub Actions job into a freshly
+> **Status: FALLBACK / ALTERNATIVE PATH.** The canonical production autoscaler is
+> the CoreLink Cloudflare spawn-Worker at
+> `https://corelink-spawn-worker.gmhelmold.workers.dev/webhook`. GitHub remains
+> the event provider: `workflow_job` webhooks are HMAC-verified by that Worker,
+> which mints a JIT runner and starts the digest-pinned Container DO. This
+> document describes the optional fabricd/Northflank path at
+> `/webhooks/github`; it is not a go-live gate and has no dependency on any
+> discontinued external project. See `docs/runbook/cloudflare-go-live.md` for
+> the canonical path.
+
+The fallback Stage-B autoscaler turns a queued GitHub Actions job into a freshly
 provisioned ephemeral CoreLink runner **with no human in the loop**. It is the
 piece that lets this repo's own CI (or any installed repo's) run on the cloud
 fleet — and retire the builder Mac.
@@ -20,7 +30,7 @@ See `crates/corelink-fabric-server/src/handlers/webhook.rs` (module docs) and
 
 ---
 
-## Prerequisites
+## Prerequisites (fallback path only)
 
 - **Stage A live.** The fabric is deployed and the runner-registration broker is
   wired (`FABRIC_GITHUB_APP_*`) — proven by the manual dogfood-smoke run
@@ -31,11 +41,16 @@ See `crates/corelink-fabric-server/src/handlers/webhook.rs` (module docs) and
 
 ---
 
-## 1. Configure the GitHub App webhook
+## 1. Configure the GitHub App webhook (fallback path only)
+
+Do not replace the canonical spawn-Worker hook with this route for production.
+Use the deployed fabricd host only when intentionally running the fallback:
+`https://<fabricd-host>/webhooks/github`. The canonical hook remains
+`https://corelink-spawn-worker.gmhelmold.workers.dev/webhook`.
 
 In the **CoreLink GitHub App** settings (App id 4061919):
 
-1. **Webhook URL:** `https://p01--corelink-runners--pmk6nf8xbcjb.code.run/webhooks/github`
+1. **Webhook URL:** `https://<fabricd-host>/webhooks/github`
 2. **Webhook secret:** generate a strong random secret (e.g.
    `openssl rand -hex 32`). Save it — it goes into the fabric env (step 2) as
    `FABRIC_AUTOSCALER_WEBHOOK_SECRET`. The App and the fabric must hold the SAME
@@ -47,7 +62,7 @@ In the **CoreLink GitHub App** settings (App id 4061919):
 GitHub sends a `ping` on save — the fabric answers `200 pong` (once deployed with
 the secret set).
 
-## 2. Set the fabric env (Northflank `corelink-runners` service)
+## 2. Set the fallback fabric env (Northflank `corelink-runners` service)
 
 All default-off; absent ⇒ the route is not mounted (404 by absence).
 
@@ -72,7 +87,7 @@ Notes:
 
 CD redeploys from `main` (~10–15 min); the new env takes effect on the new build.
 
-## 3. Prove it end-to-end (no `ci.yml` change yet)
+## 3. Prove the fallback end-to-end (no `ci.yml` change yet)
 
 Dispatching the existing `dogfood-smoke` workflow emits a `workflow_job.queued`
 that the autoscaler picks up automatically — proving auto-provisioning without
@@ -92,7 +107,7 @@ Expected, with no manual `acquire`:
 Tail the fabric log in the Northflank UI (or via the API) to watch the three
 `autoscaler:` lines.
 
-## 4. Flip the real CI (after the proof)
+## 4. Flip CI to the fallback (only after an explicit fallback decision)
 
 Once step 3 is green, point this repo's CI at the fleet. In `.github/workflows/ci.yml`
 change `runs-on: [self-hosted, corelink-builder]` to the ephemeral label

@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Concurrency / throughput: run **N jobs in parallel** on a single
 //! Hetzner-class box, target ≥8 (WP-C2b item ④).
 //!
@@ -11,7 +11,7 @@
 //!
 //! # Box-sharing (CRITICAL)
 //! WP-C5a runs on the **same** box concurrently. Every container this module
-//! creates is named under the `hugit-c2b-` prefix (see [`c2b_container_name`]),
+//! creates is named under the `corelink-c2b-` prefix (see [`c2b_container_name`]),
 //! and the concurrency census ([`Scheduler::running_census`]) is scoped to that
 //! prefix only — it never counts or touches containers owned by other WPs.
 
@@ -28,15 +28,12 @@ use corelink_runners_contracts::RunnerLease;
 
 use crate::isolation::{Engine, RunningContainer};
 use crate::lease::{BoxExec, ContainerSpec};
+pub use crate::namespace::C2B_PREFIX;
 use crate::teardown::{ForensicReport, teardown};
-
-/// Prefix under which **all** C2b-owned containers/labels live, so forensic
-/// scans and kill-sweeps stay scoped to this WP on the shared box.
-pub const C2B_PREFIX: &str = "hugit-c2b-";
 
 /// Derive a C2b-namespaced container name from a lease id, **injectively**.
 ///
-/// Distinct from C2a's `hugit-job-` naming: the `hugit-c2b-` prefix is what
+/// Distinct from C2a's `corelink-job-` naming: the `corelink-c2b-` prefix is what
 /// lets [`Scheduler::running_census`] and crash sweeps target *only* this WP's
 /// containers on the shared box. Docker names must match
 /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
@@ -75,7 +72,7 @@ pub fn c2b_container_name(lease_id: &str) -> String {
         }
     }
 
-    // Layout: "hugit-c2b-" + slug + "-" + 16-hex suffix. The prefix is the first
+    // Layout: "corelink-c2b-" + slug + "-" + 16-hex suffix. The prefix is the first
     // char, so the result always satisfies Docker's `[a-zA-Z0-9]` start rule.
     let mut s = String::with_capacity(C2B_PREFIX.len() + slug.len() + 1 + suffix.len());
     s.push_str(C2B_PREFIX);
@@ -89,7 +86,7 @@ pub fn c2b_container_name(lease_id: &str) -> String {
 ///
 /// Reuses C2a's [`ContainerSpec::from_lease`] for all validation (isolated
 /// net-policy, non-empty ids/tmp_root) then rewrites only the container *name*
-/// into the `hugit-c2b-` namespace. The lease is consumed, never modified.
+/// into the `corelink-c2b-` namespace. The lease is consumed, never modified.
 ///
 /// # Errors
 /// Propagates C2a's lease validation errors.
@@ -132,7 +129,7 @@ pub struct TeardownFailure {
 pub struct BatchReport {
     /// One outcome per submitted lease, in submission order.
     pub outcomes: Vec<JobOutcome>,
-    /// Peak number of `hugit-c2b-*` containers observed running at once,
+    /// Peak number of `corelink-c2b-*` containers observed running at once,
     /// measured by a live census while the batch was in flight.
     pub peak_concurrency: usize,
     /// Forensic re-scan after teardown of every job — must be clean.
@@ -184,10 +181,10 @@ where
         }
     }
 
-    /// Live census of currently-running `hugit-c2b-*` containers on the box.
+    /// Live census of currently-running `corelink-c2b-*` containers on the box.
     ///
     /// Scoped to this WP's prefix only (box-sharing rule): a `docker ps` filter
-    /// on `name=hugit-c2b-` never sees C5a's or any other WP's containers.
+    /// on `name=corelink-c2b-` never sees C5a's or any other WP's containers.
     ///
     /// # Errors
     /// Fails only if the box is unreachable.
@@ -200,7 +197,7 @@ where
     /// C2a's forensic teardown.
     ///
     /// Each job runs `job_argv` inside its container (e.g. `["true"]`). The
-    /// batch returns peak observed `hugit-c2b-*` concurrency and a post-teardown
+    /// batch returns peak observed `corelink-c2b-*` concurrency and a post-teardown
     /// forensic report aggregated across all jobs.
     ///
     /// # Errors
@@ -320,7 +317,7 @@ where
     }
 }
 
-/// Count running `hugit-c2b-*` containers (this WP's prefix only).
+/// Count running `corelink-c2b-*` containers (this WP's prefix only).
 fn census<B: BoxExec>(boxx: &B) -> Result<usize> {
     let out = boxx.run(&[
         "docker",
@@ -383,7 +380,7 @@ mod tests {
         // Prefix + readable slug (non-Docker-legal chars → '_'), then a hex
         // injectivity suffix. The slug is still visible in the name.
         let name = c2b_container_name("lease/x y");
-        assert!(name.starts_with("hugit-c2b-lease_x_y-"), "got {name}");
+        assert!(name.starts_with("corelink-c2b-lease_x_y-"), "got {name}");
         assert!(c2b_container_name("anything").starts_with(C2B_PREFIX));
         // Docker name char class: every char is `[a-zA-Z0-9_.-]`.
         assert!(
@@ -438,7 +435,7 @@ mod tests {
         };
         let spec = c2b_spec(&l, PIN).unwrap();
         assert_eq!(spec.name, c2b_container_name("z1"));
-        assert!(spec.name.starts_with("hugit-c2b-z1-"));
+        assert!(spec.name.starts_with("corelink-c2b-z1-"));
         assert!(spec.no_network);
 
         // C2a validation is reused, incl. the supply-chain pin floor.

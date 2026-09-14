@@ -3,7 +3,7 @@
  *
  * Verifies a fabric's `result_binding_sig_v2` against the published ed25519 key.
  * Byte-identical to `crates/corelink-cli/src/binding.rs`; locked to the shared
- * conformance vector at `conformance/result_binding_v2.json` (mirrored by hugit).
+ * conformance vector at `conformance/result_binding_v2.json` (mirrored by the external consumer).
  *
  * Plain ESM JavaScript (no build step) so the conformance test imports THIS
  * shipped module directly — the drift tripwire exercises the real code, never a
@@ -21,7 +21,7 @@ import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 
 /**
  * LP(s) = u32_be(byteLength_utf8(s)) ‖ utf8(s) — the length-prefixed framing
- * shared by the fabric signer, hugit's verifier, and the Rust CLI.
+ * shared by the fabric signer, the external verifier, and the Rust CLI.
  * @param {Buffer[]} chunks
  * @param {string} s
  */

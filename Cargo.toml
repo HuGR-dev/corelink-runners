@@ -11,13 +11,13 @@ publish = false
 [workspace.dependencies]
 # Error handling — exact-pinned (transplanted runner core; scout dep budget)
 anyhow     = "=1.0.103"
-# Serialization — exact-pinned matching hugit-contracts (wire-contract conformance)
+# Serialization — exact-pinned for the frozen wire-contract vectors
 serde      = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
-# JSON Schema — exact-pinned matching hugit-contracts (schemars 1.x)
+# JSON Schema — exact-pinned for the frozen wire-contract schemas (schemars 1.x)
 schemars   = { version = "=1.2.1", features = ["derive"] }
-# Cryptography — exact-pinned matching hugit (WP-R4: fence materialize's
-# content digests, the X4 supply-chain pin convention)
+# Cryptography — exact-pinned for fence materialize's content digests and the
+# X4 supply-chain pin convention (WP-R4)
 sha2       = "=0.10.9"
 # BLAKE3 content-addressed keys for the native CAS/AC HTTP plane (WP-2: moat
 # build). The native CAS uses BLAKE3, not SHA-256 (A9b: digest discipline).

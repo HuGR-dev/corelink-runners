@@ -20,7 +20,7 @@
 //! **Auth (contract §13.2 "authenticated hook point") — two DISTINCT seams,
 //! by trust boundary:**
 //!
-//! - **POLL** (`GET` events/meta — hugit's TRUSTED subscriber) sits behind the
+//! - **POLL** (`GET` events/meta — the external consumer's TRUSTED subscriber) sits behind the
 //!   Bearer-PAT layer (WP-API1): the resolved tenant must OWN the lease, and a
 //!   valid PAT of another tenant gets `404 not_found`, never 403 (the frozen
 //!   no-existence-oracle rule). On a tenant match the handler still goes
@@ -391,7 +391,7 @@ impl IngestEvent {
 /// capability.
 ///
 /// The POLL endpoints (`poll_events`/`poll_meta`) are unchanged: they KEEP the
-/// tenant-PAT gate (hugit's TRUSTED subscriber polls with the tenant PAT; that
+/// tenant-PAT gate (the external consumer's TRUSTED subscriber polls with the tenant PAT; that
 /// path puts nothing on the box). Two credentials, by trust boundary.
 ///
 /// On each ingested `model_turn` (the turn boundary), a NON-destructive

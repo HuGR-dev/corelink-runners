@@ -483,11 +483,11 @@ describe("SJ-5 · ConcurrencySlotsDO — atomic acquire/release over real storag
 
 // ════════════════════════════════════════════════════════════════════════════
 // PART D — acquireConcurrencySlot via the REAL worker.fetch /webhook drive
-//          (cell 6 warm key/cap, cell 7 cold key/cap, cell 12 fail-open/honored).
+//          (cell 6 warm key/cap, cell 7 cold key/cap, cell 12 refusal/honored).
 // ════════════════════════════════════════════════════════════════════════════
 // A CONCURRENCY_SLOTS DO double that RECORDS the (key, jobId, perKeyCap, fleetCap,
 // ttlMs) the real acquireConcurrencySlot computes, and is configurable to admit,
-// refuse, or THROW — so we can prove selection + fail-open through the live code.
+// refuse, or THROW — so we can prove selection + authority-failure refusal.
 function fakeSlots(mode: "admit" | "refuse" | "throw") {
   let currentMode = mode;
   const acquire = vi.fn(async (..._args: unknown[]) => {
@@ -497,9 +497,29 @@ function fakeSlots(mode: "admit" | "refuse" | "throw") {
       : { admitted: false, reason: "over_key_cap" };
   });
   const release = vi.fn(async () => {});
+  const claims = new Map<string, { generation: number; ownerToken: string }>();
+  const acquireSpawnClaim = vi.fn(async (jobId: string) => {
+    if (claims.has(jobId)) return { status: "held", generation: claims.get(jobId)!.generation };
+    const claim = { generation: 1, ownerToken: `owner-${jobId}` };
+    claims.set(jobId, claim);
+    return { status: "acquired", ...claim };
+  });
+  const markSpawnClaimActive = vi.fn(async (jobId: string, generation: number, ownerToken: string) =>
+    claims.get(jobId)?.generation === generation && claims.get(jobId)?.ownerToken === ownerToken);
+  const bindSpawnClaimProvider = vi.fn(async () => true);
+  // The production start path fences the exact provider handle before start.
+  // This slot-selection double does not model attempt recovery, but it must
+  // acknowledge that fence so the admission journey can reach its happy path.
+  const persistActiveAttempt = vi.fn(async () => true);
+  const releaseSpawnClaim = vi.fn(async (jobId: string, generation: number, ownerToken: string) => {
+    const claim = claims.get(jobId);
+    if (!claim) return "missing";
+    if (claim.generation !== generation || claim.ownerToken !== ownerToken) return "stale";
+    claims.delete(jobId); return "released";
+  });
   const recordRetry = vi.fn(async () => ({ attempts: 1, recorded: true }));
   const readRetry = vi.fn(async () => 1);
-  const stub = { acquire, release, recordRetry, readRetry };
+  const stub = { acquire, release, acquireSpawnClaim, markSpawnClaimActive, bindSpawnClaimProvider, persistActiveAttempt, releaseSpawnClaim, recordRetry, readRetry };
   return { get: vi.fn(() => stub), idFromName: vi.fn((n: string) => n), _stub: stub, setMode: (next: typeof mode) => { currentMode = next; } };
 }
 
@@ -710,14 +730,30 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     expect(perKeyCap).toBe(5); // min(5, 20) = 5
   });
 
-  // ── Cell 12 — a THROWN DO error ⇒ FAIL-OPEN admit (never block a legit job) ─
-  it("cell12-failopen: a THROWN DO acquire error ⇒ the spawn is ADMITTED (fail-open), runner spawned", async () => {
+  // ── Cell 12 — a THROWN DO error with no budget authority is closed ────────
+  it("cell12-authority-failure: missing budget authority refuses before mint or provider", async () => {
     const slots = fakeSlots("throw"); // simulate a DO/infra reset
     const metrics = fakeMetrics();
+    const kv = fakeKv();
+    const authorities = makeWorkerAuthorities(kv as never);
+    const containment = new Proxy(authorities.containment, {
+      get(target, property, receiver) {
+        if (property === "spendAdmissionBudget") return async () => { throw new Error("budget authority unavailable"); };
+        return Reflect.get(target, property, receiver);
+      },
+    });
     const env = baseEnv({
-      RUNNER_JOB_PATS: fakeKv() as never,
+      RUNNER_JOB_PATS: kv as never,
       METRICS: metrics as never,
       CONCURRENCY_SLOTS: slots as never,
+      // The slot DO and the independent exceptional-admission authority are
+      // separate bindings. Make the latter unavailable to exercise the
+      // fail-closed branch; a healthy ContainmentDO intentionally admits only
+      // within its bounded five-per-minute budget.
+      CONTAINMENT: {
+        idFromName: () => "global",
+        get: () => containment,
+      } as never,
       CORELINK_RUNNER_MINT_AUTH_KEY: MINT_KEY,
       SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
       CRED_STASH: ns({ stash: vi.fn(async () => "ticket"), wipe: vi.fn(async () => {}) }),
@@ -726,12 +762,12 @@ describe("SJ-5 · acquireConcurrencySlot — selection + fail-open (real worker.
     const ctx = makeCtx();
     await queuedWebhook(env, ctx, { jobId: "1201", repo: "acme/api", installationId: 42 });
     await drain(ctx);
-    // The acquire threw, yet the drive proceeded: JIT minted + container spawned.
+    // The acquire and its independent budget authority both failed, so no
+    // emergency slot or provider path is available.
     expect(slots._stub.acquire).toHaveBeenCalledTimes(1);
-    expect(fetchCalls.some((u) => u.includes("generate-jitconfig"))).toBe(true);
-    expect(containers).toHaveLength(1); // a legit job is NEVER blocked on an infra hiccup
-    expect(metrics.counts.runner_spawned).toBe(1);
-    expect(metrics.counts.spawn_at_ceiling).toBeUndefined(); // NOT a ceiling refusal
+    expect(fetchCalls.some((u) => u.includes("/internal/v1/runner/mint") || u.includes("generate-jitconfig"))).toBe(false);
+    expect(containers).toHaveLength(0);
+    expect(metrics.counts.runner_spawned).toBeUndefined();
   });
 
   // ── Cell 12 — a clean {admitted:false} ⇒ HONORED refusal (NOT fail-open) ────

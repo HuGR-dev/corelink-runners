@@ -1,5 +1,5 @@
 //! Cross-repo conformance vector for the §13 `intent_metrics_sig` — the SIGNED
-//! off-box cost binding (contract addendum 2026-07-08, hugit verifier PR #286).
+//! off-box cost binding (contract addendum 2026-07-08).
 //!
 //! This is the drift tripwire for the intent-metrics cost attestation, the exact
 //! sibling of `conformance/result_binding_v2.json`. For an OFF-BOX lease the
@@ -7,12 +7,13 @@
 //! binds the tenant via the chain, NOT the cost. `intent_metrics_sig` is the
 //! distinct fabric signature that binds the FULL `IntentMetrics` (the attested
 //! cost) to `lease_id` + `tenant` (the anti-replay salt: `lease_id` is unique per
-//! acquire). hugit holds no private key; its verifier recomputes the preimage
-//! from `input` and checks the committed signature against the committed pubkey.
+//! acquire). The external verifier holds no private key; it recomputes the
+//! preimage from `input` and checks the committed signature against the
+//! committed pubkey.
 //!
 //! The committed `conformance/intent_metrics_sig.json` is byte-identical in both
-//! repos; any divergence in the preimage formula (this side) or hugit's verifier
-//! breaks a golden test on one side — the same tripwire that guards the 4 prior
+//! repos; any divergence in the preimage formula (this side) or an external
+//! verifier breaks a golden test on one side — the same tripwire that guards the 4 prior
 //! wire seams.
 //!
 //! The signature is reproducible: it is produced with the DETERMINISTIC dev
@@ -35,8 +36,8 @@ use serde::{Deserialize, Serialize};
 const DEV_FABRIC_KEY_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
 
 /// The signed inputs, in preimage order: `lease_id`, `tenant`, then the full
-/// `IntentMetrics`. Self-contained so hugit rebuilds the preimage from `input`
-/// alone.
+/// `IntentMetrics`. Self-contained so an external verifier rebuilds the preimage
+/// from `input` alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingInput {
@@ -152,11 +153,11 @@ fn intent_metrics_sig_conformance_vector_is_byte_exact() {
 }
 
 /// The committed signature VERIFIES against the committed pubkey over a preimage
-/// recomputed from `input` — exactly hugit's verifier path (they hold no private
-/// key; they verify). Proves the vector is internally valid, not just byte-stable,
+/// recomputed from `input` — exactly the external verifier path (the verifier
+/// holds no private key). Proves the vector is internally valid, not just byte-stable,
 /// and that the cost is actually bound (a +1µUSD tamper must break the sig).
 #[test]
-fn committed_intent_metrics_vector_verifies_and_binds_cost_like_hugit() {
+fn committed_intent_metrics_vector_verifies_and_binds_cost_like_external_consumer() {
     let raw = include_str!("../../../conformance/intent_metrics_sig.json");
     let v: VectorIntentMetrics = match serde_json::from_str(raw) {
         Ok(v) => v,
@@ -165,7 +166,7 @@ fn committed_intent_metrics_vector_verifies_and_binds_cost_like_hugit() {
         Err(_) => return,
     };
 
-    // Rebuild the preimage from `input` alone (hugit's recompute).
+    // Rebuild the preimage from `input` alone (the external verifier's recompute).
     let preimage = intent_metrics_preimage(&v.input.lease_id, &v.input.tenant, &v.input.metrics);
     assert_eq!(
         lower_hex(&preimage),

@@ -60,7 +60,7 @@ ingest_token = base64_standard( HMAC-SHA256(ingest_secret, DOMAIN ‖ lease_id) 
   fence/memo-key paths use) — RFC 2104 construction, RFC 4231 TC2 known-answer
   test — so **no new crate** enters `Cargo.lock`.
 - **Poll endpoints keep the tenant PAT** (Option A): `poll_events` / `poll_meta`
-  are operator/hugit-side reads off the box, so the scoped token is *ingest-only*
+  are operator-side reads off the box, so the scoped token is *ingest-only*
   (write-only from the box's perspective).
 
 ### Why this satisfies §5 without weakening it

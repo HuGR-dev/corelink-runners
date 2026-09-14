@@ -22,7 +22,7 @@ NOT sufficient — the docs must also be **publication-grade**: navigable, consi
    claim. "Proven" vs "built" vs "gated" is never blurred (the tense-discipline rule).
 8. **Cross-references resolve** — a feature card lists the story IDs that exercise it; a story card
    lists the feature IDs it uses. A broken/absent cross-ref is a defect. A cross-ref MATRIX appendix.
-9. **Prose is lean + concrete** — house style (mirrors hugit + existing docs): no filler, no marketing
+9. **Prose is lean + concrete** — house style (matches CoreLink's existing docs): no filler, no marketing
    fluff, active voice, one idea per sentence, tables for anything tabular, code-fenced for anything
    literal. Terminology is consistent (a Glossary defines every coined term, used verbatim thereafter).
 10. **Impeccable mechanics** — no typos, no broken links, no orphan headings, no duplicated content,

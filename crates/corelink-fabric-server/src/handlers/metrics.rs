@@ -1,5 +1,5 @@
 //! Per-tenant metrics over REST (WP-CP4): the non-interference measurement
-//! surface (contract §6, hugit X6/X10).
+//! surface (contract §6, X6/X10).
 //!
 //! `GET /v1/metrics/tenant` returns the **authenticated tenant's own**
 //! [`WaitSnapshot`] — wait histogram + nearest-rank p50/p95 — computed by

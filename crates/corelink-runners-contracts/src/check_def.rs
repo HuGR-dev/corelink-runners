@@ -1,8 +1,8 @@
-// Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
+// Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) — wire-contract seam, no git dep.
 
 //! CheckDef — a check-as-code definition (decomposition §1, item 1).
 //!
-//! Transcribed from hugit-contracts @ 7736d02 (frozen WP-00) per the
+//! Transcribed from frozen wire-contracts @ 7736d02 (frozen WP-00) per the
 //! wire-contract rule — no git dep.
 
 use serde::{Deserialize, Serialize};

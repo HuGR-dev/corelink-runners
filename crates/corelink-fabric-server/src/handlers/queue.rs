@@ -1,6 +1,6 @@
-//! `POST /v1/queue/trigger` — hugit's landing queue triggers execution of an
+//! `POST /v1/queue/trigger` — the external landing queue triggers execution of an
 //! uncached check on demand (WP-API4, contract §9: the `QueueApi` seam,
-//! hugit B5).
+//! B5).
 //!
 //! ## One execution engine, not two
 //!

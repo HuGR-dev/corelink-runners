@@ -512,7 +512,7 @@ pub struct AppState {
     pub provisioner: Arc<dyn crate::cloud_exec::BoxProvisioner>,
     /// §9 trigger idempotency map (WP-API4): `(tenant, item_id, tree_hash)`
     /// → the ATTESTED `TriggerResponse` already produced for that delivery
-    /// (ATT parity amendment). hugit's landing queue delivers
+    /// (ATT parity amendment). The external landing-queue client delivers
     /// at-least-once; a duplicate trigger answers from here WITHOUT
     /// re-executing or re-signing. Bounded by a simple insertion cap
     /// (`handlers::queue::TRIGGER_DEDUP_CAP`) — see the queue module docs.
@@ -545,7 +545,7 @@ pub struct AppState {
     /// (via [`with_runner_broker`](Self::with_runner_broker)); `None` (the
     /// [`AppState::new`] default) means runner mode is OFF — an
     /// `AcquireRequest.runner = Some(..)` is rejected `400` at admission, and the
-    /// classic hugit check-exec path is byte-for-byte unchanged. Holds a `dyn`
+    /// classic check-exec path is byte-for-byte unchanged. Holds a `dyn`
     /// broker so the mint (a 3-leg GitHub exchange) is injected and mockable.
     pub(crate) runner_broker: Option<Arc<dyn crate::runner_broker::RunnerRegistrationBroker>>,
     /// Lease ids provisioned as direct-CI RUNNER leases (ADR-0007). A
@@ -561,7 +561,7 @@ pub struct AppState {
     /// runner leases.
     pub(crate) runner_leases: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Lease ids provisioned as AGENT-mode leases (agent-exec, ratified (B)
-    /// 2026-07-05): an egress-enabled, NON-memoized box hugit's off-box §13 loop
+    /// 2026-07-05): an egress-enabled, NON-memoized box an external §13 loop
     /// drives via `POST /v1/leases/{id}/agent-exec`. A fabric-internal marker set
     /// — mirrors [`runner_leases`](Self::runner_leases) — so the frozen
     /// `RunnerLease` and the ledger carry NO agent-mode field. Recorded at
@@ -641,7 +641,7 @@ pub struct AppState {
     /// Emit the `intent_metrics_sig` (attested-cost binding) on close responses.
     /// **Default-off** (`false`) → the field is `None` → wire-INVISIBLE, so the
     /// close response is byte-identical to today. Flipped on via
-    /// `FABRIC_EMIT_INTENT_METRICS_SIG` ONLY after the verifier (hugit) adopts
+    /// `FABRIC_EMIT_INTENT_METRICS_SIG` ONLY after an external verifier adopts
     /// the field (it deserializes under `deny_unknown_fields`). The signing
     /// mechanism (`attestation::sign_intent_metrics`) is always built; this only
     /// gates whether the signature is placed on the wire.
@@ -2283,8 +2283,8 @@ pub fn app_full(
         cache: Arc::new(crate::introspect_cache::IntrospectCache::from_env()),
     };
 
-    // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — hugit
-    // needs the public key to bootstrap verification without a tenant PAT.
+    // ATT-KEY-ROTATION: `GET /v1/attestation/key` is UNAUTHENTICATED — external
+    // verifiers need the public key to bootstrap verification without a tenant PAT.
     // Mirrors the HEALTH pattern: mounted on the bare outer router, outside
     // `require_tenant` and outside the global concurrency limiter (key lookup
     // is a fixed-cost, auth-free, tenant-data-free constant-string responder).
@@ -2396,8 +2396,8 @@ pub fn app_full(
         )
         .route(paths::QUEUE_TRIGGER, post(handlers::queue::trigger))
         .route(&capture(paths::LEASE_CLOSE), post(handlers::close::close))
-        // ENV1/ENV2: the §13 envelope POLL side (hugit's TRUSTED subscriber).
-        // KEEPS the tenant-PAT credential gate — hugit polls with the SAME
+        // ENV1/ENV2: the §13 envelope POLL side (the trusted subscriber).
+        // KEEPS the tenant-PAT credential gate — the subscriber polls with the SAME
         // tenant PAT that acquired the lease (Option A). This path puts nothing
         // on the box, so the PAT never reaches untrusted compute.
         .route(&capture(paths::ENVELOPE_EVENTS), get(envelope::poll_events))

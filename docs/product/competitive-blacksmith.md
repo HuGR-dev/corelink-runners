@@ -11,8 +11,8 @@
 Same **category** (a better GitHub Actions runner), **different wedge**. Blacksmith
 competes on **raw speed + cheaper minutes** (bare-metal high-clock CPUs, drop-in).
 CoreLink competes on a **different cost structure**: flat-by-concurrency pricing
-(minutes unlimited) + **CAS memoization** (recompute ≈ 0) + the platform
-(hugit/Workspaces/governance). We do **not** win a head-to-head raw-compute race;
+(minutes unlimited) + **CAS memoization** (recompute ≈ 0) + the CoreLink platform
+(Workspaces/governance). We do **not** win a head-to-head raw-compute race;
 we change the game being played. **Not "lascou" — but the moat must ship and prove
 hit-rate before they copy it.**
 
@@ -25,7 +25,7 @@ hit-rate before they copy it.**
 | **Pricing model** | **Per-minute** (cheaper minute: ~$0.004/min for 2-vCPU, 3000 free min/mo PAYG). Still meters time. | **Flat by concurrency**, minutes unlimited (Team $100 = 80 parallel runners). | **CoreLink** for parallel/heavy/agent ICP |
 | **Caching** | Docker layer cache + **sticky disk snapshots** (warm local disk between runs). | Cache-warm boot + **content-addressed CAS + Action Cache memoization** — skips the build entirely on a hit; re-run already-computed ≈ $0. | **CoreLink** (different kind, not just faster) |
 | **Isolation** | Bare-metal/VM (shared-tenant infra). | microVM per claim, fail-closed, secrets brokered. | CoreLink (governance/Enterprise) |
-| **Platform** | A runner product + CI analytics + log search. | One fabric: Runners + Workspaces + hugit (agent-fleet forge) + CoreLink governance (BYOK/audit/SOC2). | CoreLink (breadth) |
+| **Platform** | A runner product + CI analytics + log search. | One CoreLink fabric: Runners + Workspaces + governance (BYOK/audit/SOC2). | CoreLink (breadth) |
 | **Maturity / traction** | Shipping today, funded (YC), real adoption. | Execution core shipped; **moat pre-flip** (gated on infra + cross-TL). | **Blacksmith** (today) |
 
 ## Where they genuinely threaten us
@@ -53,8 +53,8 @@ hit-rate before they copy it.**
    *build*; CAS memoization **skips** it — a re-run of already-computed work costs ≈ 0
    **and the customer is not billed as if it re-ran**. Competitors meter the recompute;
    we delete it. This is the moat.
-3. **Platform lock & governance.** hugit (agent-fleet CI) + Workspaces on the same
-   fabric + BYOK/audit/SOC2 is an Enterprise story a standalone runner can't match.
+3. **Platform lock & governance.** Agent-fleet CI, Workspaces, and BYOK/audit/SOC2
+   on the same CoreLink fabric form an Enterprise story a standalone runner can't match.
 
 ## What we must NOT claim (guardrails)
 

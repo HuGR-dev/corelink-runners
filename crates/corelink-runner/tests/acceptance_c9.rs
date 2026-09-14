@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! WP-C9 acceptance oracle — workspace lifecycle: attach/resume/spawn-dedup,
 //! local≡remote.
 //!
@@ -16,9 +16,9 @@
 //!      execution produce identical observable results (same exit code + stdout).
 //!
 //! These tests are **box-dependent**: they drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
 //! unreachable they **FAIL** (not skip) — per contract, box-dependent tests must
-//! fail, never silently pass. When `HUGIT_RUNNER_HOST` is **entirely unset**
+//! fail, never silently pass. When `CORELINK_RUNNER_HOST` is **entirely unset**
 //! (the bare cargo gate lane) the box-dependent body short-circuits.
 //!
 //! # Box-sharing
@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use corelink_runner::isolation::DockerEngine;
 use corelink_runner::lease::{BoxExec, SshBox};
+use corelink_runner::namespace::{JOB_TMP_ROOT, is_corelink_owned_name};
 use corelink_runner::teardown::teardown;
 use corelink_runner::ws::{
     DedupSpawner, WS_PREFIX, WorkspaceOrigin, WorkspaceState, attach_workspace, resume_workspace,
@@ -57,7 +58,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -73,17 +74,17 @@ fn src_fence() -> FenceManifest {
 
 /// Whether the box-dependent acceptance lane is active.
 ///
-/// Present & non-empty `HUGIT_RUNNER_HOST` ⇒ run + FAIL on unreachable.
+/// Present & non-empty `CORELINK_RUNNER_HOST` ⇒ run + FAIL on unreachable.
 /// Entirely unset ⇒ short-circuit (bare cargo gate lane, no box).
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set in the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set in the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -134,13 +135,41 @@ fn pinned_image(boxx: &SshBox) -> String {
         .to_string()
 }
 
+/// Select only actual C9-owned names from Docker's structured name listing.
+/// Docker's `name=` filter is substring-based, so the explicit prefix check is
+/// required to exclude names such as `other-corelink-ws-prod`.
+fn c9_sweep_candidates(listing: &str) -> impl Iterator<Item = &str> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|name| name.starts_with(WS_PREFIX) && is_corelink_owned_name(name))
+}
+
 /// Best-effort sweep of C9-prefix containers only. Scoped to `corelink-ws-`.
 fn sweep_c9(boxx: &SshBox) {
-    let _ = boxx.run(&[
-        "sh",
-        "-c",
-        &format!("docker ps -aq --filter name={WS_PREFIX} | xargs -r docker rm -f"),
+    let listing = boxx.run(&[
+        "docker",
+        "ps",
+        "-aq",
+        "--filter",
+        &format!("name={WS_PREFIX}"),
+        "--format",
+        "{{.Names}}",
     ]);
+    if let Ok(listing) = listing {
+        for name in c9_sweep_candidates(&listing.stdout) {
+            let _ = boxx.run(&["docker", "rm", "-f", name]);
+        }
+    }
+}
+
+#[test]
+fn c9_sweep_filter_excludes_other_corelink_ws_names() {
+    let listing = "corelink-ws-owned\nother-corelink-ws-prod\ncorelink-ws-\ncorelink-c2b-other\n";
+    assert_eq!(
+        c9_sweep_candidates(listing).collect::<Vec<_>>(),
+        ["corelink-ws-owned"]
+    );
 }
 
 // ── ① attach joins live workspace — no respawn ───────────────────────────────
@@ -158,7 +187,7 @@ fn sweep_c9(boxx: &SshBox) {
 #[test]
 fn item_1_attach_joins_live_workspace_no_respawn() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -259,7 +288,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
 #[test]
 fn item_2_resume_restores_state_fence_path_set_ceiling() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -347,7 +376,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
 #[test]
 fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -378,8 +407,8 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
             "sh",
             "-c",
             "START=$(date +%s%N); \
-             docker run --rm --network none --tmpfs /hugit/tmp:rw,size=64m \
-             --label hugit.job=c9-timing alpine:3.20 sh -c 'echo ok' >/dev/null 2>&1; \
+             docker run --rm --network none --tmpfs /corelink/tmp:rw,size=64m \
+             --label corelink.job=c9-timing alpine:3.20 sh -c 'echo ok' >/dev/null 2>&1; \
              END=$(date +%s%N); \
              echo $(( (END - START) / 1000000 ))",
         ])
@@ -494,7 +523,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
 #[test]
 fn item_4_local_remote_identical_observable_results() {
     if !box_lane_active() {
-        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
+        eprintln!("SKIP: CORELINK_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();

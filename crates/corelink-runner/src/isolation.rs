@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from a frozen legacy runner snapshot @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Per-job isolation: spawn one container with a **private tmp** and an
 //! **isolated network namespace**, run a job, and probe that the isolation
 //! holds.
@@ -15,6 +15,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::lease::{BoxExec, ContainerSpec};
+use crate::namespace::{JOB_LABEL, validate_corelink_owned_name};
 // Re-exported so Engine consumers get the full trait surface (including the
 // `exec_captured` return type) from one coherent import path.
 pub use crate::lease::CmdOutput;
@@ -143,6 +144,7 @@ impl<B: BoxExec> DockerEngine<B> {
 
 impl<B: BoxExec> Engine for DockerEngine<B> {
     fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+        validate_corelink_owned_name(&spec.name)?;
         if !spec.no_network {
             bail!("ContainerSpec.no_network must be true for C2a isolation");
         }
@@ -190,7 +192,7 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             "--tmpfs",
             &tmpfs,
             "--label",
-            "hugit.job=1",
+            JOB_LABEL,
             &spec.image,
             "sleep",
             IDLE_SLEEP_SECS,
@@ -207,7 +209,7 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
     fn probe(&self, c: &RunningContainer, spec: &ContainerSpec) -> Result<IsolationProbe> {
         // tmp privacy: the mounted tmp_root must be a tmpfs, and a file written
         // there must not appear on the host filesystem.
-        let marker = format!("hugit-isolation-{}", c.name);
+        let marker = format!("corelink-isolation-{}", c.name);
         let write = self.boxx.run(&[
             "docker",
             "exec",
@@ -344,8 +346,34 @@ mod tests {
 
     fn container() -> RunningContainer {
         RunningContainer {
-            name: "hugit-job-cf0b".to_string(),
+            name: "corelink-job-cf0b".to_string(),
         }
+    }
+
+    #[test]
+    fn spawn_rejects_foreign_resource_name_before_box_contact() {
+        let boxx = FakeBox::replying(CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let engine = DockerEngine::new(boxx.clone());
+        let spec = ContainerSpec {
+            name: "legacy-job-foreign".to_string(),
+            image: "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+                .to_string(),
+            tmp_root: "/corelink/tmp".to_string(),
+            no_network: true,
+            allow_egress: false,
+            run_on_create: false,
+            path_set: vec![],
+            env: vec![],
+        };
+        let err = engine
+            .spawn(&spec)
+            .expect_err("legacy resource names must fail at the creation boundary");
+        assert!(format!("{err:#}").contains("CoreLink-owned namespace"));
+        assert!(boxx.calls().is_empty(), "provider must not be contacted");
     }
 
     #[test]
@@ -369,7 +397,7 @@ mod tests {
             vec![vec![
                 "docker".to_string(),
                 "exec".to_string(),
-                "hugit-job-cf0b".to_string(),
+                "corelink-job-cf0b".to_string(),
                 "sh".to_string(),
                 "-c".to_string(),
                 "exit 7".to_string(),
@@ -390,7 +418,7 @@ mod tests {
         });
         let engine = DockerEngine::new(boxx);
         let out = engine
-            .exec_captured(&container(), &["cat", "/hugit/tmp/blob"])
+            .exec_captured(&container(), &["cat", "/corelink/tmp/blob"])
             .expect("exec_captured");
         assert_eq!(out.stdout, hostile, "stdout must be byte-faithful");
         assert_eq!(out.stderr, hostile, "stderr must be byte-faithful");

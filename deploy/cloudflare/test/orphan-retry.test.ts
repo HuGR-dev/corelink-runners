@@ -181,7 +181,9 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
       jobId: "1", repo: "octo/external-repo", installationId: "44556677", labels: ["corelink"],
     });
     // Claimed the spawn (dedup vs the live path).
-    expect(Number(kv.store.get("spawn:1"))).toBeGreaterThan(0);
+    expect(JSON.parse(kv.store.get("spawn:1")!)).toMatchObject({
+      schema_version: 2, generation: expect.any(Number), owner_token: expect.any(String),
+    });
     // The reconciler no longer DELETES on a successful drive. A returned drive means
     // "a container started", not "the job is placed" — deleting here would discard
     // the provisional record and re-open the exact hole this class of bug lives in.
@@ -231,17 +233,19 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
     expect(kv.store.has("spawn:1")).toBe(false); // never claimed
   });
 
-  it("already-claimed (live path won it): bumps but SKIPS the drive, LEAVES the record", async () => {
+  it("a legacy projection blocks a retry without adopting or mutating its record", async () => {
     const kv = fakeKv({
       "orphan:1": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:1": "1", // a live path / another tick already holds the claim
+      "spawn:1": "legacy-opaque-claim",
     });
     const drive = vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o));
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), drive);
 
     expect(drive).not.toHaveBeenCalled(); // claimSpawn returned false ⇒ skip
-    // Attempt was bumped (1 → 2) but the record is LEFT for a later tick.
-    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(2);
+    // A claim refusal happens before retry mutation; the legacy projection is
+    // intentionally neither interpreted nor deleted by the new authority.
+    expect(JSON.parse(kv.store.get("orphan:1")!).attempts).toBe(1);
+    expect(kv.store.get("spawn:1")).toBe("legacy-opaque-claim");
   });
 
   it("missing record (key listed but value gone by get) ⇒ skip, no drive, no throw", async () => {
@@ -272,14 +276,14 @@ describe("retryOrphanedSpawns (scheduled WARM re-drive)", () => {
   it("only scans the orphan: prefix (never touches spawn:/done:/bare-jobId keys)", async () => {
     const kv = fakeKv({
       "orphan:1": JSON.stringify(REC({ attempts: 1 })),
-      "spawn:other": "1",
+      "spawn:other": "legacy-opaque-claim",
       "done:other": "1",
       "1": "pat-id",
     });
     await retryOrphanedSpawns(envWith(kv), CTX, Date.now(), vi.fn(async (_e: Env, o: { jobId: string; repo: string }) => providerReceipt(o)));
     expect(kv.list).toHaveBeenCalledWith({ prefix: "orphan:" });
     // The unrelated namespaces are untouched.
-    expect(Number(kv.store.get("spawn:other"))).toBeGreaterThan(0);
+    expect(kv.store.get("spawn:other")).toBe("legacy-opaque-claim");
     expect(kv.store.get("done:other")).toBe("1");
     expect(kv.store.get("1")).toBe("pat-id");
   });

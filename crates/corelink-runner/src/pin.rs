@@ -1,16 +1,16 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Supply-chain enforcement on the **real** spawn surface: a runner image is
 //! acceptable for spawn **only** if it is pinned by content digest
 //! (`repo@sha256:<64-lowercase-hex>`), and that pin must be integrity-verified
 //! against the digest the runner box actually resolves **before** any container
 //! is spawned (fail-closed, verify-before-spawn).
 //!
-//! # Why this lives in `hugit-runner`
-//! `hugit-invariants/x4` carries a `VerifiedSpawn` *wrapper* over the engine,
+//! # Why this lives in the runner module
+//! the transferred X4 invariant carries a `VerifiedSpawn` *wrapper* over the engine,
 //! but the live spawn path (`ContainerSpec::from_lease`, `DockerEngine::spawn`,
 //! `concurrency::run_one`, `ws::spawn_workspace`) never routed through it — so
-//! the supply-chain invariant was cosmetic (brutal review R2/§hugit-runner).
-//! `x4` depends on `hugit-runner`, so the runner cannot depend back on it; the
+//! the supply-chain invariant was cosmetic (brutal review R2/§runner module).
+//! `x4` depends on the runner module, so the runner cannot depend back on it; the
 //! enforcement floor therefore has to live here, on the surface every spawn
 //! actually crosses. The `x4` wrapper remains a valid higher-level façade; this
 //! module is the load-bearing gate.

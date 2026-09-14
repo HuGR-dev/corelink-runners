@@ -26,6 +26,22 @@ runner image (clw baked, GH-Actions agent as entrypoint):
 
 Auth: `Authorization: Bearer <CLOUDFLARE_SPAWN_AUTH_TOKEN>` (a Worker secret). Fabric-internal.
 
+## Emergency admission freeze
+
+The shared non-secret Worker var `FABRIC_ADMISSION_PAUSED=1` pauses new
+runner admissions at this Worker edge. It returns `503` with `Retry-After: 60`
+for `POST /v1/spawn` and for authenticated `workflow_job.queued` deliveries to
+`POST /webhook`, before mint, claim, or container-start work. Scheduled normal
+intake and orphan redrive/retry reconcilers also stop creating new spawns while
+the switch is active.
+
+The switch is fail-open only when absent or exactly `0`; malformed and
+whitespace-padded values are treated as paused. `workflow_job.completed` still
+routes through revoke, teardown, and capacity-release cleanup, and existing
+status, exec, teardown, and egress-cutoff routes remain available. Set the var
+back to exactly `0` to resume new admissions through the normal reviewed
+rollout procedure.
+
 ## Design notes / wrinkles surfaced while writing (READ before building further)
 
 1. **Image is wrangler-bound, NOT per-spawn.** Cloudflare Containers pin ONE image per container

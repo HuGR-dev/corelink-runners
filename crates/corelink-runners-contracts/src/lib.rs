@@ -1,9 +1,9 @@
-//! Wire-contract types for the hugit ⇄ CoreLink Runners seam.
+//! Wire-contract types for the external consumer ⇄ CoreLink Runners seam.
 //!
 //! # Wire-contract rule
 //!
-//! Types in this crate are **transcriptions** of the frozen hugit-contracts
-//! types, NOT dependencies on that crate. The seam between hugit and
+//! Types in this crate are **transcriptions** of the frozen contract snapshot
+//! types, NOT dependencies on that crate. The seam between the external consumer and
 //! corelink-runners is the **wire contract**: types declared independently on
 //! each side and proven equivalent by **shared JSON conformance vectors
 //! committed byte-identical in both repos**.
@@ -11,14 +11,14 @@
 //! - No `git` dependencies in either direction (both `deny.toml`: crates.io
 //!   only).
 //! - The frozen list (R0, 2026-06-10): `RunnerLease`, `RunnerState`,
-//!   `FenceManifest` — the runner's whole hugit-contracts surface. Plus the
+//!   `FenceManifest` — the runner's whole frozen contract surface. Plus the
 //!   closure type `MaterializedEntry` referenced by `FenceManifest`.
 //! - Conformance vectors live in `conformance/` at the workspace root;
 //!   `conformance/manifest.sha256` ties both repos to the same byte-exact
 //!   digests. Drift on either side breaks golden tests immediately.
 //!
-//! Source repo for the originals:
-//! hugit-contracts @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
+//! Frozen contract snapshot:
+//! contract snapshot @ 7c2f1e64bc1ba46d4941dc3e5b4a6247c21b0ec0
 //! (RunnerLease/RunnerState/FenceManifest/MaterializedEntry);
 //! IntentMetrics/TokenCounts/ToolCount @ 443ff1b (context_envelope,
 //! schema 1.2.0 — see `intent_metrics`);
@@ -138,11 +138,12 @@ mod golden_tests {
     /// by the §13.4 drift tripwire on OUR side. This is our-side coverage.
     ///
     /// NOTE (cross-repo gap): this does NOT add a shared cross-repo vector for
-    /// the terminal states — that is hugit-gated (a shared terminal-state
-    /// `RunnerLease` vector must land in hugit-contracts first, then be
-    /// committed byte-identical here). Fully closing the cross-repo tripwire
-    /// for the terminal variants requires that coordination; this test closes
-    /// only the local serialization-rename hole.
+    /// the terminal states — that is contract-owner-gated (a shared
+    /// terminal-state `RunnerLease` vector must land in the CoreLink contract
+    /// vectors first, then be committed byte-identical here). Fully closing
+    /// the cross-repo tripwire for the terminal variants requires that
+    /// coordination; this test closes only the local serialization-rename
+    /// hole.
     #[test]
     fn runner_state_all_variants_wire_string_pinned() {
         // (variant, exact snake_case wire string)
@@ -238,7 +239,7 @@ mod golden_tests {
         // that hole: the manifest must list EXACTLY the vectors that exist.
         //
         // (`corelink-introspect.json` mirrors corelink-server's
-        // `/internal/v1/auth/introspect` response; the three hugit-side vectors
+        // `/internal/v1/auth/introspect` response; the three cross-repo vectors
         // ride the same SHA-256 tripwire. Membership is now asserted against the
         // filesystem so any new cross-repo vector is forced into the manifest.)
         let listed: std::collections::BTreeSet<String> =

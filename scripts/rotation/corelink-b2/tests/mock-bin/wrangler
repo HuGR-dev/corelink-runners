@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${MOCK_LOG:?}"
+IFS= read -r _ || true
+printf 'wrangler:' >> "$MOCK_LOG"
+for arg in "$@"; do printf '<%s>' "$arg" >> "$MOCK_LOG"; done
+printf '\n' >> "$MOCK_LOG"
+[ "${MOCK_SCENARIO:-success}" != wrangler_fail ] || exit 17

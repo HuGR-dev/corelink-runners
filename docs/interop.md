@@ -1,4 +1,4 @@
-# CoreLink Runners interop — how this repo talks to the family (microscopic seam map)
+# CoreLink Runners interop — retired historical seam map
 
 > ⚠️ **HISTORICAL (M0 spec-phase artifact, 2026-06-09).** This seam map predates the
 > built fabric and centers on **serving hugit as the anchor tenant** — but **hugit +

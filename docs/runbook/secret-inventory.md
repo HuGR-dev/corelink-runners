@@ -46,7 +46,9 @@ block and are not secrets.
 
 Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 `CORELINK_MINT_URL`, `RECONCILER_REPOS`, `REPO_INSTALLATION_MAP`,
-`SPAWN_WORKER_PUBLIC_URL`. KV binding `RUNNER_JOB_PATS`
+`SPAWN_WORKER_PUBLIC_URL`, `FABRIC_ADMISSION_PAUSED` (shared with fabricd;
+absent/exact `0` fail-open, other values pause new spawn admissions).
+KV binding `RUNNER_JOB_PATS`
 (id `4fb7e9c773d64f83ae3415c5a0879d66`).
 
 ---
@@ -76,7 +78,9 @@ Non-secret `vars` here (not secrets): `CLW_TENANT`, `CLW_ENDPOINT`,
 Non-secret `vars` here (not secrets): `FABRIC_NUM_SHARDS`,
 `CORELINK_INTROSPECT_URL`, `BILLING_INGEST_URL`, `BILLING_REGION`,
 `CLOUDFLARE_SPAWN_WORKER_URL`, `FABRIC_PUBLIC_BASE_URL`, `CLW_ENDPOINT`,
-`CORELINK_RUNNER_MINT_URL`, `FABRIC_EMIT_INTENT_METRICS_SIG`.
+`CORELINK_RUNNER_MINT_URL`, `FABRIC_EMIT_INTENT_METRICS_SIG`,
+`FABRIC_ADMISSION_PAUSED` (absent/exact `0` fail-open; other values pause new
+lease/admission/mint routes at the Worker edge with `503` + `Retry-After`).
 
 ## Repository, CI, and runtime surfaces
 
@@ -160,7 +164,8 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
    §4b App-JWT probe). A 401 after rotation = the two ends drifted; re-sync.
 7. **Special cases:**
    - `FABRIC_SIGNING_KEY` — rotation invalidates all live attestations; do it only
-     in a planned window and re-publish the new `key_id` to hugit's verifier.
+     in a planned window and re-publish the new `key_id` to the CoreLink CLI/SDK
+     verifier configuration.
    - `GITHUB_APP_PRIVATE_KEY` / `FABRIC_GITHUB_APP_PRIVATE_KEY_B64` — regenerate the
      key in the GitHub App settings, re-encode PKCS#8 (`openssl pkcs8 -topk8
      -nocrypt`), set the new value, then **delete every local copy of the old and
@@ -187,7 +192,7 @@ Rotate on a **compromise**, on **staff departure**, or on a **scheduled cadence*
 > machine that also runs the self-hosted CI runners (i.e. the box that executes
 > workflow code). Permissions were tightened to `600` immediately; that removes
 > the ongoing exposure but does **not** undo any read that already happened.
-> `~/Downloads/githugr-clerk-pubkey.pem` is a PUBLIC key and is irrelevant here.
+> An unrelated external public key is not a CoreLink secret and is irrelevant here.
 >
 > **Step 1 confirmed:** `GITHUB_APP_PRIVATE_KEY` IS bound on `corelink-spawn-worker`
 > (checked via the CF API secrets listing), so the running fabric does not read the

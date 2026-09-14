@@ -361,7 +361,7 @@ pub(crate) async fn acquire(
     }
 
     // ── 0d. Agent mode (agent-exec, ratified (B) exec-server-drive 2026-07-05).
-    // `req.agent == Some` provisions an EGRESS-enabled, NON-memoized box hugit's
+    // `req.agent == Some` provisions an EGRESS-enabled, NON-memoized box an external
     // off-box §13 loop drives via POST /v1/leases/{id}/agent-exec. Two guards,
     // symmetric with runner mode and BEFORE any cap/slot work:
     //  (a) Mutually exclusive with runner mode (frozen DTO): both Some → 400.
@@ -676,12 +676,12 @@ pub(crate) async fn acquire(
         // ingest endpoint recomputes + constant-time verifies this same token.
         // See `crate::ingest_token`.
         // RUNNER MODE (ADR-0007): a runner box runs GitHub Actions, not the
-        // hugit §13 agent loop — it never streams trajectory to our ingest
+        // the §13 client agent loop — it never streams trajectory to our ingest
         // endpoint, so the §13.2 ingest URL/token is NOT injected (no unused
         // credential on the box). The runner's JIT config is injected later, in
         // `finalize_admitted_lease`, after the egress box is provisioned.
         // AGENT MODE (agent-exec): the §13 loop that drives the agent box is
-        // hugit's OFF-box loop (it calls /agent-exec + polls) — nothing IN the
+        // the external consumer's OFF-box loop (it calls /agent-exec + polls) — nothing IN the
         // box streams trajectory to our ingest endpoint, so the §13.2 ingest
         // URL/token is likewise NOT injected (no unused credential on an
         // egress box that runs untrusted code).
@@ -1192,8 +1192,8 @@ pub(crate) async fn finalize_admitted_lease(
     //
     // The hook's subscribe credential = the acquiring tenant's Bearer PAT —
     // the POLL credential ONLY (the §13.2 authenticated-hook-point seam for the
-    // poll_events/poll_meta drain). CROSS-REPO SEAM — RATIFIED (hugit techlead,
-    // owner-ratified Gustavo, 2026-06-12; Option A "same tenant PAT"): hugit's
+    // poll_events/poll_meta drain). CROSS-REPO SEAM — RATIFIED (the contract owner,
+    // owner-ratified Gustavo, 2026-06-12; Option A "same tenant PAT"): the external consumer's
     // envelope subscriber polls as the SAME machine principal with the SAME
     // tenant PAT that acquired the lease (ADR-0002: one HuGR account, one
     // machine PAT), so the wrong-PAT 503 cannot occur on the poll path. The
@@ -1206,7 +1206,9 @@ pub(crate) async fn finalize_admitted_lease(
     // the hook here carries the POLL credential; the box never holds it.
     let hook = CaptureHook::open(
         EnvelopeConfig {
-            ack_timeout: std::time::Duration::from_secs(30),
+            // Standalone production has no deployed ack endpoint or consumer.
+            // Do not block normal close on a retired external handshake.
+            ack_timeout: std::time::Duration::ZERO,
             buffer_capacity: 256,
         },
         &pat.0,
@@ -1221,7 +1223,7 @@ pub(crate) async fn finalize_admitted_lease(
 
     let exec_endpoint = paths::EXEC.replace("{lease_id}", &lease_id);
     // §13.2 path "A" (the cost killer): surface the OFF-BOX ingest credential to
-    // the trusted lease owner so hugit's dispatch client can SUBMIT its agent
+    // the trusted lease owner so the external consumer's dispatch client can SUBMIT its agent
     // loop's §13.1 IntentMetrics without a fabric box. Mirrors the box-injection
     // condition + token EXACTLY: only for non-runner leases (a runner box runs GH
     // Actions, never streams §13), and the SAME scoped, write-only, lease-folded
@@ -1982,7 +1984,7 @@ mod tests {
     // ── Test: the acquire RESPONSE surfaces the off-box ingest credential (A) ──
 
     /// **Cost-killer path "A".** A non-runner acquire response carries
-    /// `envelope_ingest` so hugit's OFF-BOX dispatch client can submit its agent
+    /// `envelope_ingest` so the external consumer's OFF-BOX dispatch client can submit its agent
     /// loop's §13.1 IntentMetrics without a fabric box. The surfaced credential
     /// MUST be the SAME per-lease scoped ingest token the box receives
     /// (recomputable under the fabric secret), and the path THIS lease's §13.2

@@ -14,7 +14,7 @@
 //! "max_vcpu_h":<number?>,"plan":"<str>?"}`. Field names match the SERVER's live
 //! response (Server TL reply 2026-06-22): the tenant key is `tenant_id` (NOT
 //! `tenant`) and the informational cache tier is `plan` (NOT `plan_tier`) — the
-//! other repos (githugr, HuGR-Tools) already consume these names, so they are
+//! external CoreLink consumers already consume these names, so they are
 //! authoritative and the conformance vector is frozen to match. A tenant signs up on the
 //! platform (corelink-server: Clerk + corelink-billing), which seeds
 //! `runners_entitlement`; this consumer resolves that entitlement off the

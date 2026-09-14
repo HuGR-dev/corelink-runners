@@ -110,8 +110,17 @@ export class ComputeObligations {
   }
 
   async claimProvider(reservationId: string, workloadId: string, nowMs: number): Promise<void> {
+    return this.claimProviderBound(reservationId, workloadId, undefined, nowMs);
+  }
+
+  /** DevEnv binds the credential tenant again at the provider-dispatch edge. */
+  async claimProviderForTenant(reservationId: string, workloadId: string, tenantId: string, nowMs: number): Promise<void> {
+    return this.claimProviderBound(reservationId, workloadId, tenantId, nowMs);
+  }
+
+  private async claimProviderBound(reservationId: string, workloadId: string, tenantId: string | undefined, nowMs: number): Promise<void> {
     const row = await this.read(reservationId);
-    if (!row || row.phase !== "active" || !Number.isSafeInteger(nowMs) || row.binding.workloadId !== workloadId) throw new Error("compute obligation claim refused");
+    if (!row || row.phase !== "active" || !Number.isSafeInteger(nowMs) || row.binding.workloadId !== workloadId || (tenantId !== undefined && row.binding.tenantId !== tenantId)) throw new Error("compute obligation claim refused");
     const payload = this.parseToken(row.binding);
     if (nowMs < (payload.issued_at_ms as number) || nowMs >= (payload.expires_at_ms as number) || row.deadlineMs <= nowMs) throw new Error("compute obligation claim refused");
     await this.storage.put(this.key(reservationId), { ...row, phase: "dispatched" });

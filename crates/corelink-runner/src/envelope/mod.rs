@@ -4,7 +4,7 @@
 //! (WP-B2).
 //!
 //! Implements the metrics half of the envelope emission obligations in
-//! `docs/spec/hugit-integration-contract.md` v1.2.0 §13.1: at job close the
+//! the legacy integration contract v1.2.0 §13.1: at job close the
 //! runner reports an
 //! [`IntentMetrics`](corelink_runners_contracts::IntentMetrics)-consistent
 //! payload — token spend with the **mandatory cache split**, derived total,
@@ -25,16 +25,17 @@
 //!   transcript events + per-turn [`TurnMeta`]): bounded in-memory
 //!   forwarding only, bearer-gated [`Subscriber`] drain, per-surface
 //!   overflow flags — never durable, never silent, never scrubbed (§13.3).
-//! - [`close`] — [`JobClose`], the §13.2 item-3 close/ack state machine:
+//! - [`close`] — [`JobClose`], the §13.2 item-3 close state machine:
 //!   finalize exactly once → publish [`CloseSignal`] (same metrics value as
-//!   the outcome) → bearer-gated ack window (`cfg.ack_timeout`) →
-//!   fail-closed [`CloseOutcome`] with the honest `capture_incomplete`
-//!   flag; abnormal closes ([`AbnormalKind`]) share the exactly-once rule.
+//!   the outcome) → optional nonzero in-process ack seam (`cfg.ack_timeout`)
+//!   → [`CloseOutcome`] with the honest `capture_incomplete` flag. Standalone
+//!   runtime uses `Duration::ZERO`, so retired-ack absence is not loss;
+//!   abnormal closes ([`AbnormalKind`]) share the exactly-once rule.
 //!
 //! The metrics type itself is the transcribed wire contract
-//! (`corelink-runners-contracts`, hugit-contracts @ 443ff1b / schema 1.2.0)
-//! — never redefined here. In-process mechanism only: M1 puts the fabric
-//! transport + PAT verification behind the same hook/close semantics.
+//! (`corelink-runners-contracts`, the frozen contract snapshot @ 443ff1b / schema 1.2.0)
+//! — never redefined here. The in-process ACK seam is deliberately separate
+//! from production standalone runtime, which provides no ACK transport.
 
 pub mod close;
 pub mod collector;

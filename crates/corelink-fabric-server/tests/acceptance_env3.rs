@@ -12,7 +12,7 @@
 //! token — NOT the tenant PAT. The box (untrusted, contract §4) holds the
 //! scoped token; the endpoint recomputes + constant-time verifies it. A
 //! missing or wrong/forged/another-lease's token is rejected 401 fail-closed.
-//! The POLL endpoints are unchanged: they KEEP the tenant-PAT gate (hugit's
+//! The POLL endpoints are unchanged: they KEEP the tenant-PAT gate (the external consumer's
 //! trusted subscriber polls with the tenant PAT — that path puts nothing on
 //! the box). Two credentials, by trust boundary. The §13.3 in-flight-only law
 //! lives in the mechanism and its own suite; here we prove the write reaches it.

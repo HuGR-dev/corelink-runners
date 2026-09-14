@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-invariants/x4/tests/acceptance_x4.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from transferred invariants/x4/tests/acceptance_x4.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! WP-X4 acceptance oracle — supply chain: image pinning + integrity +
 //! fail-closed. Contract: `docs/plan/wp-contracts/WP-X4.md`.
 //!
@@ -15,7 +15,7 @@
 //!      processed. The ordering is load-bearing. (box-dependent)
 //!
 //! Box-dependence: items ① and ③ drive the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the env is set
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the env is set
 //! but the box is unreachable they **FAIL** (not skip), per contract.
 //!
 //! The fail-closed-before-spawn ORDERING (item ③, the load-bearing invariant)
@@ -23,7 +23,7 @@
 //! `item_3_fail_closed_before_spawn_hermetic`, which drives the **production**
 //! [`DockerEngine::spawn`] surface against a FAKE box (no network, no env).
 //! This closes the brutal-review X4 finding: the ordering proof is no longer a
-//! silent no-op when `HUGIT_RUNNER_HOST` is unset — it runs, and FAILS (not
+//! silent no-op when `CORELINK_RUNNER_HOST` is unset — it runs, and FAILS (not
 //! skips) if the engine ever issues `docker run` before rejecting a
 //! tampered/unpinned image.
 //!
@@ -39,6 +39,7 @@
 
 use corelink_runner::isolation::{DockerEngine, Engine};
 use corelink_runner::lease::{BoxExec, CmdOutput, ContainerSpec, SshBox};
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runner::teardown::teardown;
 use corelink_runner::x4::pin::PinnedImage;
 use corelink_runners_contracts::{RunnerLease, RunnerState};
@@ -57,7 +58,7 @@ const TAMPERED_REF: &str =
 /// not, so box bodies short-circuit there to keep `cargo test --workspace`
 /// green.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -182,7 +183,7 @@ fn spec_literal(name: &str, image: &str) -> ContainerSpec {
     ContainerSpec {
         name: name.to_string(),
         image: image.to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         no_network: true,
         allow_egress: false,
         run_on_create: false,
@@ -203,7 +204,7 @@ fn item_3_fail_closed_before_spawn_hermetic() {
     // is ALSO the floor — a directly-built unpinned spec never reaches run.)
     let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
     let engine = DockerEngine::new(boxx.clone());
-    let spec_unpinned = spec_literal("hugit-job-hermetic-unpinned", RESOLVE_TAG);
+    let spec_unpinned = spec_literal("corelink-job-hermetic-unpinned", RESOLVE_TAG);
     let r1 = engine.spawn(&spec_unpinned);
     assert!(
         r1.is_err(),
@@ -219,7 +220,7 @@ fn item_3_fail_closed_before_spawn_hermetic() {
     // ── attack 2: TAMPERED image (valid-form digest, content-wrong) ──────────
     let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
     let engine = DockerEngine::new(boxx.clone());
-    let spec_tampered = spec_literal("hugit-job-hermetic-tampered", TAMPERED_REF);
+    let spec_tampered = spec_literal("corelink-job-hermetic-tampered", TAMPERED_REF);
     let r2 = engine.spawn(&spec_tampered);
     assert!(
         r2.is_err(),
@@ -243,7 +244,7 @@ fn item_3_fail_closed_before_spawn_hermetic() {
     //    PRECEDES the single `docker run` — ordering is real, not a stub. ─────
     let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
     let engine = DockerEngine::new(boxx.clone());
-    let spec_ok = spec_literal("hugit-job-hermetic-ok", FAKE_GOOD_REF);
+    let spec_ok = spec_literal("corelink-job-hermetic-ok", FAKE_GOOD_REF);
     engine
         .spawn(&spec_ok)
         .expect("a genuine, box-verified content pin MUST spawn");
@@ -268,7 +269,7 @@ fn item_3_fail_closed_before_spawn_hermetic() {
 fn item_4_spawn_applies_untrusted_hardening_flags() {
     let boxx = FakeBox::new(FAKE_GOOD_DIGEST);
     let engine = DockerEngine::new(boxx.clone());
-    let spec_ok = spec_literal("hugit-job-hardening", FAKE_GOOD_REF);
+    let spec_ok = spec_literal("corelink-job-hardening", FAKE_GOOD_REF);
     engine.spawn(&spec_ok).expect("a good pin must spawn");
 
     let run = boxx
@@ -295,7 +296,7 @@ fn item_4_spawn_applies_untrusted_hardening_flags() {
 /// Connect to the live box; FAIL (panic) if unreachable, per contract. Only
 /// called inside the active box lane.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -365,7 +366,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -496,7 +497,7 @@ fn item_3_tampered_unpinned_fail_closed() {
     // fail-closed before any `docker run`.
     let lease_unpinned = fresh_lease("unpinned");
     let spec_unpinned = spec_literal(
-        &format!("hugit-job-{}", lease_unpinned.lease_id),
+        &format!("corelink-job-{}", lease_unpinned.lease_id),
         RESOLVE_TAG,
     );
     let r1 = engine.spawn(&spec_unpinned);

@@ -1,7 +1,9 @@
 // corelink-fabricd on Cloudflare Containers — the proxy Worker (gap-#1 option b).
 //
-// The Rust control plane runs as ONE long-lived singleton container; this Worker
-// routes EVERY request to it and keeps it warm via a cron ping. The control plane
+// The Rust control plane runs as ONE singleton container; this Worker routes EVERY
+// request to it. Recent real activity permits the cron watchdog's health probe;
+// after 5m idle, the container may scale to zero and a later request cold-starts it.
+// The control plane
 // holds the lease ledger in memory, so all /v1 traffic MUST reach the same
 // instance — enforced by a fixed DO id (SINGLETON) + max_instances:1 (wrangler).
 //
@@ -16,6 +18,11 @@ import { shardOf } from "./shard";
 
 export interface Env {
   FABRICD: DurableObjectNamespace<FabricdContainer>;
+  // Emergency edge kill-switch for NEW lease/admission/mint work. The Worker
+  // checks this before any container lookup, so existing lease lifecycle calls
+  // can drain while new work is refused. Absent or exact "0" is fail-open;
+  // every other value is treated as paused (fail-closed).
+  FABRIC_ADMISSION_PAUSED?: string;
   // Shard count (multi-instance fabricd, option 3). String in wrangler vars,
   // parsed to int; absent/invalid ⇒ 1 (inert singleton). MUST be raised in
   // lockstep with `max_instances` in wrangler.jsonc — see the comment there.
@@ -62,6 +69,9 @@ export interface Env {
   // fail-closes an armed ceiling on a non-pg backend, so the two are wired together.
   // Absent ⇒ in-memory ledger, no ceiling (unchanged dogfood behaviour). Secret.
   DATABASE_URL?: string;
+  // Optional shadow binding. The Worker selector chooses exactly one database URL.
+  DATABASE_URL_B2?: string;
+  FABRIC_DATABASE_URL_SLOT?: string;
   // Fail-closed arm for the durable ledger, WITHOUT deleting the secret. Only the
   // exact string "0" permits DATABASE_URL to reach the container; unset, blank,
   // whitespace, "1", and every malformed value behave as if DATABASE_URL were
@@ -69,7 +79,7 @@ export interface Env {
   //
   // It exists because `PgLedger::connect` fail-closes BEFORE `TcpListener::bind`:
   // when the database refuses connections the control plane cannot start, the
-  // keep-warm cron retries every minute, and every retry is another connection
+    // activity-gated cron retries every minute, and every retry is another connection
   // attempt against a database that is already refusing. On a scale-to-zero
   // provider that is worse than useless — a database woken every 60 s never
   // autosuspends, so the crash loop itself consumes the compute allowance whose
@@ -173,16 +183,102 @@ export function pgLedgerEnvVars(
   };
 }
 
+export type LedgerDatabaseResolution =
+  | { ok: true; databaseUrl: string | undefined }
+  | { ok: false };
+
+/** Select exactly one Worker database binding, failing closed for an invalid B2. */
+export function resolveLedgerDatabaseUrl(
+  env: Pick<Env, "DATABASE_URL" | "DATABASE_URL_B2" | "FABRIC_DATABASE_URL_SLOT">,
+): LedgerDatabaseResolution {
+  const slot = env.FABRIC_DATABASE_URL_SLOT ?? "legacy";
+  if (slot === "legacy") return { ok: true, databaseUrl: env.DATABASE_URL };
+  if (slot === "b2" && env.DATABASE_URL_B2?.trim()) {
+    return { ok: true, databaseUrl: env.DATABASE_URL_B2 };
+  }
+  return { ok: false };
+}
+
+const INVALID_LEDGER_BINDING_ERROR = "fabricd ledger binding configuration invalid";
+
+function invalidLedgerBindingResponse(): Response {
+  return new Response(JSON.stringify({ error: INVALID_LEDGER_BINDING_ERROR }), {
+    status: 503,
+    headers: { "content-type": "application/json", "retry-after": "1" },
+  });
+}
+
+/**
+ * Whether the Worker edge should refuse new lease/admission/mint requests.
+ *
+ * This is intentionally exact in the fail-open direction: only an absent
+ * binding or the literal string "0" leaves admissions open. A malformed or
+ * whitespace-padded value therefore pauses admissions rather than silently
+ * allowing new work during a config mistake.
+ */
+export function admissionPaused(
+  env: Pick<Env, "FABRIC_ADMISSION_PAUSED">,
+): boolean {
+  return env.FABRIC_ADMISSION_PAUSED !== undefined && env.FABRIC_ADMISSION_PAUSED !== "0";
+}
+
+/**
+ * Routes that can start NEW work. Lease-scoped operations deliberately do not
+ * belong here: status, execution/trigger, credential redemption, cancel, and
+ * close/teardown must remain available so already-issued leases can drain.
+ */
+export function isNewAdmissionRoute(method: string, pathname: string): boolean {
+  return (
+    method === "POST" &&
+    (pathname === "/v1/leases" ||
+      pathname === "/webhooks/github" ||
+      pathname === "/v1/test/mint-cred-ticket")
+  );
+}
+
+const ADMISSION_PAUSE_RETRY_AFTER_SECONDS = "60";
+
+function admissionPausedResponse(): Response {
+  return new Response(JSON.stringify({ error: "fabric admission paused" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "retry-after": ADMISSION_PAUSE_RETRY_AFTER_SECONDS,
+    },
+  });
+}
+
+/**
+ * During an admission freeze, a GitHub workflow completion must still reach
+ * the Rust handler so it can revoke credentials and tear down the runner.
+ * Read only the event envelope here; the Rust handler remains responsible for
+ * signature and full payload validation.
+ */
+function isWorkflowJobCompletedWebhook(request: Request, rawBody: ArrayBuffer): boolean {
+  if (request.headers.get("x-github-event") !== "workflow_job") return false;
+  try {
+    const payload = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(rawBody)) as {
+      action?: unknown;
+    };
+    return payload !== null && typeof payload === "object" && payload.action === "completed";
+  } catch {
+    return false;
+  }
+}
+
 /** The singleton control-plane container. fabricd binds 0.0.0.0:8080. */
 export class FabricdContainer extends Container<Env> {
   defaultPort = 8080;
   // Zero-idle-cost: sleep 5m after the last REAL request. The scheduled() cron no
-  // longer force-keeps it warm — it reads a container-free activity marker first
+  // longer probes an idle container — it reads a container-free activity marker first
   // (see fetch() override + the idle gate in scheduled()) and skips the health
   // probe once a shard is idle, so an idle fabricd actually sleeps and stops
-  // billing memory. Lease state is pg-durable (DATABASE_URL), so sleeping loses
-  // nothing; a new acquire wakes the container (~2-3s, hidden behind a minutes-long
-  // CI job). While leases are active the box keeps calling in, so it stays warm.
+  // billing memory. Under the current containment (`FABRIC_PG_DISABLED="1"`),
+  // the ledger is in-memory, so a sleep/restart can lose lease state. Durable
+  // persistence applies only when DATABASE_URL is bound AND that flag is the
+  // exact string "0"; a new acquire wakes the container (~2-3s, hidden behind a
+  // minutes-long CI job). While leases are active the box keeps calling in, so it stays warm.
   sleepAfter = "5m";
   // fabricd dials OUT to CoreLink introspect + billing ingest (+ the spawn-Worker
   // once boxes are wired); it needs egress.
@@ -190,6 +286,8 @@ export class FabricdContainer extends Container<Env> {
 
   constructor(ctx: DurableObject<Env>["ctx"], env: Env) {
     super(ctx, env);
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) throw new Error(INVALID_LEDGER_BINDING_ERROR);
     // Inject the fabricd env at container start. corelink auth backend +
     // loopback-free bind; secrets flow from Worker secrets → the container
     // process. Optional keys are omitted when unset (billing/boxes added later).
@@ -265,7 +363,7 @@ export class FabricdContainer extends Container<Env> {
       // Every key here arms together (the pg backend, the vCPU ceiling the #265
       // guard ties to it, and the pg-only export), so suppressing them together is
       // the same coherent state as never having set the secret. Nothing half-arms.
-      ...pgLedgerEnvVars(env),
+      ...pgLedgerEnvVars({ ...env, DATABASE_URL: selected.databaseUrl }),
       // ── Moat mint + env-0 + attested-cost — forward the wrangler vars/secrets
       // INTO the container (the fabricd binary reads these from its own env). The
       // mint trio (URL+key, cred-ticket secret, CLW endpoint) arm together or the
@@ -936,6 +1034,8 @@ const watchdogState = new Map<string, WatchdogEntry>();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) return invalidLedgerBindingResponse();
     const N = numShards(env);
     const { pathname } = new URL(request.url);
     // `/__do/*` is the DO-internal, container-free activity surface (idle-status)
@@ -944,6 +1044,24 @@ export default {
     if (pathname.startsWith("/__do/")) {
       return new Response("not found", { status: 404 });
     }
+
+    // Global admission freeze is an edge decision: refuse before choosing a
+    // shard or waking a container. Existing lease-scoped status, execution,
+    // credential redemption, cancel, and close/teardown routes fall through.
+    // The one webhook exception is workflow_job.completed: it is parsed just
+    // enough to let Rust perform credential revoke and runner teardown.
+    let requestForForwarding = request;
+    if (admissionPaused(env) && isNewAdmissionRoute(request.method, pathname)) {
+      if (pathname !== "/webhooks/github") return admissionPausedResponse();
+      const rawBody = await request.arrayBuffer();
+      if (!isWorkflowJobCompletedWebhook(request, rawBody)) return admissionPausedResponse();
+      requestForForwarding = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: rawBody,
+      });
+    }
+
     // Non-long-lived routes get the per-request timeout → clean 503 on a wedged
     // upstream; exec/close/queue-trigger forward unbounded (isLongLivedRoute).
     const applyTimeout = !isLongLivedRoute(request.method, pathname);
@@ -1004,7 +1122,7 @@ export default {
     // (same pattern as ACQUIRE). At N=1 this is inert → falls through to shard 0.
     if (N > 1 && request.method === "POST" && pathname === "/webhooks/github") {
       const k = ((webhookCursor++ % N) + N) % N;
-      const modified = new Request(request);
+      const modified = new Request(requestForForwarding);
       modified.headers.set("X-Fabricd-Num-Shards", String(N));
       modified.headers.set("X-Fabricd-Shard", String(k));
       return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(k, N)), modified, applyTimeout);
@@ -1028,12 +1146,17 @@ export default {
     }
 
     // Everything else (/v1/health, /v1/attestation/key, …) → shard 0.
-    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), request, applyTimeout);
+    return proxyFetch(getContainer(placed(env.FABRICD), shardDoId(0, N)), requestForForwarding, applyTimeout);
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    // Keep-alive ping so the singleton never sleeps (the 24/7 knob) — AND a
-    // liveness watchdog + self-heal (2026-07-08 recurring-hang incident: the
+    const selected = resolveLedgerDatabaseUrl(env);
+    if (!selected.ok) {
+      console.error(INVALID_LEDGER_BINDING_ERROR);
+      return;
+    }
+    // Conditional keep-alive probe for recently active shards — plus a liveness
+    // watchdog + self-heal (2026-07-08 recurring-hang incident: the
     // singleton went dark on its own, `/v1/health` timing out, needing a MANUAL
     // delete+redeploy each time).
     //

@@ -1,8 +1,8 @@
 //! Lease ledger — the authoritative state machine (CF0 freeze item 4; CP1).
 //!
-//! Contract §1 (frozen from hugit's side): states are exactly
+//! Contract §1 (frozen from the external consumer's side): states are exactly
 //! `Pending → Held → (Released | Expired | Crashed)` — five states, no
-//! invented intermediates hugit can't observe. The wire type
+//! invented intermediates an external client can't observe. The wire type
 //! [`RunnerState`] (transcribed, frozen) carries the four observable wire
 //! states; `Pending` is the contract's pre-wire admission state (a
 //! `RunnerLease` is only ever emitted once `Held`), so the ledger models it

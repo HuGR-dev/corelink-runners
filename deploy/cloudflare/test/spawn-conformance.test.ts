@@ -99,6 +99,47 @@ beforeEach(() => {
 });
 
 describe("conformance: /v1/spawn SpawnBody ↔ conformance/cloudflare-spawn.json", () => {
+  it("shared admission pause rejects new spawn before container start", async () => {
+    const resp = await worker.fetch(
+      new Request("https://w/v1/spawn", {
+        method: "POST",
+        headers: { authorization: `Bearer ${AUTH}`, "content-type": "application/json" },
+        body: JSON.stringify(vector.request),
+      }),
+      envWith({ FABRIC_ADMISSION_PAUSED: "1" }),
+    );
+
+    expect(resp.status).toBe(503);
+    expect(resp.headers.get("retry-after")).toBe("60");
+    expect(await resp.json()).toEqual({ error: "fabric admission paused" });
+    expect(containers).toHaveLength(0);
+  });
+
+  it("shared admission pause leaves existing status and teardown available", async () => {
+    const paused = envWith({ FABRIC_ADMISSION_PAUSED: "1" });
+    const status = await worker.fetch(
+      new Request("https://w/v1/status/live-handle", {
+        headers: { authorization: "Bearer lifecycle-control-secret" },
+      }),
+      paused,
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ status: "alive" });
+
+    const teardown = await worker.fetch(
+      new Request("https://w/v1/teardown", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer lifecycle-control-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ handle: "live-handle" }),
+      }),
+      paused,
+    );
+    expect(teardown.status).toBe(204);
+  });
+
   it("the committed vector's request keys are all modeled by the TS SpawnBody type", () => {
     for (const k of Object.keys(vector.request)) {
       expect(KNOWN_SPAWNBODY_KEYS.has(k)).toBe(true);

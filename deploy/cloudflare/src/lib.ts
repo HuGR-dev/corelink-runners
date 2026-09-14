@@ -2,6 +2,8 @@
 // `@cloudflare/containers` imports here — so this module is unit-testable in
 // plain vitest (node): only `crypto` + `fetch` (Node 20+ globals) are used.
 
+import { canonicalInstallationId } from "./repo_config_lookup";
+
 // ── Structured worker log — single-line JSON, queryable in CF Logs ───────────
 //
 // Swaps the historical bare `console.log`/`console.error` free-text calls for a
@@ -695,7 +697,7 @@ export function parseReconcilerRepos(csv: string | undefined): string[] {
     .filter((s) => s.includes("/"));
 }
 
-export { installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_lookup";
+export { canonicalInstallationId, installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_lookup";
 
 // ── External-GA installation allowlist (WP-D) ────────────────────────────────
 //
@@ -714,20 +716,22 @@ export { installationIdForRepo, tenantPatSecretForRepo } from "./repo_config_loo
 // INSTALLATION_ALLOWLIST="150584374,<customer-install-id>" (150584374 = the
 // dogfood installation — it MUST stay served).
 
-/** Parse the comma/whitespace-separated installation-id list. Non-throwing;
- *  returns the trimmed, non-empty ids (order/dupes irrelevant to membership). */
+/** Parse canonical positive-safe installation ids from the allowlist. */
 export function parseInstallationAllowlist(raw: string | undefined): string[] {
   if (!raw) return [];
   return raw
     .split(/[,\s]+/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .map((s) => canonicalInstallationId(s))
+    .filter((s): s is string => s !== null);
 }
 
 /** True iff the allowlist is ARMED — i.e. it parses to ≥1 id. An unset/blank/
  *  whitespace-only value is NOT armed (fail-safe: today's behavior is preserved). */
 export function installationAllowlistArmed(raw: string | undefined): boolean {
-  return parseInstallationAllowlist(raw).length > 0;
+  // A non-empty malformed configuration must deny rather than silently disarm
+  // the gate. Only unset/whitespace-only retains the deliberately unarmed mode.
+  return !!raw && raw.split(/[,\s]+/).some((s) => s.length > 0);
 }
 
 /** True iff `installationId` may proceed under the allowlist. When NOT armed,
@@ -735,7 +739,7 @@ export function installationAllowlistArmed(raw: string | undefined): boolean {
  *  member of the list proceeds (an empty/unknown id is refused). */
 export function isInstallationAllowlisted(raw: string | undefined, installationId: string): boolean {
   const allow = parseInstallationAllowlist(raw);
-  if (allow.length === 0) return true; // not armed ⇒ preserve current behavior
+  if (!installationAllowlistArmed(raw)) return true; // not armed ⇒ preserve current behavior
   if (!installationId) return false; // armed + unknown/empty id ⇒ refuse
   return allow.includes(installationId);
 }

@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-fence/tests/acceptance_c5a.rs @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed hugit-side by WP-R4②.
+// Transplanted from the transferred fence acceptance_c5a test @ 69e28e5 (runner-transfer campaign WP-R4, 2026-06-10) — wire-contract seam, no git dep; removed external-consumer side by WP-R4②.
 //! WP-C5a acceptance oracle — sparse fence materialization + path enforcement.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
@@ -9,44 +9,45 @@
 //!      while the in-fence file is readable.
 //!
 //! This is **box-dependent**: it drives the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `CORELINK_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
 //! unreachable it **FAILS** (not skip) — per contract, box-dependent tests must
-//! fail, never silently pass. It skips only when `HUGIT_RUNNER_HOST` is unset
+//! fail, never silently pass. It skips only when `CORELINK_RUNNER_HOST` is unset
 //! (the bare cargo gate lane, which does not provision the box).
 //!
 //! Box-sharing: WP-C2b runs concurrently on the same box. Everything here is
-//! namespaced with the prefix `hugit-c5a-`; spawn/probe/teardown touch only
-//! that prefix and never `hugit-c2b-*` / `hugit-job-*`.
+//! namespaced with the prefix `corelink-c5a-`; spawn/probe/teardown touch only
+//! that prefix and never `corelink-c2b-*` / `corelink-job-*`.
 
 use corelink_runner::enforce::{FenceVerdict, classify, probe_outside_enoent};
 use corelink_runner::isolation::RunningContainer;
 use corelink_runner::lease::{BoxExec, SshBox};
 use corelink_runner::materialize::{CandidateEntry, MaterializeError, materialize_sparse};
+use corelink_runner::namespace::{C5A_LABEL, C5A_PREFIX, C5A_WORKSPACE_ROOT};
 use corelink_runners_contracts::FenceManifest;
 
 const IMAGE: &str = "alpine:3.20";
 /// All box artifacts for this WP carry this prefix (box-sharing isolation).
-const PREFIX: &str = "hugit-c5a-";
+const PREFIX: &str = C5A_PREFIX;
 /// In-container workspace root the fence materializes into.
-const WORKSPACE_ROOT: &str = "/hugit-c5a-ws";
+const WORKSPACE_ROOT: &str = C5A_WORKSPACE_ROOT;
 
 /// Whether the box-dependent acceptance lane is active.
 ///
-/// The WP-C5a suite always exports `HUGIT_RUNNER_HOST`; inside that lane the
+/// The WP-C5a suite always exports `CORELINK_RUNNER_HOST`; inside that lane the
 /// test runs and FAILS if the box is unreachable. When the var is absent the
 /// file is being collected by the bare cargo gate lane (`cargo test
 /// --workspace`), which must stay green and does not provision the box — so the
 /// body short-circuits. Acceptance completeness is owned by the suite that sets
 /// the env, never by the bare gate.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
 
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
 fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -82,9 +83,9 @@ fn fresh_name(slug: &str) -> String {
     format!("{PREFIX}{slug}-{nonce}")
 }
 
-/// Spawn a `hugit-c5a-`-prefixed, network-isolated idle container directly via
-/// the box transport (NOT the C2a `DockerEngine`, whose `hugit-job-` name +
-/// `hugit.job=1` label are shared with C2b). Returns a [`RunningContainer`]
+/// Spawn a `corelink-c5a-`-prefixed, network-isolated idle container directly via
+/// the box transport (NOT the C2a `DockerEngine`, whose `corelink-job-` name +
+/// `corelink.job=1` label are shared with C2b). Returns a [`RunningContainer`]
 /// consumable by the fence API.
 fn spawn_fenced(boxx: &SshBox, name: &str) -> RunningContainer {
     let out = boxx
@@ -98,7 +99,7 @@ fn spawn_fenced(boxx: &SshBox, name: &str) -> RunningContainer {
             "--network",
             "none",
             "--label",
-            "hugit.wp=c5a",
+            C5A_LABEL,
             IMAGE,
             "sleep",
             "3600",
@@ -110,7 +111,7 @@ fn spawn_fenced(boxx: &SshBox, name: &str) -> RunningContainer {
     }
 }
 
-/// Force-remove a `hugit-c5a-`-prefixed container (idempotent, prefix-scoped).
+/// Force-remove a `corelink-c5a-`-prefixed container (idempotent, prefix-scoped).
 fn teardown_fenced(boxx: &SshBox, name: &str) {
     assert!(
         name.starts_with(PREFIX),
@@ -251,7 +252,7 @@ fn item_1_outside_path_set_enoent() {
                 "sh",
                 "-c",
                 &format!(
-                    "ln -sf /hugit-host-only-secret-xyz {link}; \
+                    "ln -sf /corelink-host-only-secret-xyz {link}; \
                      if c=$(cat {link} 2>/dev/null) && [ -n \"$c\" ]; then printf LEAK; \
                      else printf DEAD; fi"
                 ),

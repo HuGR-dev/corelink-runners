@@ -1,13 +1,13 @@
 //! Cross-repo conformance vector for §7.1 `result_binding_sig_v2` (contract
-//! v1.4.0, ratified by hugit 2026-06-14).
+//! v1.4.0, ratified by the contract owner 2026-06-14).
 //!
 //! This is the drift tripwire for the v2 full-outcome attestation binding — the
 //! same role `conformance/IntentMetrics.json` plays for §13.4, but SIGNED. The
 //! committed `conformance/result_binding_v2.json` is byte-identical in both
-//! repos; hugit mirrors the file and its verifier checks the committed
-//! `result_binding_sig_v2` against the committed `fabric_pubkey_b64` over a
-//! preimage it recomputes from `input` — so any divergence in the v2 byte
-//! formula (this side) or the verifier (hugit side) breaks a golden test.
+//! repos; external clients mirror the file and their verifier checks the
+//! committed `result_binding_sig_v2` against the committed `fabric_pubkey_b64`
+//! over a preimage recomputed from `input` — so any divergence in the v2 byte
+//! formula (this side) or the verifier breaks a golden test.
 //!
 //! The signature is reproducible: it is produced with the DETERMINISTIC dev
 //! fabric key seed `*b"corelink-runners-DEV-fabric-key!"` (a public constant),
@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 const DEV_FABRIC_KEY_SEED: [u8; 32] = *b"corelink-runners-DEV-fabric-key!";
 
 /// The v2-relevant inputs (exactly the fields the v2 preimage covers, in
-/// preimage order). Self-contained so hugit can rebuild the preimage without
-/// the full `CheckResult`.
+/// preimage order). Self-contained so an external verifier can rebuild the
+/// preimage without the full `CheckResult`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingInput {
@@ -140,11 +140,11 @@ fn result_binding_v2_conformance_vector_is_byte_exact() {
 }
 
 /// The committed signature VERIFIES against the committed pubkey over a preimage
-/// recomputed from `input` — this is exactly hugit's verifier path (they hold no
-/// private key; they verify). Proves the vector is internally valid, not just
+/// recomputed from `input` — this is exactly the external verifier path (it
+/// holds no private key). Proves the vector is internally valid, not just
 /// byte-stable.
 #[test]
-fn committed_vector_signature_verifies_like_hugit() {
+fn committed_vector_signature_verifies_like_external_consumer() {
     let raw = include_str!("../../../conformance/result_binding_v2.json");
     let v: VectorV2 = match serde_json::from_str(raw) {
         Ok(v) => v,
@@ -153,7 +153,7 @@ fn committed_vector_signature_verifies_like_hugit() {
         Err(_) => return,
     };
 
-    // Rebuild the v2 preimage from `input` alone (hugit's recompute).
+    // Rebuild the v2 preimage from `input` alone (the external verifier's recompute).
     let mut cr = fixture();
     cr.memo_key = v.input.memo_key.clone();
     cr.stdout_ref = v.input.stdout_ref.clone();

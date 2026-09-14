@@ -18,7 +18,7 @@
    - [POST /v1/leases/{lease_id}/exec](#post-v1leaseslease_idexec)
 5. [Queue trigger](#queue-trigger)
    - [POST /v1/queue/trigger](#post-v1queuetrigger)
-6. [Envelope (§13 turn-feed)](#envelope-13-turn-feed)
+6. [Optional envelope telemetry (§13 turn-feed)](#envelope-13-turn-feed)
    - [GET /v1/leases/{lease_id}/envelope/events](#get-v1leaseslease_idenvelopeevents)
    - [GET /v1/leases/{lease_id}/envelope/meta](#get-v1leaseslease_idenvelopemeta)
    - [POST /v1/leases/{lease_id}/envelope/ingest](#post-v1leaseslease_idenvelopeingest)
@@ -220,7 +220,7 @@ Both `attestation` and `result_binding_sig` are **required** fields (contract §
 
 ### `POST /v1/queue/trigger`
 
-hugit's landing queue triggers execution of an uncached check on demand (contract §9, `QueueApi` seam). Uses the same execution engine as the exec path with the same gate order and attestation obligations.
+CoreLink queue and CLI/SDK clients trigger execution of an uncached check on demand (contract §9, `QueueApi` seam). Uses the same execution engine as the exec path with the same gate order and attestation obligations.
 
 The concurrency cap was enforced at acquire. The trigger is lease-scoped — no cap re-check here.
 
@@ -262,15 +262,22 @@ The concurrency cap was enforced at acquire. The trigger is lease-scoped — no 
 
 ## Envelope (§13 turn-feed)
 
-The §13 envelope surfaces expose the in-box agent loop's raw transcript. All surfaces are **bounded in-flight only** — nothing is persisted (§13.3). Overflow is honest: the mechanism sets an overflow flag rather than silently dropping.
+The §13 envelope surfaces provide **optional CoreLink telemetry** for an in-box agent loop. They are bounded
+in-flight only — nothing is persisted (§13.3). Ingest and poll may be unused and are not a production GA gate.
+Overflow is honest: the mechanism sets an overflow flag rather than silently dropping.
 
 There are two trust boundaries with two distinct credentials:
-- **Poll (GET events/meta):** hugit's trusted subscriber authenticates with the same Bearer PAT that acquired the lease.
+- **Poll (GET events/meta):** the trusted CoreLink CLI/SDK subscriber authenticates with the same Bearer PAT that acquired the lease.
 - **Ingest (POST ingest):** the untrusted in-box agent loop authenticates with a per-lease, write-only, ingest-scoped capability token (never the tenant PAT).
+
+The telemetry surfaces do not replace close. A held lease must still be closed so the fabric can tear down and
+release it and finalize metrics, provider cost, billing, and attestation.
 
 ### `GET /v1/leases/{lease_id}/envelope/events`
 
-Drain-and-release the raw transcript events surface (§13.2 surface 1). Returns the batch currently in-flight; each poll releases those entries from the mechanism's bounded surface.
+Optionally drain-and-release the raw transcript events surface (§13.2 surface 1). Returns the batch currently
+in-flight; each poll releases those entries from the mechanism's bounded surface. Omitting this poll does not
+block close or release.
 
 **Auth:** Bearer PAT (same tenant that acquired the lease)  
 **Path parameters:** `lease_id`  
@@ -299,7 +306,8 @@ Drain-and-release the raw transcript events surface (§13.2 surface 1). Returns 
 
 ### `GET /v1/leases/{lease_id}/envelope/meta`
 
-Drain-and-release the per-turn metadata surface (§13.2 surface 2).
+Optionally drain-and-release the per-turn metadata surface (§13.2 surface 2). Omitting this poll does not block
+close or release.
 
 **Auth:** Bearer PAT  
 **Path parameters:** `lease_id`  
@@ -339,7 +347,9 @@ Drain-and-release the per-turn metadata surface (§13.2 surface 2).
 
 ### `POST /v1/leases/{lease_id}/envelope/ingest`
 
-The §13.2 trajectory turn-feed WRITE side (ENV3). The in-box agent loop forwards its transcript events here. Events are written into the lease's capture hook in-flight only — never persisted.
+The optional §13.2 trajectory turn-feed WRITE side (ENV3). The in-box agent loop may forward transcript events
+here. Events are written into the lease's capture hook in-flight only — never persisted; this route is not a GA
+requirement.
 
 **Auth:** Per-lease scoped ingest token — `Authorization: Bearer <ingest-token>`. This is NOT the tenant PAT. The token is computed by the fabric at acquire time as `HMAC(ingest-secret, lease_id)` and injected into the box env as `CORELINK_ENVELOPE_INGEST_CREDENTIAL`. An exfiltrated token can only authorize ingest to that one (soon-dead) lease — no tenant takeover.
 
@@ -386,7 +396,10 @@ The handler recomputes and constant-time compares the expected token for the req
 
 ### `POST /v1/leases/{lease_id}/close`
 
-Drive the §13.2 item-3 job-close machinery and release the lease (ENV2). This is the **only** correct way to release an agent-job lease; it delivers metrics and result atomically.
+Close the lease after execution (ENV2). This is the **only** correct way to release a held lease: it tears down
+the box, finalizes metrics and provider cost, records billing, produces attestation, and returns the result
+atomically. Close is required even when optional envelope telemetry was not ingested or polled. Production close
+does not require or await an external JobClose ACK and has no fixed 30-second wait.
 
 Gate order (none skippable):
 1. Tenant scope — unknown and cross-tenant leases are the same 404.
@@ -394,8 +407,9 @@ Gate order (none skippable):
 3. Status vocabulary — only `"succeeded"` or `"failed"` accepted. `"killed"` is the fabric's own abnormal-path verdict.
 4. `check_result.memo_key` integrity — if a result is supplied, its `memo_key` must equal `lower_hex(SHA-256(LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)))`. The fabric will attest this result; a lying `memo_key` is rejected before any side effect.
 5. Teardown first — the box is torn down before the lease is terminalized. A failed teardown returns 503 with the lease still `Held` so a retry (reaper sweep or re-close) can recover cleanly.
-6. Close machinery — runs after teardown. The §13.2 exactly-once close signal fires; ack window honored.
-7. `Held → Released` — only after the outcome, never before (`lease_not_released_before_close_signal_published`).
+6. Close finalization — runs after teardown. Local capture is finalized and the metrics, cost, billing, and
+   attestation outcome is assembled atomically.
+7. `Held → Released` — only after finalization succeeds, never before (`lease_not_released_before_close_signal_published`).
 
 **Auth:** Bearer PAT  
 **Path parameters:** `lease_id`  
@@ -413,7 +427,7 @@ Gate order (none skippable):
 |-------|------|-------------|
 | `lease_id` | `String` | The lease id. |
 | `released` | `bool` | `true` — the lease reached `Released` as a result of this call. The transition happens only after the close machinery produced its outcome. |
-| `capture_incomplete` | `bool` | `true` iff transcript capture was lossy or unconfirmed (overflow, undrained residue, or a missed ack window). Honest — never silent. |
+| `capture_incomplete` | `bool` | `true` only for actual local capture loss (overflow or undrained residue) or an abnormal partial flush. An unused telemetry route or absent external ACK does not set it. |
 | `metrics` | `IntentMetrics` | Finalized §13.1 per-job metrics. **Required** — never `null` (schema 1.2.0). See [IntentMetrics](#intentmetrics). |
 | `check_result` | `CheckResult?` | The `CheckResult` echoed from the request. |
 | `attestation` | `AttestationChain` | **Required.** When `check_result` is present, the chain links are that result's `tree_hash`/`def_digest`/`runner_ref`. When absent, all links are empty strings — the honest "no result claimed" attestation, still signed. |
@@ -608,7 +622,7 @@ Serialized as a snake_case string. One of: `"held"`, `"expired"`, `"crashed"`, `
 
 ### `IntentMetrics`
 
-Schema 1.2.0 (transcribed from hugit-contracts @ 443ff1b).
+Schema 1.2.0 (transcribed from the historical external contract snapshot @ 443ff1b).
 
 | Field | Type | Description |
 |-------|------|-------------|

@@ -150,16 +150,16 @@ describe("spawn preparation before containment claim", () => {
     expect(await f.d.instance.getEvent("evt-7102")).toMatchObject({ state: "CLAIMED", effect_permit: null });
   });
 
-  it("mints once before claim and invokes the provider only after claim", async () => {
+  it("claims before mint and invokes the provider only after claim", async () => {
     const f = fixture();
     await queued(f, "7103");
 
     expect(f.order).toContain("mint");
     expect(f.order).toContain("claim");
     expect(f.order).toContain("provider");
-    expect(f.order.indexOf("mint")).toBeLessThan(f.order.indexOf("claim"));
+    expect(f.order.indexOf("claim")).toBeLessThan(f.order.indexOf("mint"));
     expect(f.order.indexOf("mint")).toBeLessThan(f.order.indexOf("adopt"));
-    expect(f.order.indexOf("adopt")).toBeLessThan(f.order.indexOf("claim"));
+    expect(f.order.indexOf("claim")).toBeLessThan(f.order.indexOf("adopt"));
     expect(f.order.indexOf("claim")).toBeLessThan(f.order.indexOf("jit"));
     expect(f.order.indexOf("jit")).toBeLessThan(f.order.indexOf("provider"));
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
@@ -172,7 +172,7 @@ describe("spawn preparation before containment claim", () => {
     await queued(f, "7120");
     const mint = f.calls.find(({ url }) => url.endsWith("/runner/mint"));
     expect(JSON.parse(String(mint?.init?.body)).operation_id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(f.order).toEqual(["mint"]);
+    expect(f.order).toEqual(["claim", "mint"]);
     expect(getContainer).not.toHaveBeenCalled();
     expect(spawnClaims(f)).toEqual([]);
     expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
@@ -182,7 +182,7 @@ describe("spawn preparation before containment claim", () => {
   it("revokes local credential ownership and refuses provider effects after ambiguous adoption", async () => {
     const f = fixture({ adoptStatus: 503 });
     await queued(f, "7121");
-    expect(f.order).toEqual(["mint", "adopt"]);
+    expect(f.order).toEqual(["claim", "mint", "adopt"]);
     expect(f.calls.filter(({ url }) => url.endsWith("/runner/revoke"))).toHaveLength(1);
     expect(getContainer).not.toHaveBeenCalled();
     expect(spawnClaims(f)).toEqual([]);
@@ -207,12 +207,11 @@ describe("spawn preparation before containment claim", () => {
     await queued(f, "7104");
 
     const revoked = f.calls.filter(({ url }) => url.endsWith("/internal/v1/runner/revoke"));
-    expect(revoked).toHaveLength(1);
-    expect(JSON.parse(String(revoked[0].init?.body))).toMatchObject({ pat_id: "new-pat", owner_tenant: TENANT });
+    expect(revoked).toHaveLength(0);
     expect(await f.d.instance.pendingCredentials({ kind: "job", jobId: "7104" })).toEqual({
       records: [{ jobId: "7104", tenant: TENANT, patId: "healthy-pat" }], complete: true,
     });
-    expect([...f.d.storage.map.values()]).toContainEqual(expect.objectContaining({ patId: "new-pat", status: "revoked" }));
+    expect([...f.d.storage.map.values()]).not.toContainEqual(expect.objectContaining({ patId: "new-pat", status: "revoked" }));
     expect(f.d.storage.map.has("credential-job-fence:7104")).toBe(false);
     expect(f.store.map.has("done:7104")).toBe(false);
     expect(drivingRecords(f)).toEqual([]);
@@ -230,7 +229,7 @@ describe("spawn preparation before containment claim", () => {
     const settled = f.calls.filter(({ url }) => url.endsWith("/compute/settle"));
     expect(settled).toHaveLength(0);
     expect(f.slotsStorage.map.get("slot-holders:v1:7122")).toMatchObject({ holders: ["winning-preparation"] });
-    expect((await f.d.instance.revocationRequestedCredentials()).records).toContainEqual({ jobId: "7122", tenant: TENANT, patId: "new-pat", lifecycleGeneration: "1" });
+    expect((await f.d.instance.revocationRequestedCredentials()).records).toEqual([]);
     expect(getContainer).not.toHaveBeenCalled();
     expect(f.calls.filter(({ url }) => url.includes("generate-jitconfig"))).toHaveLength(0);
   });

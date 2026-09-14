@@ -1,4 +1,4 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! Step executor and equivalence harness for the Actions-YAML shim (③ ④).
 //!
 //! ## Contract guarantee (③ — secrets fail CLOSED)
@@ -467,7 +467,7 @@ impl EquivalenceHarness {
         // GH lane: attempt live comparison.
         // In v0: live GH lane requires network + GH_TOKEN — PARTIAL if not
         // available. The live comparison is wired but gated on
-        // HUGIT_GH_TEST_REPO being set and a GH_TOKEN available via broker.
+        // CORELINK_GH_TEST_REPO being set and a GH_TOKEN available via broker.
         // Both arms return None in v0 (PARTIAL path).
         let actions_outcomes: Option<ObservableOutcomes> = None;
         let _ = &self.gh_test_repo; // documented: wired for future live lane
@@ -476,7 +476,7 @@ impl EquivalenceHarness {
             None => {
                 // PARTIAL: live GH lane not available
                 EquivalenceOutcome::Partial {
-                    reason: "live GitHub Actions lane not available (HUGIT_GH_TEST_REPO set but GH_TOKEN not provisioned via broker, or network unavailable); shim lane ran successfully".to_string(),
+                    reason: "live GitHub Actions lane not available (CORELINK_GH_TEST_REPO set but GH_TOKEN not provisioned via broker, or network unavailable); shim lane ran successfully".to_string(),
                 }
             }
             Some(ao) => compare_outcomes(shim_outcomes, ao),

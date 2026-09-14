@@ -5,7 +5,7 @@ import { getContainer } from "@cloudflare/containers";
 import worker, { ConcurrencySlotsDO, ContainmentDO, runNormalIntakeDrain } from "../src/index";
 import { ctx, env, FakeStorage, kv, makeDO, ns, settle, webhook } from "./containment-redrive-test-helpers";
 
-function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStatus?: number; mintKey?: string } = {}) {
+function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStatus?: number; mintKey?: string; expectedInternalKey?: string } = {}) {
   const d = makeDO();
   const store = kv();
   const slotsStorage = new FakeStorage();
@@ -22,6 +22,11 @@ function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStat
     const url = String(input);
     let body: unknown;
     if (url.endsWith("/runner/authorize")) {
+      const headers = new Headers(init?.headers);
+      if (options.expectedInternalKey !== undefined
+        && headers.get("x-corelink-internal-auth") !== options.expectedInternalKey) {
+        return new Response("authorize unavailable", { status: 403 });
+      }
       if ((options.authorizeStatus ?? 200) !== 200) return new Response("authorize unavailable", { status: options.authorizeStatus });
       body = { tenant: "tenant-a", max_concurrency: 2 };
     }
@@ -47,10 +52,45 @@ function setup(rateAllowed = true, options: { authorizeStatus?: number; mintStat
   });
   vi.stubGlobal("fetch", fetchMock);
   vi.mocked(getContainer).mockReturnValue({ startWithEnv: vi.fn(async () => {}), teardown: vi.fn(async () => {}) } as never);
-  return { d, store, slotsStorage, runtime, limiter, fetchMock, issuedOperations };
+  return { d, store, slotsStorage, slots, runtime, limiter, fetchMock, issuedOperations };
 }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+function expectNoSpawnState(f: ReturnType<typeof setup>) {
+  expect([...f.store.map.keys()].filter(key => /^(jhandle:|jtenant:|sbox:|orphan:)/.test(key))).toEqual([]);
+  expect([...f.d.storage.map.keys()].filter(key => /containment:v1:(effect:|active:|permit:)/.test(key))).toEqual([]);
+  expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+  expect(getContainer).not.toHaveBeenCalled();
+}
+
+function expectNoSecretOutput(spies: Array<ReturnType<typeof vi.spyOn>>) {
+  const output = JSON.stringify(spies.flatMap(spy => spy.mock.calls));
+  for (const forbidden of [
+    "expected-internal-key",
+    "wrong-runtime-key",
+    "pat-should-never-log",
+    "jit-should-never-log",
+    '"workflow_job"',
+  ]) expect(output).not.toContain(forbidden);
+}
+
+async function completedWebhook(jobId: number, runnerName: string): Promise<Request> {
+  const raw = new TextEncoder().encode(JSON.stringify({
+    action: "completed",
+    workflow_job: { id: jobId, labels: ["corelink"], runner_name: runnerName },
+    repository: { full_name: "acme/repo" },
+    installation: { id: 42 },
+  }));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, raw);
+  const signature = `sha256=${[...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return new Request("https://worker/webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-github-event": "workflow_job", "x-hub-signature-256": signature, "x-github-delivery": `completed-${jobId}-${runnerName}` },
+    body: raw,
+  });
+}
 
 describe("normal webhook durable acknowledgement", () => {
   it("retains a rate-limited command before 202 and starts no external work", async () => {
@@ -123,11 +163,48 @@ describe("normal webhook durable acknowledgement", () => {
     expect(getContainer).toHaveBeenCalledTimes(1);
   });
 
+  it("fences a selected normal intake when installation deletion commits before effect admission", async () => {
+    const f = setup(false);
+    const context = ctx();
+    expect((await worker.fetch(await webhook(8250, "delete-race-8250"), f.runtime, context as never)).status).toBe(202);
+    await settle(context); // rate-limited intake is durable but not yet eligible
+    const record = f.d.storage.map.get("normal-inbox:v1:event:delete-race-8250") as { next_attempt_ms: number };
+    vi.spyOn(Date, "now").mockReturnValue(record.next_attempt_ms);
+    f.limiter.mockResolvedValue({ success: true });
+
+    let entered!: () => void; let finish!: () => void;
+    const atProvider = new Promise<void>(resolve => { entered = resolve; });
+    const releaseProvider = new Promise<void>(resolve => { finish = resolve; });
+    vi.mocked(getContainer).mockReturnValue({ startWithEnv: vi.fn(async () => { entered(); await releaseProvider; }), teardown: vi.fn(async () => {}) } as never);
+    const drain = runNormalIntakeDrain(f.runtime);
+    await atProvider;
+    // The real canonical route is past admission and paused in its provider
+    // seam. Deletion cannot commit while its durable lease remains live.
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("busy");
+    expect(await f.d.instance.installationTombstoned("42")).toBe(false);
+    finish();
+    // This is a lifecycle assertion, not a Vitest escape hatch: the provider
+    // has resolved, so the real drain must settle promptly and leave no
+    // asynchronous work holding the focused process open.
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        drain,
+        new Promise<never>((_, reject) => { expiry = setTimeout(() => reject(new Error("normal drain did not settle after provider completion")), 2_000); }),
+      ]);
+    } finally {
+      if (expiry !== undefined) clearTimeout(expiry);
+    }
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
+  });
+
   it.each([
     ["missing production mint key", { mintKey: "" }],
-    ["wrong production mint key", { authorizeStatus: 403 }],
+    ["wrong production mint key", { mintKey: "wrong-runtime-key", expectedInternalKey: "mint-auth" }],
   ])("durably retains 100 verified webhooks for retry when %s", async (_label, options) => {
     const f = setup(false, options);
+    const logs = vi.spyOn(console, "log");
+    const errors = vi.spyOn(console, "error");
     const context = ctx();
     const requests = await Promise.all(Array.from({ length: 100 }, (_, i) => webhook(8300 + i, `retry-8300-${i}`)));
     const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, context as never)));
@@ -153,18 +230,72 @@ describe("normal webhook durable acknowledgement", () => {
     else expect(authorizeCalls).toHaveLength(100);
     expect(records.every(([, value]) => (value as { next_attempt_ms: number }).next_attempt_ms > retryNow)).toBe(true);
     expect([...f.store.map.keys()].filter(key => key.startsWith("spawn:"))).toEqual([]);
-    expect(getContainer).not.toHaveBeenCalled();
-    expect(f.slotsStorage.map.get("slots") ?? []).toEqual([]);
+    expectNoSpawnState(f);
+    expectNoSecretOutput([logs, errors]);
   }, 20_000);
 
   it("returns 503 for all 100 verified webhooks when the durable intake store is unavailable", async () => {
     const f = setup();
+    const logs = vi.spyOn(console, "log");
+    const errors = vi.spyOn(console, "error");
     vi.spyOn(f.d.storage, "transaction").mockRejectedValue(new Error("durable store unavailable"));
     const requests = await Promise.all(Array.from({ length: 100 }, (_, i) => webhook(8400 + i, `unavailable-8400-${i}`)));
-    const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, ctx() as never)));
+    const context = ctx();
+    const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, context as never)));
     expect(responses.every(response => response.status === 503)).toBe(true);
+    expect(context.tasks).toHaveLength(0);
+    expect(f.d.storage.map.size).toBe(0);
+    expect(f.store.map.size).toBe(0);
     expect(f.fetchMock).not.toHaveBeenCalled();
+    expectNoSpawnState(f);
+    expectNoSecretOutput([logs, errors]);
+  });
+
+  it("A3.17: wrong runtime key stays pending without exposing auth, PAT, JIT, or webhook body", async () => {
+    const authKey = "expected-internal-key";
+    const wrongKey = "wrong-runtime-key";
+    const secretPat = "pat-should-never-log";
+    const secretJit = "jit-should-never-log";
+    const f = setup(false, { mintKey: wrongKey, expectedInternalKey: authKey });
+    const logs = vi.spyOn(console, "log");
+    const errors = vi.spyOn(console, "error");
+    const context = ctx();
+    const requests = await Promise.all(Array.from({ length: 100 }, (_, i) => webhook(8600 + i, `wrong-key-${i}`)));
+    const responses = await Promise.all(requests.map(request => worker.fetch(request, f.runtime, context as never)));
+    expect(responses.every(response => response.status === 202)).toBe(true);
+    await settle(context);
+    f.limiter.mockResolvedValue({ success: true });
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_001);
+    await runNormalIntakeDrain(f.runtime);
+    await runNormalIntakeDrain(f.runtime);
+    await runNormalIntakeDrain(f.runtime);
+    await runNormalIntakeDrain(f.runtime);
+
+    const authorize = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"));
+    expect(authorize).toHaveLength(100);
+    expect(authorize.every(([, init]) => new Headers((init as RequestInit).headers).get("x-corelink-internal-auth") === wrongKey)).toBe(true);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint") || String(url).includes("generate-jitconfig"))).toHaveLength(0);
+    expectNoSpawnState(f);
+    expectNoSecretOutput([logs, errors]);
+  }, 20_000);
+
+  it("does not let stale runner A completion tear down or release replacement B", async () => {
+    const f = setup();
+    const jobId = "8701";
+    await f.store.put(`jhandle:${jobId}`, "handle-b");
+    await f.store.put("rhandle:runner-b", JSON.stringify({ h: "handle-b", rid: 9, repo: "acme/repo", inst: "42", jid: jobId, t: Date.now() }));
+    await f.slots.acquire("tenant-b", jobId, 2, 20, 60_000);
+    const b = await f.slots.acquireSpawnClaim(jobId, 60_000);
+    expect(b.status).toBe("acquired");
+    if (b.status !== "acquired") return;
+    await f.slots.markSpawnClaimActive(jobId, b.generation, b.ownerToken);
+    await f.slots.bindSpawnClaimProvider(jobId, b.generation, b.ownerToken, "runner-b");
+
+    expect((await worker.fetch(await completedWebhook(Number(jobId), "runner-a"), f.runtime, ctx() as never)).status).toBe(200);
     expect(getContainer).not.toHaveBeenCalled();
+    expect(f.store.map.get(`jhandle:${jobId}`)).toBe("handle-b");
+    expect((await f.slots.readSpawnClaim(jobId))?.providerIdentity).toBe("runner-b");
+    expect((f.slotsStorage.map.get("slots") as Array<{ jobId: string }>).map(slot => slot.jobId)).toContain(jobId);
   });
 
   it("concurrent duplicate delivery starts exactly one provider while owner ledger admits one effect", async () => {

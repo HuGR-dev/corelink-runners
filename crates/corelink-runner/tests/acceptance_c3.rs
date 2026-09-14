@@ -1,10 +1,10 @@
-// Transplanted from hugit/crates/hugit-runner @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
+// Transplanted from transferred runner implementation @ ead800d83d19bfd7f90bf4241ee27b18b09007f1 (runner-transfer campaign R2, 2026-06-10) — wire-contract seam, no git dep.
 //! WP-C3 acceptance oracle — cache-warm boot: hydrate-on-lease, shared
 //! toolchain layers, CAS/AC-down fail-closed.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_warm_vs_cold_boot_timing` — warm boot ≤10s; cold boot ≥60s.
-//!      *Timing on the real box requires `HUGIT_RUNNER_HOST`.*
+//!      *Timing on the real box requires `CORELINK_RUNNER_HOST`.*
 //!      *Hermetic structural proof (always runs in the bare gate)*: the warm path
 //!      reuses cached toolchain layers (zero materializations); the cold path
 //!      materializes from scratch (non-zero). Proven via an in-process fake CAS
@@ -21,7 +21,7 @@
 //! ## Box-dependence seam
 //! The *timing* assertion in item ① (`≤10s warm / ≥60s cold`) requires a real
 //! warm-then-cold boot cycle on the live runner box and is gated behind
-//! `HUGIT_RUNNER_HOST` (the suite that sets the env owns completion). The bare
+//! `CORELINK_RUNNER_HOST` (the suite that sets the env owns completion). The bare
 //! `cargo test --workspace` gate runs only the **hermetic structural proof** of
 //! items ①, ②, ③ — always, fail-not-skip.
 //!
@@ -43,6 +43,7 @@ use corelink_runner::boot::{
     BootCas, BootError, BootOutcome, HydrationPlan, ToolchainLayer, cold_hydrate, hydrate,
 };
 use corelink_runner::lease::BoxExec;
+use corelink_runner::namespace::JOB_TMP_ROOT;
 use corelink_runners_contracts::{FenceManifest, RunnerLease, RunnerState};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ fn fresh_lease(slug: &str) -> RunnerLease {
         path_set: vec!["src/".to_string()],
         expiry: u64::MAX,
         net_policy: "none".to_string(),
-        tmp_root: "/hugit/tmp".to_string(),
+        tmp_root: JOB_TMP_ROOT.to_string(),
         state: RunnerState::Held,
     }
 }
@@ -75,7 +76,7 @@ fn sample_fence() -> FenceManifest {
 
 /// Whether the box-dependent lane is active.
 fn box_lane_active() -> bool {
-    std::env::var("HUGIT_RUNNER_HOST")
+    std::env::var("CORELINK_RUNNER_HOST")
         .ok()
         .is_some_and(|h| !h.trim().is_empty())
 }
@@ -297,7 +298,7 @@ fn item_1_warm_vs_cold_structural_proof() {
 
 /// Box-dependent: real warm ≤10s vs cold ≥60s timing on the live runner box.
 ///
-/// Requires `HUGIT_RUNNER_HOST`. When absent this body short-circuits (the
+/// Requires `CORELINK_RUNNER_HOST`. When absent this body short-circuits (the
 /// hermetic structural proof above always runs instead).
 #[test]
 fn item_1_warm_vs_cold_timing() {
@@ -318,7 +319,7 @@ fn item_1_warm_vs_cold_timing() {
     use corelink_runner::boot::BoxHydrate;
     use corelink_runner::lease::SshBox;
 
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set in the box lane");
+    let boxx = SshBox::from_env().expect("CORELINK_RUNNER_HOST must be set in the box lane");
 
     // Ensure the box is reachable.
     let ping = boxx

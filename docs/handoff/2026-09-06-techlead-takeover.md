@@ -443,3 +443,49 @@ focused tests above then passed. Future worktrees and dependency paths must be
 created by root before dispatch, with exact working directories in every packet.
 The monitor proposal remains unanswered and unapplied; routine independent work
 is already authorized. Do not repeat the broad census or ask for sibling access.
+
+## B2 scaffold — 2026-09-07
+
+B1/#559 is confirmed merged on `origin/main` at
+`0cc2d82373b9786450414a77dba656ea43e015a0` (merge 1/3). B2 is anchored on that
+exact SHA in `/private/tmp/corelink-b2-integration-20260907`, branch
+`bundle/b2-sprint2-closeout-20260906`. Its population is frozen at the canonical
+14 items; no product code, PR, push, deployment, CI or heavy test ran for this
+scaffold.
+
+The canonical DAG is promoted, frozen and `DISPATCHABLE`. The two valid PRE
+reviews targeted `fdf3a27fab6aa2231323ed6a95af369ae46f136a`; the two independent
+POST conclusions targeted the clean baseline
+`220090f8d9a0408c955d2f7a915308f6496028f8` and enabled dispatch. The invalid PRE
+review of root `19eb…` and POST HOLD `b2_quiet_post_2` earn no credit. Dispatch
+still reads each row's exact D/O/R predecessors and blockers: T3-W2 is the first
+write target, while T2-W2b remains blocked by O1, O-DEVENV-PIN and O-FLEETBUSY.
+
+### B2 card reconciliation — source versus local versus external
+
+Source-done but not delivered: T4-W1, T4-W2, T3-W3, T3-W1, T8-W5 and T8-W2.
+T3-W14 has RetryEpochAuthority/client and focused tests at source
+`28683b347c119b90fed8da4c40e770853786c43d`, but still needs canonical
+ledger/evidence validation. Local product gaps remain T3-W2/F007, T8-W1,
+T8-W3 (atomic claim and required-mint proof) and T3-W9 (spawn durability).
+External/live gates remain T2-W2b, T2-W4 and T2-W6, plus the named live gates
+for source-done WPs. This reconciliation changes neither B2's 14-WP scope nor
+any individual WP state or blocker; later gate promotion only enables canonical
+row-by-row dispatch.
+
+### B2 F007 decision and source-proof reconciliation
+
+Root resolved the apparent T3-W2→T3-W16 dependency: it is not a B2 prerequisite.
+ContainmentDO redrive is authoritative and fenced, KV reaping is diagnostic-only,
+and `teardownCompletedRunner` confirms `isAlive=false` before slot release.
+T3-W16/F005 is retained as Sprint 3 preventive hardening. T3-W2 therefore needs
+only its F007 acceptance/evidence and three focused lifecycle permutations before
+it can compose with T8-W1.
+
+At B2 SHA `265557bf018dc29f7cdf2cd0c0e867a5a95fc9a7`, root reported focused
+source proofs: T4-W1 19/19 plus typecheck PASS; T4-W2 11/11; T3-W3 18/18 plus
+typecheck PASS; T3-W1 Rust 40/40 plus Worker 41/41; T8-W1 15/15; T3-W14 21/21
+(AU3.19/AU4.14/AU3.20/AU3.21); T8-W5 18/18; and T8-W2 31/31. The read-only
+hygiene package at `/tmp/corelink-b2-hygiene.T8Ay9K` is contextual evidence
+only. None of these source proofs is a quiet review, live proof, or delivery
+credit.

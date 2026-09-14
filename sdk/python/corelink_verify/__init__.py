@@ -6,7 +6,7 @@ This module is that check, client-side, byte-identical to the Rust
 ``crates/corelink-cli/src/binding.rs`` reference implementation.
 
 Contract V2VERIFY (FROZEN — same formula as the fabric signer, the Rust
-CLI, and hugit's verifier):
+CLI, and the external verifier):
 
     LP(s)    = u32_be(len(utf8(s))) || utf8(s)
     preimage = LP(memo_key) || LP(stdout_ref) || LP(stderr_ref)
@@ -15,8 +15,8 @@ CLI, and hugit's verifier):
                || for each artifact IN ORDER: LP(path) || LP(digest)
 
 Locked to ``conformance/result_binding_v2.json`` — the same shared
-conformance vector hugit mirrors — so this module can never drift from
-the fabric signer or hugit's verifier without the golden test breaking.
+conformance vector external clients mirror — so this module can never drift from
+the fabric signer or the external verifier without the golden test breaking.
 """
 
 from __future__ import annotations

@@ -62,6 +62,22 @@ beforeEach(() => {
   getContainer.mockReset();
 });
 
+describe("public liveness routes proxy to the fabricd singleton", () => {
+  it("routes /, /health, and /v1/health to the same singleton at N=1", async () => {
+    const hits = stubShards({
+      [SINGLETON]: () => Promise.resolve(new Response("ok", { status: 200 })),
+    });
+
+    for (const path of ["/", "/health", "/v1/health"]) {
+      const response = await worker.fetch(new Request(`http://fabricd${path}`), envWithShards(1));
+      expect(response.status).toBe(200);
+    }
+
+    expect(hits.map((hit) => hit.id)).toEqual([SINGLETON, SINGLETON, SINGLETON]);
+    expect(getContainer).toHaveBeenCalledTimes(3);
+  });
+});
+
 // The Rust `metrics::TenantMetricsResponse` wire shape.
 function metricsResponse(
   tenant: string,

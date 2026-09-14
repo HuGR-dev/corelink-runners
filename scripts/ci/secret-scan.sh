@@ -33,7 +33,7 @@ trap 'trap - TERM; exit 143' TERM
 config="$work_dir/gitleaks.toml"; ignore_file="$work_dir/gitleaksignore"
 report="$work_dir/report.json"; log="$work_dir/scanner.log"
 printf '[extend]\nuseDefault = true\n' >"$config"
-# These 20 fingerprints are the reviewed deterministic fixture/reference
+# These 23 fingerprints are the reviewed deterministic fixture/reference
 # findings from the frozen cda90940..52197fd0 range. Fingerprints are the
 # narrowest supported exception: a changed value, commit, path or detector
 # produces a different fingerprint and remains visible to the scanner.
@@ -58,9 +58,21 @@ d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.t
 d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:294
 d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:330
 91af0ac8a08ae8199bf9ed7f57a6bbdb8d7bd3e0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:234
+07201f2f7a44d2ccd6221c89c79ea3abcf9de7f6:scripts/ci/code-server-private-key-scan.selftest.sh:private-key:68
+07201f2f7a44d2ccd6221c89c79ea3abcf9de7f6:scripts/ci/code-server-private-key-scan.selftest.sh:private-key:71
+defff94e401bc7dca4b70eeb709de3b2a4e76627:scripts/ci/code-server-private-key-scan.selftest.sh:private-key:68
 EOF
 install_scanner() {
-  local archive checksum_tool
+  local archive checksum_tool installed_scanner
+  # macOS developers may already have the exact pinned release installed;
+  # avoid downloading an unexecutable Linux archive in that environment.
+  if [[ "$(uname -s 2>/dev/null || true)" == Darwin* ]] \
+    && installed_scanner="$(command -v gitleaks 2>/dev/null || true)" \
+    && [[ -x "$installed_scanner" ]] \
+    && [[ "$("$installed_scanner" version 2>/dev/null || true)" == "$GITLEAKS_VERSION" ]]; then
+    printf '%s\n' "$installed_scanner"
+    return 0
+  fi
   command -v curl >/dev/null 2>&1 || { printf 'secret-scan: curl is required\n' >&2; return 2; }
   if command -v sha256sum >/dev/null 2>&1; then checksum_tool='sha256sum';
   elif command -v shasum >/dev/null 2>&1; then checksum_tool='shasum -a 256';

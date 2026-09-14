@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 1 ] || exit 2
+[ "${MOCK_SCENARIO:-success}" != bad_mode ] || { printf '644\n'; exit 0; }
+stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"

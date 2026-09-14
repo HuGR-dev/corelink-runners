@@ -61,7 +61,7 @@ const KNOWN_KEYS: &[&str] = &[
 
 /// The committed vector deserializes into [`UsageEventData`] and re-serializes
 /// byte-identically (pretty + the committed trailing newline, compared WITHOUT
-/// trim) — the same drift tripwire the hugit-side goldens carry, now around the
+/// trim) — the same drift tripwire the external-consumer side goldens carry, now around the
 /// billing usage-event. A field renamed / added / removed / reordered on the
 /// Rust struct breaks this.
 #[test]

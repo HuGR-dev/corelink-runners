@@ -1,12 +1,12 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
-import { NormalIntakeInbox, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { NormalIntakeInbox, acquireInstallationFenceInTransaction, installationFenceKey, installationTombstoneKey, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
 import { retryEpochClient, type RetryEpochAuthorityRpc } from "./lib/retry_epoch_client";
 import { controlAuthed } from "./lib/control_auth";
-import { authorizeRunner, RunnerAuthorizationError } from "./lib/runner_authorization";
+import { authorizeRunner, inspectRunnerAuthorization, RunnerAuthorizationError } from "./lib/runner_authorization";
 import { adoptIssuedRunnerCredential } from "./lib/runner_credential_adoption";
 import { runnerCredentialLeaseId } from "./lib/runner_credential_lease";
 import { ConcurrencyAuthority } from "./lib/concurrency_authority";
@@ -85,6 +85,7 @@ import {
   RUNNER_BOX_VCPU,
   VCPU_KEY_TTL_S,
   VCPU_WARN_THRESHOLDS,
+  canonicalInstallationId,
   installationIdForRepo,
   tenantPatSecretForRepo,
   installationAllowlistArmed,
@@ -255,8 +256,15 @@ export interface Env {
   // Independent control domains; all three keys must differ. No shared-key fallback.
   CLOUDFLARE_EXEC_AUTH_TOKEN?: string;
   CLOUDFLARE_LIFECYCLE_AUTH_TOKEN?: string;
+  // Shared emergency edge freeze. Absent or exact "0" is fail-open; every
+  // other value pauses new admission/spawn work (fail-closed on bad config).
+  FABRIC_ADMISSION_PAUSED?: string;
   AUTOSCALER_INTAKE_PAUSED?: string;
   AUTOSCALER_REDRIVE_PAUSED?: string;
+  /** Default-off A3.17 qualification capability. Never an operational control. */
+  A317_LIVE_PROOF_HMAC_KEY?: string;
+  A317_LIVE_PROOF_BUILD_SHA?: string;
+  A317_LIVE_PROOF_REPO?: string;
   CONTAINMENT_ADMIN_KEY?: string;
   CONTAINMENT?: DurableObjectNamespace<ContainmentDO>;
   // Track-C C2b: the bearer the in-container check-host exec-server requires on
@@ -318,6 +326,7 @@ export interface Env {
   // D-9 internal-auth key (`x-corelink-internal-auth`). Worker secret. Required
   // spawn preparation refuses missing authorization before JIT/provider work.
   CORELINK_RUNNER_MINT_AUTH_KEY?: string;
+  REQUIRE_MINT_KEY?: string;
   // D-9 mint base URL (default the public on-net hostname; Option B).
   CORELINK_MINT_URL?: string;
   // The CAS API base URL injected as CLW_ENDPOINT (default same host).
@@ -444,6 +453,48 @@ export interface Env {
   CLOUDFLARE_API_TOKEN?: string;
 }
 
+export interface SpawnClaimRecord {
+  jobId: string;
+  generation: number;
+  ownerToken: string;
+  phase: "claimed" | "active";
+  claimedAtMs: number;
+  expiresAtMs: number;
+  /** The provider identity that GitHub echoes on a completion webhook. */
+  providerIdentity?: string;
+}
+
+export type SpawnClaimResult =
+  | { status: "acquired"; generation: number; ownerToken: string }
+  | { status: "held"; generation: number }
+  | { status: "invalid" };
+
+export type SpawnClaimRelease = "released" | "stale" | "missing";
+
+/**
+ * Durable post-start ownership.  This lives beside the generation claim rather
+ * than in KV: KV is a projection with a TTL and is therefore never evidence
+ * that a provider start may be repeated or that a slot may be released.
+ */
+export interface ActiveSpawnAttempt {
+  schemaVersion: 1;
+  jobId: string;
+  generation: number;
+  ownerToken: string;
+  handle: string;
+  runnerName: string;
+  runnerId?: number;
+  repo: string;
+  installationId: string;
+  jitAttempt: number;
+  preparationId?: string;
+  createdAtMs: number;
+  /** Written before start; retained until exact teardown is confirmed. */
+  teardownIntent: true;
+  /** Exact handle was observed down; capacity cleanup may still be pending. */
+  teardownConfirmedAtMs?: number;
+}
+
 // ── env-0 cred-stash Durable Object — the Worker-native single-use latch ──────
 // One instance per lease_id (= GH jobId). The autoscaler stashes the per-job CAS
 // PAT here and injects only a CLW_CRED_TICKET into the untrusted container; clw
@@ -502,6 +553,215 @@ export class CredStashDO extends DurableObject<Env> {
 // tested); this wrapper only persists the resulting slot list.
 export class ConcurrencySlotsDO extends DurableObject<Env> {
   private authority(): ConcurrencyAuthority { return new ConcurrencyAuthority(this.ctx.storage); }
+  private async spawnClaimTx<T>(fn: (storage: DurableObjectTransaction) => Promise<T>): Promise<T> {
+    return this.ctx.storage.transaction(fn);
+  }
+
+  /**
+   * The spawn claim is separate from capacity slots.  A generation and owner
+   * token make every release conditional, so a late failed attempt cannot
+   * release a claim acquired by a later retry.
+   */
+  async acquireSpawnClaim(jobId: string, ttlMs: number): Promise<SpawnClaimResult> {
+    if (!jobId || !Number.isFinite(ttlMs) || ttlMs <= 0) return { status: "invalid" };
+    return this.spawnClaimTx(async storage => {
+      const now = Date.now();
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (current && current.expiresAtMs > now) return { status: "held", generation: current.generation };
+      // Keep a monotonic counter after release. Reusing generation 1 after a
+      // completed/failed attempt makes audits ambiguous and weakens the exact
+      // attempt proof carried into completion.
+      const generationKey = `spawn-claim-generation:${jobId}`;
+      const generation = ((await storage.get<number>(generationKey)) ?? 0) + 1;
+      const record: SpawnClaimRecord = {
+        jobId,
+        generation,
+        ownerToken: crypto.randomUUID(),
+        phase: "claimed",
+        claimedAtMs: now,
+        expiresAtMs: now + ttlMs,
+      };
+      await storage.put(key, record);
+      await storage.put(generationKey, generation);
+      return { status: "acquired", generation, ownerToken: record.ownerToken };
+    });
+  }
+
+  async renewSpawnClaim(jobId: string, generation: number, ownerToken: string, ttlMs: number): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken) return false;
+      await storage.put(key, { ...current, expiresAtMs: Date.now() + ttlMs });
+      return true;
+    });
+  }
+
+  async markSpawnClaimActive(jobId: string, generation: number, ownerToken: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken) return false;
+      // Once provider dispatch is fenced, the claim lives until the matching
+      // completion/teardown releases this exact generation. A wall-clock TTL
+      // here would permit a duplicate spawn during a long running job.
+      await storage.put(key, { ...current, phase: "active", expiresAtMs: Number.MAX_SAFE_INTEGER });
+      return true;
+    });
+  }
+
+  /**
+   * Bind the provider identity after dispatch. Completion supplies this value,
+   * so it can release only the exact attempt that actually owned that runner.
+   */
+  async bindSpawnClaimProvider(jobId: string, generation: number, ownerToken: string, providerIdentity: string): Promise<boolean> {
+    if (!providerIdentity) return false;
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current || current.generation !== generation || current.ownerToken !== ownerToken || current.phase !== "active") return false;
+      if (current.providerIdentity && current.providerIdentity !== providerIdentity) return false;
+      await storage.put(key, { ...current, providerIdentity });
+      return true;
+    });
+  }
+
+  private attemptKey(jobId: string): string { return `spawn-active-attempt:v1:${jobId}`; }
+
+  /**
+   * Commit the exact handle, JIT runner identity and cleanup intent before the
+   * provider start RPC.  A second delivery can only see this durable record and
+   * cannot mint another JIT/slot/start after KV has expired.
+   */
+  async persistActiveAttempt(
+    jobId: string, handle: string, runnerName: string, runnerId: number | undefined,
+    jitAttempt: number, repo: string, installationId: string, preparationId?: string,
+  ): Promise<boolean> {
+    if (!jobId || !handle || !runnerName || !Number.isSafeInteger(jitAttempt) || jitAttempt < 1
+      || (installationId !== "" && canonicalInstallationId(installationId) !== installationId)) return false;
+    return this.spawnClaimTx(async storage => {
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      if (!claim || claim.phase !== "active" || claim.providerIdentity !== runnerName) return false;
+      const key = this.attemptKey(jobId);
+      const prior = await storage.get<ActiveSpawnAttempt>(key);
+      if (prior) {
+        return prior.generation === claim.generation && prior.ownerToken === claim.ownerToken
+          && prior.handle === handle && prior.runnerName === runnerName && prior.jitAttempt === jitAttempt;
+      }
+      await storage.put(key, {
+        schemaVersion: 1, jobId, generation: claim.generation, ownerToken: claim.ownerToken,
+        handle, runnerName, ...(typeof runnerId === "number" ? { runnerId } : {}), jitAttempt,
+        repo, installationId, ...(preparationId ? { preparationId } : {}), createdAtMs: Date.now(), teardownIntent: true,
+      } satisfies ActiveSpawnAttempt);
+      return true;
+    });
+  }
+
+  async readActiveAttempt(jobId: string): Promise<ActiveSpawnAttempt | null> {
+    return (await this.ctx.storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) ?? null;
+  }
+
+  async pendingActiveAttempts(limit = 25): Promise<ActiveSpawnAttempt[]> {
+    const page = await this.ctx.storage.list<ActiveSpawnAttempt>({ prefix: "spawn-active-attempt:v1:", limit });
+    return [...page.values()];
+  }
+
+  /**
+   * Checkpoint a successful exact-handle teardown before local capacity cleanup.
+   * A retry after a slot-release outage therefore never issues a second destroy,
+   * while a replacement generation still fences this stale callback completely.
+   */
+  async markAttemptTeardownConfirmed(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return false;
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      if (claim && (claim.generation !== generation || claim.ownerToken !== ownerToken)) return false;
+      if (!attempt.teardownConfirmedAtMs) await storage.put(key, { ...attempt, teardownConfirmedAtMs: Date.now() });
+      return true;
+    });
+  }
+
+  /** Terminalize only the generation that owns this exact provider handle. */
+  async confirmAttemptTeardown(jobId: string, generation: number, ownerToken: string, handle: string): Promise<ActiveSpawnAttempt | null> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return null;
+      const claim = await storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`);
+      // A replacement generation is never harmed by a stale cleanup callback.
+      if (claim && (claim.generation !== generation || claim.ownerToken !== ownerToken)) return null;
+      await storage.delete(key);
+      if (claim) await storage.delete(`spawn-claim:${jobId}`);
+      return attempt;
+    });
+  }
+
+  /**
+   * Retire one confirmed-dead start attempt so the same claim may mint a fresh
+   * JIT runner and retry. The slot and claim belong to the workflow job; the
+   * provider identity belongs only to the single-use runner just destroyed.
+   */
+  async retireActiveAttemptForRetry(jobId: string, generation: number, ownerToken: string, handle: string): Promise<boolean> {
+    return this.spawnClaimTx(async storage => {
+      const key = this.attemptKey(jobId);
+      const attempt = await storage.get<ActiveSpawnAttempt>(key);
+      if (!attempt || attempt.generation !== generation || attempt.ownerToken !== ownerToken || attempt.handle !== handle) return false;
+      const claimKey = `spawn-claim:${jobId}`;
+      const claim = await storage.get<SpawnClaimRecord>(claimKey);
+      if (!claim || claim.generation !== generation || claim.ownerToken !== ownerToken || claim.phase !== "active") return false;
+      await storage.delete(key);
+      // Clear only the retired runner identity, so attempt B can bind its own
+      // JIT identity without weakening the generation/owner fence.
+      await storage.put(claimKey, { ...claim, providerIdentity: undefined });
+      return true;
+    });
+  }
+
+  /**
+   * Completion deliberately accepts a provider identity, never an unqualified
+   * job id. A stale completion for runner A therefore cannot release a later
+   * generation B for the same job.
+   */
+  async releaseSpawnClaimForCompletion(jobId: string, providerIdentity: string): Promise<SpawnClaimRelease> {
+    if (!providerIdentity) return "stale";
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current) return "missing";
+      if (current.phase !== "active" || current.providerIdentity !== providerIdentity) return "stale";
+      const attempt = await storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId));
+      // The completion caller reaches this only after exact-handle teardown has
+      // been confirmed.  Require the durable start identity too, then retire the
+      // terminal tombstone and claim together.  A mismatched completion cannot
+      // remove a replacement attempt.
+      if (attempt && (attempt.generation !== current.generation || attempt.ownerToken !== current.ownerToken || attempt.runnerName !== providerIdentity)) return "stale";
+      if (attempt) await storage.delete(this.attemptKey(jobId));
+      await storage.delete(key);
+      return "released";
+    });
+  }
+
+  async releaseSpawnClaim(jobId: string, generation: number, ownerToken: string): Promise<SpawnClaimRelease> {
+    return this.spawnClaimTx(async storage => {
+      const key = `spawn-claim:${jobId}`;
+      const current = await storage.get<SpawnClaimRecord>(key);
+      if (!current) return "missing";
+      if (current.generation !== generation || current.ownerToken !== ownerToken) return "stale";
+      // An active provider attempt is released only by confirmAttemptTeardown.
+      // This permits pre-start preparation failures to release normally while
+      // making a post-start projection failure durable and retryable.
+      if (await storage.get<ActiveSpawnAttempt>(this.attemptKey(jobId))) return "stale";
+      await storage.delete(key);
+      return "released";
+    });
+  }
+
+  async readSpawnClaim(jobId: string): Promise<SpawnClaimRecord | null> {
+    return (await this.ctx.storage.get<SpawnClaimRecord>(`spawn-claim:${jobId}`)) ?? null;
+  }
   // ATOMIC acquire: prune-expired → decide (per-key cap THEN fleet cap; idempotent
   // per jobId) → persist. Returns the clean admit/refuse decision — the caller
   // fail-opens ONLY on a THROWN error (infra hiccup), never on a `{admitted:false}`.
@@ -610,6 +870,16 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.ctx.storage.transaction(fn);
   }
 
+  /**
+   * Spend the bounded exceptional-admission budget in the same durable
+   * authority that serializes all callers. A missing or unreadable authority
+   * is a refusal; a healthy missing record is a fresh budget.
+   */
+  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
+    const nowMs = Date.now();
+    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
+  }
+
   async snapshot(): Promise<ContainmentMeta> {
     return (await this.ctx.storage.get<ContainmentMeta>(CONTAINMENT_META_KEY)) ?? emptyContainmentMeta();
   }
@@ -617,6 +887,16 @@ export class ContainmentDO extends DurableObject<Env> {
   async normalIntakeEnqueue(input: NormalIntakeInput, delayMs = 0) {
     return new NormalIntakeInbox(this.ctx.storage).enqueue(input, Date.now(), delayMs);
   }
+
+  async normalIntakeA317ProofEnqueue(input: NormalIntakeInput, proof: A317ProofRecord, unavailable = false) {
+    return new NormalIntakeInbox(this.ctx.storage).enqueueA317Proof(input, proof, Date.now(), unavailable);
+  }
+  async normalIntakeA317Proof(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Proof(eventId, Date.now()); }
+  async normalIntakeA317Pending(limit = 25) { return new NormalIntakeInbox(this.ctx.storage).a317Pending(undefined, undefined, Date.now(), limit); }
+  async beginA317Authorization(eventId: string) { return new NormalIntakeInbox(this.ctx.storage).beginA317Authorization(eventId); }
+  async finishA317Authorization(eventId: string, status: "refused401" | "refused403" | "accepted2xx" | "unknown") { return new NormalIntakeInbox(this.ctx.storage).finishA317Authorization(eventId, status); }
+  async normalIntakeA317Snapshot(runId: string) { return new NormalIntakeInbox(this.ctx.storage).a317Snapshot(runId, Date.now()); }
+  async cleanupExpiredA317Proofs() { return new NormalIntakeInbox(this.ctx.storage).cleanupExpiredA317Proofs(Date.now()); }
 
   async normalIntakePending(limit = 25): Promise<NormalIntakeRecord[]> {
     return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
@@ -626,9 +906,20 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
 
-  async spendAdmissionBudget(): Promise<AdmissionBudgetVerdict> {
-    const nowMs = Date.now();
-    return this.tx((storage) => spendAdmissionBudget(storage, nowMs));
+  async normalIntakeAdmit(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admit(eventId);
+  }
+  async normalIntakeAdmissionFence(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admissionFence(eventId);
+  }
+  async normalIntakeReleaseFence(eventId: string): Promise<void> { return new NormalIntakeInbox(this.ctx.storage).releaseAdmissionFence(eventId); }
+
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict" | "busy"> {
+    return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
+  }
+
+  async installationTombstoned(installationId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).installationTombstoned(installationId);
   }
 
   async getEvent(eventId: string): Promise<ContainmentEvent | null> {
@@ -722,7 +1013,14 @@ export class ContainmentDO extends DurableObject<Env> {
   async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
   async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
   async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
-  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> { return this.tx(s => admitDrainOwnerInTransaction(s, eventId, tuple, now)); }
+  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> {
+    return this.tx(async s => {
+      if (!await admitDrainOwnerInTransaction(s, eventId, tuple, now)) return false;
+      const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
+      return !!event && await acquireInstallationFenceInTransaction(s, event.installation_id, event.effect_id);
+    });
+  }
+  async releaseInstallationFence(installationId: string, effectId: string): Promise<void> { await this.ctx.storage.delete(installationFenceKey(installationId, effectId)); }
   async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
@@ -848,6 +1146,7 @@ export class ContainmentDO extends DurableObject<Env> {
     path: "redrive" = "redrive",
     effectId?: string,
     now = Date.now(),
+    installationId?: string,
   ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: ContainmentRedrivePermit }> {
     const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || path !== "redrive") return { status: "invalid" };
@@ -857,10 +1156,15 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.tx(async (s) => {
       const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
       if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      // Eligibility is decided before acquiring the deletion fence. An expired
+      // or already-promoted tuple has no external effect to protect and must
+      // never leave a durable fence behind.
+      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
+      if (installationId && await s.get(installationTombstoneKey(installationId)) !== undefined) return { status: "ineligible" as const };
+      if (installationId && !await acquireInstallationFenceInTransaction(s, installationId, expectedEffectId)) return { status: "ineligible" as const };
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
       // a fresh tuple through reserveRedriveCandidate first.
-      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
       await s.put(containmentReservationKey(repo, jobId), eligible);
       return { status: "eligible" as const, permit: reservationPermit(eligible) };
@@ -1292,6 +1596,24 @@ export class ContainmentDO extends DurableObject<Env> {
     return true;
   }
 
+  /**
+   * A deletion tombstone is a terminal outcome for a head that never received
+   * an effect permit.  The same EFFECT_COMMITTED → acknowledge recovery path
+   * makes a crash between these two writes deterministic without issuing work.
+   */
+  async terminalizeTombstonedEvent(eventId: string, owner: string, epoch: number): Promise<boolean> {
+    return this.tx(async (s) => {
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
+      const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
+      if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, Date.now())
+        || event.state !== "CLAIMED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch
+        || event.effect_permit !== null || canonicalInstallationId(event.installation_id) !== event.installation_id) return false;
+      if ((await s.get(installationTombstoneKey(event.installation_id))) === undefined) return false;
+      await s.put(containmentEventKey(eventId), { ...event, state: "EFFECT_COMMITTED" });
+      return true;
+    });
+  }
+
   async releaseLease(owner: string, epoch: number): Promise<void> {
     await this.tx(async (s) => {
       const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
@@ -1639,6 +1961,28 @@ export function parseContainmentSwitch(raw: string | undefined): ContainmentSwit
   if (raw === "1") return "paused";
   return "invalid";
 }
+
+/**
+ * Shared cross-worker emergency freeze. Only an absent binding or exact "0"
+ * leaves new admissions open; malformed and whitespace-padded values pause
+ * them so a config mistake cannot silently re-enable spawning.
+ */
+export function admissionPaused(raw: string | undefined): boolean {
+  return raw !== undefined && raw !== "0";
+}
+
+const ADMISSION_PAUSE_RETRY_AFTER_SECONDS = "60";
+
+function admissionPausedResponse(): Response {
+  return new Response(JSON.stringify({ error: "fabric admission paused" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "retry-after": ADMISSION_PAUSE_RETRY_AFTER_SECONDS,
+    },
+  });
+}
 function trimAsciiWhitespace(value: string): string {
   // HTTP field-value whitespace is ASCII-only here. Include VT (0x0b), which
   // JavaScript's `\\s` would hide among non-ASCII whitespace we must preserve.
@@ -1647,6 +1991,23 @@ function trimAsciiWhitespace(value: string): string {
 function containmentAuthority(env: Env): DurableObjectStub<ContainmentDO> {
   if (!env.CONTAINMENT) throw new Error("containment authority unavailable");
   return env.CONTAINMENT.get(env.CONTAINMENT.idFromName("global"));
+}
+
+async function installationIsTombstoned(env: Env, installationId: string): Promise<boolean> {
+  if (canonicalInstallationId(installationId) !== installationId || !env.CONTAINMENT) return false;
+  return containmentAuthority(env).installationTombstoned(installationId);
+}
+
+function resolveWebhookInstallationId(
+  value: unknown,
+  repo: string,
+  repositoryMap: string | undefined,
+): { installationId: string; invalid: boolean } {
+  if (value !== undefined && value !== null) {
+    const installationId = canonicalInstallationId(value);
+    return installationId ? { installationId, invalid: false } : { installationId: "", invalid: true };
+  }
+  return { installationId: installationIdForRepo(repositoryMap, repo), invalid: false };
 }
 
 // T4-W2 consumes T4-W1's immutable ContainmentDO attribution authority. The
@@ -1790,9 +2151,9 @@ async function mintJit(
 // load-bearing half, not a nicety: the box can boot, but it can never be given
 // work. The container destroy that follows is what actually ends it.
 //
-// Best-effort and deliberately so: it runs on an already-failing path, and every
-// outcome (deleted, 404-already-gone, 422-busy, unreachable) leaves us no worse
-// than before. Logged, never thrown.
+// Never throws so callers can preserve their original failure, but false is an
+// uncertain ownership result. Durable retry/teardown callers must retain their
+// attempt until this returns true (including 404-already-gone).
 async function deleteRunnerRegistration(
   env: Env,
   repoFullName: string,
@@ -2012,20 +2373,31 @@ async function abandonContainer(
   handle: string,
   ns: GhostNs,
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   await recordGhostContainer(env, handle, ns, reason);
+  let container: { teardown(): Promise<void>; isAlive(): Promise<boolean> } | undefined;
+  let teardownSucceeded = false;
   try {
-    const c =
+    container = (
       ns === "check"
         ? getContainer(env.CHECK_HOST_CONTAINER, handle)
-        : getContainer(env.RUNNER_CONTAINER, handle);
-    await c.teardown();
+        : getContainer(env.RUNNER_CONTAINER, handle)
+    ) as unknown as { teardown(): Promise<void>; isAlive(): Promise<boolean> };
+    await container.teardown();
+    teardownSucceeded = true;
   } catch (e) {
     // Expected when the DO never materialised. The `ghost:` record above is what
     // makes this survivable: the cron re-destroys and confirms.
     logEvent("info", "abandon_teardown_threw", { handle, error: (e as Error).message });
   }
   await bumpMetrics(env, "container_start_abandoned");
+  if (!teardownSucceeded || !container) return false;
+  try {
+    return !(await container.isAlive());
+  } catch (e) {
+    logEvent("info", "abandon_liveness_threw", { handle, error: (e as Error).message });
+    return false;
+  }
 }
 
 /**
@@ -2123,7 +2495,7 @@ export async function sweepGhostContainers(env: Env): Promise<number> {
 async function startWithRetry<T>(
   provision: (attempt: number) => Promise<T>,
   start: (handle: string, provisioned: T) => Promise<void>,
-  abandon: (handle: string, provisioned: T, reason: string) => Promise<void>,
+  abandon: (handle: string, provisioned: T, reason: string) => Promise<boolean | void>,
   maxAttempts = SPAWN_MAX_ATTEMPTS,
 ): Promise<{ handle: string; provisioned: T; attempt: number }> {
   let lastErr: unknown;
@@ -2152,7 +2524,11 @@ async function startWithRetry<T>(
       // Cancel it. Losing the race to a timeout does NOT mean nothing started —
       // see the ghost-container note above. This runs on EVERY failed attempt,
       // including the last one, so an exhausted spawn leaves no box behind either.
-      await abandon(handle, provisioned, (e as Error).message);
+      // Fabric callers retain their established best-effort ghost cleanup. The
+      // autoscaler returns false when it cannot prove its exact attempt is down;
+      // in that case a replacement JIT must never be minted.
+      const safeToRetry = await abandon(handle, provisioned, (e as Error).message);
+      if (safeToRetry === false) break;
       if (attempt < maxAttempts) {
         await new Promise((r) => setTimeout(r, 300 * attempt));
       }
@@ -2180,10 +2556,14 @@ async function cancelSpawnAttempt(
     installationId: string;
     handle: string;
     minted?: MintedJit;
+    // `startWithEnv` is issued only after this durable fence resolves. If the
+    // fence itself failed, no provider start occurred and a fresh retry does
+    // not depend on proving a container liveness result.
+    activeAttemptPersisted?: boolean;
     reason: string;
   },
-): Promise<void> {
-  const { jobId, repo, installationId, handle, minted, reason } = opts;
+): Promise<boolean> {
+  const { jobId, repo, installationId, handle, minted, activeAttemptPersisted, reason } = opts;
   let registrationDeleted = false;
   try {
     if (minted) {
@@ -2194,7 +2574,31 @@ async function cancelSpawnAttempt(
         installationId,
       );
     }
-    await abandonContainer(env, handle, "runner", reason);
+    // Deletion is the ownership fence: a false result includes a rejected or
+    // unreachable GitHub request, so it cannot prove runner A will not claim
+    // work later.  Keep its durable claim/attempt intact and refuse B even if
+    // the local destroy below happens to report the box down.
+    if (minted && !registrationDeleted) {
+      await abandonContainer(env, handle, "runner", reason);
+      logEvent("error", "container_start_registration_delete_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
+    const tornDown = await abandonContainer(env, handle, "runner", reason);
+    if (!activeAttemptPersisted) return true;
+    if (!tornDown) {
+      logEvent("error", "container_start_abandon_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
+    // The start callback records this handle before issuing its provider RPC.
+    // Retire only the matching attempt after liveness says it is down, retaining
+    // the same slot/claim for attempt B. Any stale or replacement record blocks
+    // the retry rather than clearing a newer runner's ownership proof.
+    const active = await concurrencySlots(env).readActiveAttempt(jobId);
+    if (!active || active.handle !== handle || active.runnerName !== minted?.runnerName
+      || !(await concurrencySlots(env).retireActiveAttemptForRetry(jobId, active.generation, active.ownerToken, handle))) {
+      logEvent("error", "container_start_attempt_retire_unconfirmed", { jobId, repo, handle, reason });
+      return false;
+    }
     logEvent("error", "container_start_abandoned", {
       jobId,
       repo,
@@ -2203,8 +2607,10 @@ async function cancelSpawnAttempt(
       registrationDeleted,
       reason,
     });
+    return true;
   } catch (e) {
     logEvent("error", "abandon_failed", { jobId, handle, error: (e as Error).message });
+    return false;
   }
 }
 
@@ -2230,9 +2636,15 @@ async function spawnRunner(
   opts: ContainmentDriveOpts,
 ): Promise<{ handle: string; runnerName: string; attempt: number }> {
   const { repo, installationId, labels } = opts;
-  const { handle, provisioned, attempt } = await startWithRetry<MintedJit>(
+  const { handle, provisioned, attempt } = await startWithRetry<{ minted: MintedJit; attempt: number; activeAttemptPersisted?: boolean }>(
     async (attempt) => {
       const minted = await mintJit(env, repo, labels, installationId);
+      // Persist the exact GitHub runner identity before its container can start.
+      // Completion later presents this same runner_name; without this fence a
+      // fast completion could race a post-start binding and leave capacity held.
+      if (opts.bindProviderIdentity && !(await opts.bindProviderIdentity(minted.runnerName))) {
+        throw new Error("spawn claim provider binding unavailable");
+      }
       await bumpMetrics(env, "jit_minted");
       // Recorded so a box killed by the WRONG completion can be traced back to the
       // job it was minted for — the permutation is invisible without this line.
@@ -2242,21 +2654,30 @@ async function spawnRunner(
         runnerName: minted.runnerName,
         attempt,
       });
-      return minted;
+      return { minted, attempt };
     },
-    async (h, minted) => {
+    async (h, provisioned) => {
+      const minted = provisioned.minted;
+      // This is deliberately before both the provider RPC and every KV
+      // projection below.  A timeout/crash at any later point therefore leaves
+      // a generation-bound exact-handle teardown obligation in the singleton
+      // authority, not an expiring best-effort KV hint.
+      if (!(await concurrencySlots(env).persistActiveAttempt(
+        jobId, h, minted.runnerName, minted.runnerId, provisioned.attempt, repo, installationId, mint.preparationId,
+      ))) throw new Error("active spawn attempt was not durably recorded");
+      provisioned.activeAttemptPersisted = true;
       if (mint.computeReservationId) await containmentAuthority(env).claimComputeProvider(mint.computeReservationId, jobId);
       await getContainer(env.RUNNER_CONTAINER, h).startWithEnv({
         CORELINK_RUNNER_JITCONFIG: minted.jit,
         ...mint.containerEnv, // CLW_* overlay (empty on a cold spawn)
       });
     },
-    (h, minted, reason) =>
-      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted, reason }),
+    (h, provisioned, reason) =>
+      cancelSpawnAttempt(env, { jobId, repo, installationId, handle: h, minted: provisioned.minted, activeAttemptPersisted: provisioned.activeAttemptPersisted, reason }),
     // A fresh provider attempt needs its own independently funded reservation.
     mint.computeReservationId ? 1 : SPAWN_MAX_ATTEMPTS,
   );
-  const runnerName = provisioned.runnerName;
+  const runnerName = provisioned.minted.runnerName;
   if (isContainmentDrive(opts)) {
     // The retry helper returned only after this JIT candidate's start completed.
     // Timed-out/abandoned candidates never get a reusable DO witness.
@@ -2265,27 +2686,33 @@ async function spawnRunner(
       opts,
       "attempt",
       "github:generate-jitconfig",
-      JSON.stringify({ runner_name: runnerName, runner_id: provisioned.runnerId, attempt }),
+      JSON.stringify({ runner_name: runnerName, runner_id: provisioned.minted.runnerId, attempt }),
       { attempt_count: attempt },
     );
   }
   // (The jobId->patId revoke-key is now written at MINT time in driveSpawn, BEFORE
   // the spawn — F2/W3 — so a start failure can revoke the PAT rather than orphan it.
   // Intentionally NOT re-written here.)
+  // Normal arrivals use the compatibility projections directly. Contained work
+  // keeps its immutable witness/read-back sequence below, which binds the same
+  // facts to the containment permit before it may become terminal.
+  if (!isContainmentDrive(opts)) {
+    await persistSpawnPostStartProjections(env, opts, mint, handle, runnerName, provisioned.minted.runnerId);
+    return { handle, runnerName, attempt };
+  }
   if (mint.tenant && env.RUNNER_JOB_PATS) {
     // Stash the derived tenant for completion (concurrency-slot release + billing).
-    await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant).catch((e) => logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }));
+    try { await env.RUNNER_JOB_PATS.put(jobTenantKey(jobId), mint.tenant); }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
     // Cache the tenant's monthly compute allowance (server #975) so COMPLETION —
     // a separate Worker invocation that never talks to the mint — can tell how
     // close this tenant is to it. Keyed per TENANT, not per job: the allowance is
     // a property of the subscription, so one key refreshed on every spawn beats a
     // write per job. Absent ⇒ no metered ceiling ⇒ nothing to warn about.
     if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
-      await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
+      try { await env.RUNNER_JOB_PATS.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), {
         expirationTtl: VCPU_KEY_TTL_S,
-      }).catch((e) =>
-        logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }),
-      );
+      }); } catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
     }
   }
   if (env.RUNNER_JOB_PATS) {
@@ -2303,9 +2730,9 @@ async function spawnRunner(
       const storedHandle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
       if (storedHandle !== handle) throw new Error("containment lease source was not durably written");
     } else {
-      await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
+      try { await env.RUNNER_JOB_PATS.put(jobHandleKey(jobId), handle, {
         expirationTtl: JOB_PAT_TTL_S,
-      }).catch((e) => logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }));
+      }); } catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
     }
     // …and stash it under the RUNNER NAME, which is what completion tears down by.
     // This is the binding that survives GitHub's job→runner permutation; the
@@ -2318,11 +2745,11 @@ async function spawnRunner(
     // registration: `generate-jitconfig` creates the runner entity and returns its
     // id immediately, so waiting for a registration that may never happen would
     // leave the un-registered box — the exact one that leaks — unverifiable.
-    await env.RUNNER_JOB_PATS.put(
+    try { await env.RUNNER_JOB_PATS.put(
       runnerHandleKey(runnerName),
       encodeRunnerBinding({
         h: handle,
-        rid: provisioned.runnerId,
+        rid: provisioned.minted.runnerId,
         repo,
         inst: installationId,
         // The job this box was started FOR — a CANDIDATE for the stranded sweep,
@@ -2333,35 +2760,108 @@ async function spawnRunner(
       {
         expirationTtl: JOB_PAT_TTL_S,
       },
-    ).catch((e) =>
-      logEvent("error", "kv_put_runner_handle_failed", {
-        jobId,
-        runnerName,
-        error: (e as Error).message,
-      }),
-    );
+    ); } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
     // …and the reaper's durable twin, which deliberately OUTLIVES the binding
     // above. Same facts, longer TTL: this is what lets the sweep find a box that
     // has outlived its own keep-alive record instead of trusting `sleepAfter`.
-    await env.RUNNER_JOB_PATS.put(
+    try { await env.RUNNER_JOB_PATS.put(
       spawnedBoxKey(runnerName),
       JSON.stringify({
         h: handle,
-        rid: provisioned.runnerId,
+        rid: provisioned.minted.runnerId,
         repo,
         inst: installationId,
         t: Date.now(),
       }),
       { expirationTtl: SPAWNED_BOX_TTL_S },
-    ).catch((e) =>
-      logEvent("error", "kv_put_spawned_box_failed", {
-        jobId,
-        runnerName,
-        error: (e as Error).message,
-      }),
-    );
+    ); } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
   }
   return { handle, runnerName, attempt };
+}
+
+/**
+ * Write the best-effort KV compatibility projections after the provider has
+ * started. The durable active-attempt record already exists at this point, so a
+ * failed projection deliberately throws into exact-handle cleanup rather than
+ * silently returning a false successful spawn.
+ */
+export async function persistSpawnPostStartProjections(
+  env: Env,
+  opts: Pick<ContainmentDriveOpts, "jobId" | "repo" | "installationId">,
+  mint: Pick<ContainerEnvResult, "tenant" | "maxVcpuH">,
+  handle: string,
+  runnerName: string,
+  runnerId: number | undefined,
+): Promise<void> {
+  const { jobId, repo, installationId } = opts;
+  const kv = env.RUNNER_JOB_PATS;
+  if (!kv) return;
+  if (mint.tenant) {
+    try { await kv.put(jobTenantKey(jobId), mint.tenant); }
+    catch (e) { logEvent("error", "kv_put_job_tenant_failed", { jobId, error: (e as Error).message }); throw e; }
+    if (typeof mint.maxVcpuH === "number" && mint.maxVcpuH > 0) {
+      try { await kv.put(vcpuCeilingKey(mint.tenant), String(mint.maxVcpuH), { expirationTtl: VCPU_KEY_TTL_S }); }
+      catch (e) { logEvent("error", "kv_put_vcpu_ceiling_failed", { jobId, error: (e as Error).message }); throw e; }
+    }
+  }
+  try { await kv.put(jobHandleKey(jobId), handle, { expirationTtl: JOB_PAT_TTL_S }); }
+  catch (e) { logEvent("error", "kv_put_job_handle_failed", { jobId, error: (e as Error).message }); throw e; }
+  try {
+    await kv.put(runnerHandleKey(runnerName), encodeRunnerBinding({ h: handle, rid: runnerId, repo, inst: installationId, jid: jobId, t: Date.now() }), { expirationTtl: JOB_PAT_TTL_S });
+  } catch (e) { logEvent("error", "kv_put_runner_handle_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
+  try {
+    await kv.put(spawnedBoxKey(runnerName), JSON.stringify({ h: handle, rid: runnerId, repo, inst: installationId, t: Date.now() }), { expirationTtl: SPAWNED_BOX_TTL_S });
+  } catch (e) { logEvent("error", "kv_put_spawned_box_failed", { jobId, runnerName, error: (e as Error).message }); throw e; }
+}
+
+/**
+ * Drive the durable teardown intent.  This intentionally never clears a tenant
+ * vCPU key: it is tenant-wide subscription state, not an attempt projection.
+ */
+async function recoverActiveSpawnAttempt(env: Env, jobId: string): Promise<boolean> {
+  let attempt: ActiveSpawnAttempt | null;
+  try { attempt = await concurrencySlots(env).readActiveAttempt(jobId); }
+  catch { return false; }
+  if (!attempt) return false;
+  if (!attempt.teardownConfirmedAtMs) {
+    // Revoke exactly the JIT registration recorded for this handle before a late
+    // provider boot can claim unrelated queued work.  This is idempotent (404 is
+    // success) and uses the installation captured at mint time.
+    // A failed DELETE means GitHub may still allow this exact runner to claim a
+    // job. Do not certify the container, release capacity, or terminalize the
+    // intent until the registration fence is confirmed (404 is confirmed).
+    if (!(await deleteRunnerRegistration(env, attempt.repo, attempt.runnerId, attempt.installationId))) return false;
+    const container = getContainer(env.RUNNER_CONTAINER, attempt.handle);
+    // A failed teardown is not evidence that the exact handle is down. Retain the
+    // intent for cron even if a follow-up liveness probe happens to say false.
+    try { await container.teardown(); } catch { return false; }
+    let alive: boolean;
+    try { alive = await container.isAlive(); } catch { return false; }
+    if (alive) return false;
+    try {
+      if (!(await concurrencySlots(env).markAttemptTeardownConfirmed(jobId, attempt.generation, attempt.ownerToken, attempt.handle))) return false;
+    } catch { return false; }
+  }
+  // Retain the intent until EVERY local release has acknowledged.  A release
+  // outage remains in the cron retry set instead of becoming an unowned leak.
+  if (attempt.preparationId) {
+    try { await concurrencySlots(env).releasePreparation(jobId, attempt.preparationId); } catch { return false; }
+  }
+  if (!await releaseConcurrencySlot(env, jobId)) return false;
+  let confirmed: ActiveSpawnAttempt | null;
+  try {
+    confirmed = await concurrencySlots(env).confirmAttemptTeardown(jobId, attempt.generation, attempt.ownerToken, attempt.handle);
+  } catch { return false; }
+  if (!confirmed) return false;
+  return true;
+}
+
+export async function retryActiveSpawnTeardowns(env: Env): Promise<number> {
+  let attempts: ActiveSpawnAttempt[];
+  try { attempts = await concurrencySlots(env).pendingActiveAttempts(25); } catch { return 0; }
+  let settled = 0;
+  for (const attempt of attempts) if (await recoverActiveSpawnAttempt(env, attempt.jobId)) settled++;
+  return settled;
 }
 
 export async function revokeCompletedJob(env: Env, jobId: string, derivedTenant?: string): Promise<boolean> {
@@ -2394,9 +2894,9 @@ async function teardownCompletedRunner(
   // `jhandle:<jobId>` records the box we STARTED for this job's webhook, which
   // under GitHub's label-match assignment is frequently a DIFFERENT box that is
   // still busy; destroying it is what killed live jobs on 2026-08-02. The jobId
-  // lookup survives only as a fallback for a completion with no runner_name
-  // (a job cancelled before it was ever assigned to a runner) and for records
-  // written before this change shipped.
+  // lookup survives only for a completion with no runner_name (a job cancelled
+  // before assignment). Once GitHub supplied a runner identity, falling back to
+  // a job pointer can destroy a replacement box for the same job.
   let handle: string | null = null;
   let resolvedBy: "runner_name" | "job_id" = "runner_name";
   try {
@@ -2405,7 +2905,7 @@ async function teardownCompletedRunner(
       // that change shipped, a bare handle string) — `parseRunnerBinding` reads both.
       handle = parseRunnerBinding(await env.RUNNER_JOB_PATS.get(runnerHandleKey(runnerName)))?.h ?? null;
     }
-    if (!handle) {
+    if (!runnerName) {
       resolvedBy = "job_id";
       // `jhandle:` was never given a record shape; it still holds a bare handle.
       handle = await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId));
@@ -2436,27 +2936,31 @@ async function teardownCompletedRunner(
     logEvent("error", "teardown_confirmation_failed", { jobId, error: (e as Error).message });
     return false;
   }
-  // Drop BOTH bindings for this box. The runner-name key is the one that was
-  // just consumed; the jobId key is dropped too so the stale (possibly
-  // wrong-box) pointer can never be followed by a redelivered completion.
+  // With a runner name, remove only that exact runner binding. A job pointer can
+  // already belong to a replacement attempt and must remain untouched.
   if (runnerName) {
     await env.RUNNER_JOB_PATS.delete(runnerHandleKey(runnerName)).catch(() => {
       /* best-effort: the key TTL-expires */
     });
+  } else {
+    await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
+      /* best-effort: the key TTL-expires */
+    });
   }
-  await env.RUNNER_JOB_PATS.delete(jobHandleKey(jobId)).catch(() => {
-    /* best-effort: the key TTL-expires */
-  });
   return true;
 }
 
 async function teardownObligationPresent(env: Env, jobId: string, runnerName?: string): Promise<boolean | null> {
   if (!env.RUNNER_JOB_PATS) return false;
   try {
-    const keys = [jobHandleKey(jobId)];
-    if (runnerName) keys.push(runnerHandleKey(runnerName));
-    for (const key of keys) if (await env.RUNNER_JOB_PATS.get(key)) return true;
-    return false;
+    if (runnerName) {
+      // Absence is not proof that a completion may release this job's current
+      // slot: the exact runner binding could have been lost while a replacement
+      // still owns the job pointer. Retain capacity until the exact completion
+      // path confirms teardown and claim identity.
+      return true;
+    }
+    return Boolean(await env.RUNNER_JOB_PATS.get(jobHandleKey(jobId)));
   } catch {
     return null;
   }
@@ -2652,6 +3156,93 @@ function concurrencySlots(env: Env): DurableObjectStub<ConcurrencySlotsDO> {
   return env.CONCURRENCY_SLOTS.get(env.CONCURRENCY_SLOTS.idFromName("global"));
 }
 
+type SpawnClaimLease = Pick<SpawnClaimRecord, "generation" | "ownerToken">;
+
+async function acquireSpawnClaimAtomic(env: Env, jobId: string): Promise<SpawnClaimLease | null> {
+  let acquired: SpawnClaimLease | null = null;
+  try {
+    if (!env.CONCURRENCY_SLOTS) return null;
+    const result = await concurrencySlots(env).acquireSpawnClaim(jobId, SPAWN_CLAIM_TTL_S * 1000);
+    if (result.status !== "acquired") return null;
+    const lease = { generation: result.generation, ownerToken: result.ownerToken };
+    acquired = lease;
+    // Containment evidence still reads the historical marker.  Publish only a
+    // self-describing marker owned by this lease; an old literal/timestamp is
+    // treated as occupied and is never adopted or deleted by this path.
+    if (env.RUNNER_JOB_PATS) {
+      const key = `spawn:${jobId}`;
+      const existing = await env.RUNNER_JOB_PATS.get(key);
+      if (existing) {
+        await concurrencySlots(env).releaseSpawnClaim(jobId, lease.generation, lease.ownerToken);
+        return null;
+      }
+      await env.RUNNER_JOB_PATS.put(key, JSON.stringify({
+        schema_version: 2,
+        generation: lease.generation,
+        owner_token: lease.ownerToken,
+        claimed_at_ms: Date.now(),
+      }), { expirationTtl: SPAWN_CLAIM_TTL_S });
+      const stored = await env.RUNNER_JOB_PATS.get(key);
+      if (!stored || !stored.includes(lease.ownerToken)) throw new Error("spawn claim marker was not durably bound");
+    }
+    return lease;
+  } catch (error) {
+    if (acquired && env.CONCURRENCY_SLOTS) {
+      await concurrencySlots(env).releaseSpawnClaim(jobId, acquired.generation, acquired.ownerToken).catch(() => undefined);
+    }
+    logEvent("error", "spawn_claim_authority_unavailable", { jobId, error: (error as Error).message });
+    return null;
+  }
+}
+
+async function releaseSpawnClaimAtomic(env: Env, jobId: string, lease: SpawnClaimLease | null): Promise<void> {
+  if (!lease) return;
+  try {
+    const released = await concurrencySlots(env).releaseSpawnClaim(jobId, lease.generation, lease.ownerToken);
+    if (released === "released" && env.RUNNER_JOB_PATS) {
+      const key = `spawn:${jobId}`;
+      const raw = await env.RUNNER_JOB_PATS.get(key);
+      try {
+        const marker = raw ? JSON.parse(raw) as { generation?: number; owner_token?: string } : null;
+        if (marker?.generation === lease.generation && marker.owner_token === lease.ownerToken) {
+          await env.RUNNER_JOB_PATS.delete(key);
+        }
+      } catch { /* legacy marker: conservative adoption leaves it untouched */ }
+    }
+  } catch (error) {
+    logEvent("error", "spawn_claim_release_failed", { jobId, error: (error as Error).message });
+  }
+}
+
+function spawnClaimCallbacks(env: Env, jobId: string): {
+  claim: () => Promise<boolean>;
+  release: () => Promise<void>;
+  active: () => Promise<boolean>;
+  bindProvider: (providerIdentity: string) => Promise<boolean>;
+} {
+  let lease: SpawnClaimLease | null = null;
+  return {
+    claim: async () => {
+      lease = await acquireSpawnClaimAtomic(env, jobId);
+      return lease !== null;
+    },
+    release: async () => {
+      await releaseSpawnClaimAtomic(env, jobId, lease);
+      lease = null;
+    },
+    active: async () => {
+      if (!lease || !env.CONCURRENCY_SLOTS) return false;
+      try { return await concurrencySlots(env).markSpawnClaimActive(jobId, lease.generation, lease.ownerToken); }
+      catch { return false; }
+    },
+    bindProvider: async (providerIdentity: string) => {
+      if (!lease || !env.CONCURRENCY_SLOTS) return false;
+      try { return await concurrencySlots(env).bindSpawnClaimProvider(jobId, lease.generation, lease.ownerToken, providerIdentity); }
+      catch { return false; }
+    },
+  };
+}
+
 function retryEpochAuthority(env: Env): RetryEpochAuthorityRpc | null {
   if (!env.CONCURRENCY_SLOTS) return null;
   return retryEpochClient(() => concurrencySlots(env));
@@ -2692,11 +3283,13 @@ async function retryOwnerEpochId(effectId: string, owner: string, epoch: number)
 // Fully guarded: swallows BOTH a synchronous throw (an unbound binding in a
 // partial/test env) AND an async DO error — a missed release self-heals at the
 // slot TTL, so a release failure must NEVER break the webhook / spawn-fail path.
-async function releaseConcurrencySlot(env: Env, jobId: string): Promise<void> {
+async function releaseConcurrencySlot(env: Env, jobId: string): Promise<boolean> {
   try {
     await concurrencySlots(env).release(jobId);
+    return true;
   } catch (e) {
     logEvent("error", "concurrency_slot_release_failed", { jobId, error: (e as Error).message });
+    return false;
   }
 }
 
@@ -2755,8 +3348,10 @@ export async function reapStaleSpawnClaims(env: Env, nowMs = Date.now()): Promis
 //   • cold (no derived tenant): key = `repo:<repo>`, perKeyCap = COLD_REPO_CAP —
 //     the old KV path skipped cold spawns entirely (unlimited runners); they are
 //     now capped per-repo AND under the same global FLEET cap.
-// FAIL-OPEN ONLY on a THROWN DO/infra error (never block a legit job on an infra
-// hiccup); a clean `{admitted:false}` is a REAL at-capacity refusal and is honored.
+// A clean cap refusal stops the attempt. A transient slot-authority failure
+// uses the bounded ContainmentDO budget so a short hiccup does not block
+// legitimate work, while a sustained outage admits at most five starts per
+// rolling minute and an unavailable budget refuses closed.
 export async function acquireConcurrencySlot(
   env: Env,
   jobId: string,
@@ -2779,11 +3374,8 @@ export async function acquireConcurrencySlot(
       preparationId,
     );
   } catch (e) {
-    // Infra hiccup ⇒ ADMIT (never block a legitimate job on a DO error). A clean
-    // at-capacity decision above is NOT an error and is honored as a real refusal.
-    //
-    // The budget is authoritative: an absent, unreadable, or failed ContainmentDO
-    // transaction refuses rather than bypassing the bound.
+    // The budget is authoritative: an absent, unreadable, or failed
+    // ContainmentDO transaction refuses rather than bypassing the bound.
     let verdict: { admitted: boolean; reason?: string };
     try {
       verdict = env.CONTAINMENT
@@ -2811,6 +3403,12 @@ async function prepareSpawn(
   opts: ContainmentDriveOpts,
 ): Promise<ContainerEnvResult> {
   const { jobId, repo, installationId, labels } = opts;
+  // A deleted App installation is a durable terminal fence.  Check at the last
+  // point before authorization/mint too: an event may have entered an inbox
+  // before its deletion delivery was processed.
+  if (installationId && await installationIsTombstoned(env, installationId)) {
+    throw new SpawnRefusedError("installation_deleted");
+  }
   // env-0: when the Worker's public URL is configured, stash the PAT in the
   // CRED_STASH DO and inject a single-use ticket instead of CLW_TOKEN.
   const env0 = env.SPAWN_WORKER_PUBLIC_URL
@@ -2997,10 +3595,17 @@ async function driveSpawn(
       try { await containmentAuthority(env).abandonUnusedCompute(mint.computeReservationId); }
       catch { logEvent("error", "compute_cleanup_pending", { jobId }); }
     }
-    // Release the concurrency slot on a spawn failure (the guard releases the claim).
-    // Release by jobId ONLY (globally unique) — works for warm AND cold; best-effort
-    // (a miss self-heals at the slot TTL). Fully guarded: never mask the spawn error.
-    await releaseConcurrencySlot(env, jobId);
+    // A failure after the provider start has an ActiveSpawnAttempt.  Its exact
+    // handle must be confirmed down before this generation's preparation/claim/
+    // slot can be released; a replay must therefore remain deduped even after
+    // every KV projection expires.  Pre-start failures have no record and retain
+    // the historical guarded release behaviour.
+    const recovered = await recoverActiveSpawnAttempt(env, jobId);
+    if (!recovered) {
+      let outstanding = false;
+      try { outstanding = Boolean(await concurrencySlots(env).readActiveAttempt(jobId)); } catch { outstanding = true; }
+      if (!outstanding) await releaseConcurrencySlot(env, jobId);
+    }
     // Revoke this exact issued credential after the attempt fails. The durable
     // authority retains a retry obligation if remote revoke or local wipe fails;
     // a later attempt's credential and the job's admission remain independent.
@@ -4040,8 +4645,8 @@ const ORPHAN_MIN_AGE_MS = 2 * STALE_BOX_AGE_MS;
 const ORPHAN_SCAN_PER_PAGE = 2000;
 
 // The ONE container application whose instances this sweep may consider. The CF
-// account also hosts `corelink-prod-*` (five customer-serving CoreLink servers),
-// `githugr-*` (a separate product), the `corelink-fabricd-*` app, and this very
+// account also hosts `corelink-prod-*` (customer-serving CoreLink servers),
+// unrelated application instances, the `corelink-fabricd-*` app, and this very
 // worker's OWN `corelink-spawn-worker-checkhostcontainer` app — NONE of which
 // write `sbox:` records. Without this filter every long-running instance of every
 // one of them satisfies the "no sbox record + age>4h" orphan predicate and floods
@@ -4051,7 +4656,7 @@ const ORPHAN_SCAN_PER_PAGE = 2000;
 // signal. This is deliberately NOT a prefix match: `corelink-spawn-worker-*` also
 // matches the checkhost app (a DIFFERENT DO namespace this sweep must not reap via
 // the runner binding), and a bare `corelink` prefix would match the prod servers.
-// The app-id is the guarantee that keeps the sweep off prod and githugr.
+// The app-id is the guarantee that keeps the sweep scoped to runner instances.
 const RUNNER_APP_ID = "a03d11a2-7e03-48a4-96bb-4d2c43892cd4";
 const RUNNER_APP_NAME = "corelink-spawn-worker-runnercontainer";
 
@@ -4372,10 +4977,16 @@ async function driveSpawnGuarded(
   env: Env,
   opts: ContainmentDriveOpts,
 ): Promise<void> {
+  const spawnClaim = spawnClaimCallbacks(env, opts.jobId);
+  if (!(await spawnClaim.claim())) return;
   try {
-    await driveSpawn(env, opts);
+    if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
+    const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider });
+    if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) {
+      throw new Error("spawn claim provider binding unavailable");
+    }
   } catch (e) {
-    await releaseSpawnClaim(env.RUNNER_JOB_PATS, opts.jobId);
+    await spawnClaim.release();
     // A ceiling REFUSAL still needs the dead-letter (that is the whole point —
     // otherwise the job is lost forever), but it is not an error and must not be
     // counted or logged as one: `spawn_at_ceiling` was already emitted at the
@@ -4411,6 +5022,8 @@ type ContainmentDriveOpts = {
   // Supplied by runCanonicalEffect only after it has durably bound the provider
   // identity. This is local route evidence, never a caller-provided protocol field.
   effect_binding?: ContainmentEffectBinding;
+  /** Internal attempt callback; persisted before the runner container starts. */
+  bindProviderIdentity?: (providerIdentity: string) => Promise<boolean>;
 };
 function isContainmentDrive(opts: ContainmentDriveOpts): opts is ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string; effect_binding: ContainmentEffectBinding } {
   return typeof opts.effect_id === "string"
@@ -4549,6 +5162,10 @@ type ContainmentDrainDependencies = {
 };
 
 export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
+  // Containment drain creates NEW runner admissions. Completion/teardown is
+  // handled by the webhook completed leg and scheduled teardown retry below;
+  // pausing this drain leaves those lifecycle paths available.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   const claim = dependencies.claimSpawn ?? claimSpawn;
   const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
@@ -4569,6 +5186,16 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
+      const tombstoned = await authority.installationTombstoned(event.installation_id);
+      // A permit may have crossed into an external effect before deletion. Keep
+      // that head on the proof-bound recovery path below; a permit-free head is
+      // terminalized entirely inside the authority and can never reach a side
+      // effect. A crash after terminalization is recovered by the committed leg.
+      if (tombstoned && !event.effect_permit) {
+        if (!(await authority.terminalizeTombstonedEvent(event.event_id, owner, lease.epoch))) break;
+        if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
+        continue;
+      }
       if (event.effect_permit) {
         const proof = await evidenceDigest(env, event);
         if (!proof || !(await authority.recoverEffectCommitted(event.effect_id, owner, lease.epoch, proof))) break;
@@ -4576,12 +5203,14 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         continue;
       }
       if (!env.RUNNER_JOB_PATS) break;
+      if (tombstoned) break;
       if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
         && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
       if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
       const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };
       let prepared: ContainerEnvResult | undefined;
+      const spawnClaim = spawnClaimCallbacks(env, event.job_id);
       const routeResult = await runCanonicalEffect({
         ledger: authority,
         tuple,
@@ -4590,16 +5219,21 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        fence: async () => !(await authority.installationTombstoned(event.installation_id)),
+        releaseFence: () => authority.releaseInstallationFence(event.installation_id, event.effect_id),
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
         abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
-        claim: () => claim(env.RUNNER_JOB_PATS!, event.job_id),
-        release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id),
+        claim: dependencies.claimSpawn ? () => claim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.claim,
+        release: dependencies.claimSpawn ? () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, event.job_id) : spawnClaim.release,
+        beforeDrive: async () => dependencies.claimSpawn ? true : spawnClaim.active(),
         drive: async driveOpts => {
           const typed = driveOpts as ContainmentDriveOpts & { effect_id: string; containment_event_id: string; effect_permit_id: string };
           await bindClaim(env, typed);
-          return drive(env, typed, prepared);
+          const receipt = await drive(env, { ...typed, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+          if (!dependencies.claimSpawn && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+          return receipt;
         },
         beforeConfirm: permitId => authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permitId),
         beforeBegin: async permit => !!(await authority.beginEffect(event.event_id, owner, lease!.epoch, Date.now(), permit.permit_id)),
@@ -4615,10 +5249,46 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
 
 /** Recover normal arrivals without moving them into the containment backlog. */
 export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?: string): Promise<void> {
+  // Normal-intake drain creates NEW runner admissions. A completed webhook is
+  // intentionally independent and continues to revoke, tear down, and release
+  // capacity while this gate is active.
   const authority = containmentAuthority(env);
-  for (const event of await authority.normalIntakePending(25)) {
-    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal") return;
+  await authority.cleanupExpiredA317Proofs();
+  const intakeState = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
+  const candidates = intakeState === "normal" ? await authority.normalIntakePending(25) : await authority.normalIntakeA317Pending(25);
+  for (const event of candidates) {
+    const proof = await authority.normalIntakeA317Proof(event.event_id);
+    if (proof && intakeState !== "paused") return;
+    if (parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "normal" && !proof) return;
+    if (proof && (!env.A317_LIVE_PROOF_HMAC_KEY || !env.A317_LIVE_PROOF_BUILD_SHA || proof.build_sha !== env.A317_LIVE_PROOF_BUILD_SHA)) return;
+    // The qualification event deliberately enters the same durable pending →
+    // retry transition, but terminates before every authorization/provider
+    // primitive. Its per-event mint overlay is therefore observational only;
+    // it cannot create claims, JIT registrations, leases, or boxes.
+    if (proof) {
+      // Do not alter the deployment secret: use a one-call overlay only. Both
+      // synthetic key cases fail at this pre-provider fence, so neither can
+      // reach authorization, claim, JIT, lease, nor container code.
+      const proofEnv: Env = proof.phase === "missing_key"
+        ? { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: undefined, REQUIRE_MINT_KEY: "1" }
+        : { ...env, CORELINK_RUNNER_MINT_AUTH_KEY: "a317-invalid-mint-key", REQUIRE_MINT_KEY: "1" };
+      if (proof.phase === "missing_key") {
+        await authority.normalIntakeSettle(event.event_id, event.body_sha256, "retry");
+        continue;
+      }
+      if (await authority.beginA317Authorization(event.event_id)) {
+        const authorization = await inspectRunnerAuthorization(proofEnv, { jobId: event.job_id, repoFullName: event.repo, installationId: event.installation_id });
+        await authority.finishA317Authorization(event.event_id, authorization.kind === "refused" ? (authorization.status === 401 ? "refused401" : "refused403") : authorization.kind === "authorized" ? "accepted2xx" : "unknown");
+        await authority.normalIntakeSettle(event.event_id, event.body_sha256, authorization.kind === "refused" ? "retry" : "uncertain");
+      }
+      continue;
+    }
+    if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
     if ((await authority.snapshot()).backlog_count !== 0) return;
+    if (await authority.installationTombstoned(event.installation_id)) {
+      await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
+      continue;
+    }
     if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
       && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) {
       await authority.normalIntakeSettle(event.event_id, event.body_sha256, "complete");
@@ -4632,20 +5302,27 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
     const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo,
       installationId: event.installation_id, labels: event.labels };
     let prepared: ContainerEnvResult | undefined;
+    const spawnClaim = spawnClaimCallbacks(env, event.job_id);
     const result = await runCanonicalEffect({
       ledger: authority,
       tuple: await intakeOwnerTuple(event.repo, event.job_id, `containment:v1:${event.event_id}`, event.event_id),
       opts: spawnOpts, provider: "cloudflare-container",
       resource_id: `job:${event.repo}/${event.job_id}`, idempotency_key: `containment:v1:${event.event_id}`,
       admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
-        && (await authority.snapshot()).backlog_count === 0,
+        && (await authority.snapshot()).backlog_count === 0
+        && await authority.normalIntakeAdmit(event.event_id),
+      fence: () => authority.normalIntakeAdmissionFence(event.event_id),
+      releaseFence: () => authority.normalIntakeReleaseFence(event.event_id),
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
       abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
-      claim: () => claimSpawn(env.RUNNER_JOB_PATS, event.job_id),
-      release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS, event.job_id),
+      claim: spawnClaim.claim,
+      release: spawnClaim.release,
+      beforeDrive: spawnClaim.active,
       drive: async opts => {
         await bindContainmentSpawnClaim(env, opts);
-        return driveSpawn(env, opts, prepared);
+        const receipt = await driveSpawn(env, { ...opts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+        if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+        return receipt;
       },
     });
     await authority.normalIntakeSettle(event.event_id, event.body_sha256,
@@ -4682,6 +5359,10 @@ export default {
   // webhook path missed; each is independently default-off and wrapped so a
   // failure in one never blocks or throws out of the other.
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (env.CONTAINMENT) ctx.waitUntil(containmentAuthority(env).cleanupExpiredA317Proofs().catch(() => {}));
+    // Reuse the existing cron: post-start projection failures retain an exact
+    // teardown intent in ConcurrencySlotsDO until the provider confirms down.
+    ctx.waitUntil(retryActiveSpawnTeardowns(env));
     if (env.FABRIC_COMPUTE_URL && env.CONTAINMENT) {
       ctx.waitUntil(containmentAuthority(env).drainUnusedCompute().catch(() => logEvent("error", "compute_cleanup_pending", {})));
     }
@@ -4696,10 +5377,8 @@ export default {
         await deliverInvalidConfig(env);
         const intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
         if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
-        if (intake === "normal") {
-          await runContainmentDrain(env);
-          await runNormalIntakeDrain(env);
-        }
+        if (intake === "normal") await runContainmentDrain(env);
+        if (intake === "normal" || !!env.A317_LIVE_PROOF_HMAC_KEY) await runNormalIntakeDrain(env);
       } catch (e) {
         logEvent("error", "containment_tick_failed", { error: (e as Error).message });
       }
@@ -4815,6 +5494,33 @@ export default {
 // The actual route table, factored out of `fetch` so the top-level guard above
 // can wrap it uniformly. Behavior is byte-identical to before the guard was
 // added — only the outer catch is new.
+interface A317LiveClaim { v: 1; run_id: string; phase: "missing_key" | "wrong_key" | "store_unavailable"; i: number; exp_ms: number; build_sha: string; nonce: string; installation_id: string; }
+const A317_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const A317_SHA = /^[0-9a-f]{7,64}$/i;
+function a317Base64Url(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }
+function a317Decode(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]{1,4096}$/.test(value)) return null;
+  try { const raw = atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)); return Uint8Array.from(raw, c => c.charCodeAt(0)); } catch { return null; }
+}
+async function verifyA317LiveClaim(request: Request, env: Env): Promise<A317LiveClaim | null> {
+  const key = env.A317_LIVE_PROOF_HMAC_KEY, build = env.A317_LIVE_PROOF_BUILD_SHA;
+  if (!key || !build) return null;
+  const header = request.headers.get("x-corelink-a317-proof") ?? ""; const [encoded, mac, extra] = header.split(".");
+  if (!encoded || !mac || extra !== undefined) return null;
+  const payload = a317Decode(encoded); const supplied = a317Decode(mac); if (!payload || !supplied || supplied.length !== 32) return null;
+  const signingKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", signingKey, new TextEncoder().encode(`a317:v1\n${encoded}`)));
+  if (!safeEqual(a317Base64Url(expected), mac)) return null;
+  let claim: Partial<A317LiveClaim>;
+  try { claim = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(payload)) as Partial<A317LiveClaim>; } catch { return null; }
+  const fields = Object.keys(claim).sort().join(",");
+  if (fields !== "build_sha,exp_ms,i,installation_id,nonce,phase,run_id,v" || claim.v !== 1 || !A317_UUID.test(claim.run_id ?? "") || !/^[1-9][0-9]{0,18}$/.test(claim.installation_id ?? "")
+    || !["missing_key", "wrong_key", "store_unavailable"].includes(claim.phase as string) || !Number.isSafeInteger(claim.i) || claim.i! < 0 || claim.i! > 99
+    || !Number.isSafeInteger(claim.exp_ms) || claim.exp_ms! <= Date.now() || claim.exp_ms! > Date.now() + 600_000
+    || !A317_SHA.test(claim.build_sha ?? "") || claim.build_sha !== build || !/^[A-Za-z0-9_-]{16,128}$/.test(claim.nonce ?? "")) return null;
+  return claim as A317LiveClaim;
+}
+
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -4834,6 +5540,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const presented = request.headers.get("x-corelink-internal-auth") ?? "";
       if (!safeEqual(presented, key)) return unauthorized();
       return json({ counters: await snapshotMetrics(env) }, 200);
+    }
+
+    // A3.17's only control-plane surface is a capability-authenticated,
+    // run-scoped read. It exposes aggregate durable evidence only; it cannot
+    // create, settle, drain, fault, or alter normal intake configuration.
+    if (request.method === "GET" && pathname === "/internal/v1/a317-live-proof") {
+      const claim = await verifyA317LiveClaim(request, env);
+      if (!claim) return json({ error: "not found" }, 404);
+      try { return json(await containmentAuthority(env).normalIntakeA317Snapshot(claim.run_id), 200); }
+      catch { return json({ error: "A3.17 proof store unavailable" }, 503); }
     }
 
     // Authenticated fabric suspension signal. The producer is fabricd's
@@ -4908,20 +5624,26 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // ── POST /webhook (GitHub autoscaler) — HMAC-authed, NOT bearer ──────────
     // A queued workflow_job with our label ⇒ mint a JIT + spawn a runner. This
-    // is the all-Cloudflare autoscaler: no external fabric. Opt-in (disabled
-    // unless both the webhook secret and the mint token are configured).
+    // is the all-Cloudflare autoscaler: no external fabric.  Installation
+    // deletion is an App lifecycle event and deliberately does not require the
+    // runner-mint token, so configuration is split below by event family.
     if (request.method === "POST" && pathname === "/webhook") {
-      const webhookSecrets = [env.GITHUB_WEBHOOK_SECRET, env.GITHUB_WEBHOOK_REPO_SECRET]
-        .filter((secret): secret is string => Boolean(secret));
-      if (webhookSecrets.length === 0 || !env.GITHUB_MINT_TOKEN) {
+      const appSecret = env.GITHUB_WEBHOOK_SECRET;
+      const repoSecret = env.GITHUB_WEBHOOK_REPO_SECRET;
+      if (!appSecret && !repoSecret) {
         return json({ error: "autoscaler not configured" }, 503);
       }
       const rawBytes = await request.arrayBuffer();
       const sig = request.headers.get("x-hub-signature-256") ?? "";
-      const signatureValid = await Promise.all(
-        webhookSecrets.map((secret) => verifyGithubHmacBytes(secret, sig, rawBytes)),
-      );
-      if (!signatureValid.some(Boolean)) {
+      const [appValid, repoValid] = await Promise.all([
+        appSecret ? verifyGithubHmacBytes(appSecret, sig, rawBytes) : Promise.resolve(false),
+        repoSecret ? verifyGithubHmacBytes(repoSecret, sig, rawBytes) : Promise.resolve(false),
+      ]);
+      if (!appValid && !repoValid) {
+        // Metrics are an intentional side effect only of an actually configured
+        // bad HMAC (not a malformed/missing signature header). Missing
+        // configuration and valid ignored events stay quiet.
+        if (/^sha256=[0-9a-f]{64}$/i.test(sig.trim())) ctx.waitUntil(bumpMetrics(env, "webhook_auth_failed"));
         return unauthorized();
       }
       let raw: string;
@@ -4930,8 +5652,34 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       } catch {
         return json({ error: "invalid UTF-8 body" }, 400);
       }
-      // Only act on workflow_job:queued carrying our managed label.
-      if (request.headers.get("x-github-event") !== "workflow_job") {
+      const githubEvent = request.headers.get("x-github-event");
+      // Installation deletion is handled before workflow parsing.  A repository
+      // hook secret cannot authorize this branch: only the GitHub App secret has
+      // authority to retire an App installation.
+      if (githubEvent === "installation") {
+        if (!appValid) return unauthorized();
+        let installation: { action?: unknown; installation?: { id?: unknown } };
+        try { installation = JSON.parse(raw) as typeof installation; }
+        catch { return json({ error: "invalid installation payload" }, 400); }
+        const installationId = canonicalInstallationId(installation.installation?.id);
+        if (installation.action !== "deleted" || !installationId) {
+          return json({ error: "invalid installation deletion" }, 400);
+        }
+        try {
+          const bodySha = await sha256Hex(raw);
+          const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "")
+            || await sha256Hex(`installation.deleted:v1\n${installationId}\n${bodySha}`);
+          const result = await containmentAuthority(env).tombstoneInstallation(installationId, delivery, bodySha);
+          if (result === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+          if (result === "busy") return json({ error: "installation deletion waits for admitted effect", retryable: true }, 503);
+          return json({ ok: true, installation_deleted: true, duplicate: result === "duplicate", installation_id: installationId }, 202);
+        } catch {
+          return json({ error: "installation tombstone unavailable", retryable: true }, 503);
+        }
+      }
+      // Only workflow_job needs runner-mint configuration.  Other valid GitHub
+      // events remain harmless acknowledgements even in lifecycle-only deploys.
+      if (githubEvent !== "workflow_job") {
         return json({ ok: true, ignored: "not workflow_job" }, 200);
       }
       let evt: {
@@ -4951,6 +5699,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         installation?: { id?: number | string };
       };
       let lexicalJobId: string | null = null;
+      let a317Claim: A317LiveClaim | null = null;
       try {
         lexicalJobId = canonicalWorkflowJobIdFromRaw(raw);
         if (lexicalJobId === null) return json({ error: "no workflow_job.id in payload" }, 400);
@@ -4968,6 +5717,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (!mintLabels) {
         return json({ ok: true, ignored: "not our label" }, 200);
       }
+      // The shared freeze applies only to the NEW queued admission leg. Parse
+      // and route the event first so workflow_job.completed still reaches its
+      // revoke/teardown/slot-release cleanup path during containment.
+      if (evt.action === "queued" && admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
+      }
       // The stable correlation id across queued→completed for THIS job. The PAT
       // is minted under it (job_id) so completion can revoke the SAME PAT.
       const jobId = lexicalJobId;
@@ -4982,8 +5737,37 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         const identity = normalizeRedriveIdentity(rawRepo, jobId);
         if (!identity) return json({ error: "no repository in payload" }, 400);
         const repo = identity.repo;
-        let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
-        if (!installationId) installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+        const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+        if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+        const installationId = resolvedInstallation.installationId;
+        // A3.17 is a run-scoped qualification lane. GitHub's webhook HMAC has
+        // already authenticated this delivery; this second capability is only
+        // accepted while normal intake remains paused and can never unpause it.
+        a317Claim = await verifyA317LiveClaim(request, env);
+        if (a317Claim) {
+          const proofRepo = env.A317_LIVE_PROOF_REPO ?? "";
+          const proofLabel = "corelink-a317-proof";
+          if (proofRepo !== repo || a317Claim.installation_id !== installationId || jobLabels.length !== 1 || jobLabels[0] !== proofLabel
+            || parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) !== "paused") a317Claim = null;
+        }
+        if (a317Claim) {
+          try {
+            const authority = containmentAuthority(env);
+            await authority.cleanupExpiredA317Proofs();
+            const bodySha = await sha256Hex(rawBytes);
+            const eventId = `a317:v1:${a317Claim.run_id}:${a317Claim.phase}:${a317Claim.i}`;
+            const result = await authority.normalIntakeA317ProofEnqueue({ schema_version: 1, event_id: eventId, received_at_ms: Date.now(), body_sha256: bodySha,
+              job_id: jobId, repo, installation_id: installationId, labels: mintLabels },
+              { schema_version: 1, run_id: a317Claim.run_id, phase: a317Claim.phase, index: a317Claim.i, nonce: a317Claim.nonce, expires_at_ms: a317Claim.exp_ms, build_sha: a317Claim.build_sha, event_id: eventId, body_sha256: bodySha, authorization_attempts: 0, authorization_refusals: 0, authorization_state: "pending" },
+              a317Claim.phase === "store_unavailable");
+            if (result.status === "conflict") return json({ error: "A3.17 proof conflicts with durable evidence" }, 409);
+            if (result.status === "full") return json({ error: "A3.17 proof inbox full" }, 503);
+            ctx.waitUntil(runNormalIntakeDrain(env));
+            return json({ ok: true, a317_proof: true, duplicate: result.status === "duplicate", job_id: jobId }, 202);
+          } catch {
+            return json({ error: "A3.17 proof durable store unavailable", retryable: true }, 503);
+          }
+        }
         if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
           && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, installationId)) {
           logEvent("info", "webhook_installation_not_allowlisted", { jobId, repo, installationId });
@@ -4995,6 +5779,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           intake = parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED);
           if (intake === "invalid") await observeInvalidConfig(env, "AUTOSCALER_INTAKE_PAUSED", env.AUTOSCALER_INTAKE_PAUSED as string);
           const authority = containmentAuthority(env);
+          if (installationId && await authority.installationTombstoned(installationId)) {
+            return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
+          }
           const bodySha = await sha256Hex(rawBytes);
           const delivery = trimAsciiWhitespace(request.headers.get("x-github-delivery") ?? "");
           const eventId = delivery || await sha256Hex(`containment:v1\n${jobId}\n${evt.action}\n${bodySha}`);
@@ -5015,6 +5802,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           return json({ error: "containment authority unavailable" }, 503);
         }
       }
+
+      if (!env.GITHUB_MINT_TOKEN) return json({ error: "autoscaler not configured" }, 503);
 
       // This visibility-only signal is deliberately after containment. A paused
       // event must produce zero success/continuation side effects of any kind.
@@ -5137,8 +5926,23 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           jobId,
           evt.workflow_job?.runner_name ?? undefined,
         );
-        if (tornDown || teardownPending === false) await releaseConcurrencySlot(env, jobId);
-        else if (teardownPending === true || teardownPending === null) {
+        let exactClaimReleased = !evt.workflow_job?.runner_name;
+        if (tornDown || teardownPending === false) {
+          try {
+            const providerIdentity = evt.workflow_job?.runner_name;
+            if (providerIdentity && env.CONCURRENCY_SLOTS) {
+              const released = await concurrencySlots(env).releaseSpawnClaimForCompletion(jobId, providerIdentity);
+              // `spawn:` remains a migration/evidence projection only. Its value
+              // is never read to decide completion ownership.
+              exactClaimReleased = released === "released";
+              if (exactClaimReleased && env.RUNNER_JOB_PATS) await env.RUNNER_JOB_PATS.delete(`spawn:${jobId}`);
+            }
+          } catch (e) {
+            logEvent("error", "spawn_claim_release_deferred", { jobId, error: (e as Error).message });
+          }
+        }
+        if ((tornDown || teardownPending === false) && exactClaimReleased) await releaseConcurrencySlot(env, jobId);
+        else if (teardownPending === true || teardownPending === null || !exactClaimReleased) {
           logEvent("error", "concurrency_slot_release_deferred", { jobId });
         }
         // Exact PAT leases are closed by the durable revocation authority above.
@@ -5182,10 +5986,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       // limiter entirely — caught by the I1 regression test when this block was
       // first reordered.
       // Resolve the server authorization identity before durable admission.
-      let installationId = evt.installation?.id != null ? String(evt.installation.id) : "";
-      if (!installationId) {
-        installationId = installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
-      }
+      const resolvedInstallation = resolveWebhookInstallationId(evt.installation?.id, repo, env.REPO_INSTALLATION_MAP);
+      if (resolvedInstallation.invalid) return json({ error: "invalid installation id" }, 400);
+      const installationId = resolvedInstallation.installationId;
       if (env.CORELINK_RUNNER_MINT_AUTH_KEY && !installationId) {
         logEvent("info", "installation_id_missing", { jobId, repo });
       }
@@ -5222,6 +6025,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           repo, installation_id: installationId, labels: mintLabels, received_at_ms: Date.now(),
         }, admitted ? 0 : 60_000);
         if (result.status === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+        if (result.status === "tombstoned") return json({ ok: true, ignored: "installation deleted", job_id: jobId }, 202);
         if (result.status === "full") return json({ error: "intake capacity unavailable", retryable: true }, 503);
         if (admitted) ctx.waitUntil(runNormalIntakeDrain(env, eventId));
         else ctx.waitUntil(bumpMetrics(env, "webhook_rate_limited"));
@@ -5339,6 +6143,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // POST /v1/spawn
     if (request.method === "POST" && pathname === "/v1/spawn") {
+      // This is a NEW provider admission. Existing status, exec, teardown, and
+      // egress-cutoff routes remain available so already-issued handles drain.
+      if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) {
+        return admissionPausedResponse();
+      }
       let body: SpawnBody;
       try {
         body = (await request.json()) as SpawnBody;
@@ -5606,6 +6415,9 @@ export async function redriveOrphanedJobs(
   now: number,
   dependencies: RedriveOrphanedJobsDependencies = {},
 ): Promise<void> {
+  // Re-drive is a NEW spawn admission; leave lifecycle cleanup to its own
+  // scheduled paths while the shared freeze is active.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   // Optional only for deterministic callers: production continues to invoke the
   // same functions at the same seams when no dependency object is supplied.
   const list = dependencies.listOrphanRunnerJobs ?? listOrphanRunnerJobs;
@@ -5632,7 +6444,11 @@ export async function redriveOrphanedJobs(
     try {
       const candidates = await discoverAuthorizationCandidates(env);
       if (candidates === null) return;
-      registryRepos = await confirmInstallationRepositories(env, candidates, now);
+      const liveCandidates: ReconcilerRepository[] = [];
+      for (const candidate of candidates) {
+        if (!(await installationIsTombstoned(env, candidate.installationId))) liveCandidates.push(candidate);
+      }
+      registryRepos = await confirmInstallationRepositories(env, liveCandidates, now);
     } catch (e) {
       logEvent("error", "reconciler_registry_membership_failed", { error: (e as Error).message });
       return;
@@ -5646,6 +6462,11 @@ export async function redriveOrphanedJobs(
   if (!env.GITHUB_WEBHOOK_SECRET || !env.GITHUB_MINT_TOKEN) return; // autoscaler not configured
   for (const candidate of candidates) {
     const repo = candidate.repo;
+    const redriveInstallationId = candidate.installationId
+      ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, repo);
+    // Do not even mint an installation token or list GitHub after deletion.
+    // A tombstone wins before every redrive reservation, handoff and KV write.
+    if (redriveInstallationId && await installationIsTombstoned(env, redriveInstallationId)) continue;
     let scanEnv: Env = env;
     if (candidate.installationId) {
       // Registry entries carry the only installation identity accepted for this
@@ -5707,8 +6528,7 @@ export async function redriveOrphanedJobs(
         if (admitted.status !== "reserved" || !admitted.reservation) continue;
         reservation = admitted.reservation;
       }
-      const reInstallationId = candidate.installationId
-        ?? installationIdForRepo(env.REPO_INSTALLATION_MAP, redriveRepo);
+      const reInstallationId = redriveInstallationId;
       // ── Age-gate the force-release (2026-08-24) ──────────────────────────────
       // "queued ≥ 90 s with no runner" is ALSO what a healthy-but-slow spawn looks
       // like: the placement machinery itself waits PLACEMENT_CONFIRM_GRACE_MS
@@ -5741,6 +6561,8 @@ export async function redriveOrphanedJobs(
           const effect = ownedReservation.effect_id;
           const spawnOpts: ContainmentDriveOpts = { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, credential_source: "installation-only" };
           let prepared: ContainerEnvResult | undefined;
+          const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
+          const useInjectedClaim = !!dependencies.claimSpawn;
           const result = await runCanonicalEffect({
             ledger: ownedAuthority,
             tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
@@ -5748,17 +6570,22 @@ export async function redriveOrphanedJobs(
             provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
-            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, reInstallationId)).status === "eligible",
+            fence: async () => !(await ownedAuthority.installationTombstoned(reInstallationId)),
+            releaseFence: () => ownedAuthority.releaseInstallationFence(reInstallationId, effect),
             beforeClaim: async () => {
-              await release(env.RUNNER_JOB_PATS, redriveJobId);
+              if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
             },
             abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, redriveJobId, prepared),
-            claim: () => claim(env.RUNNER_JOB_PATS, redriveJobId),
-            release: () => releaseSpawnClaim(env.RUNNER_JOB_PATS!, redriveJobId),
+            claim: useInjectedClaim ? () => claim(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.claim,
+            release: useInjectedClaim ? () => release(env.RUNNER_JOB_PATS!, redriveJobId) : spawnClaim.release,
+            beforeDrive: async () => useInjectedClaim ? true : spawnClaim.active(),
             drive: async driveOpts => {
               await bindContainmentSpawnClaim(env, driveOpts);
-              return drive(env, driveOpts, prepared);
+              const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+              if (!useInjectedClaim && receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+              return receipt;
             },
             finalize: async () => {
               const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
@@ -5769,7 +6596,6 @@ export async function redriveOrphanedJobs(
         })());
         continue;
       }
-      await release(env.RUNNER_JOB_PATS, redriveJobId);
       const handoff = await claimReconcileHandoff(env.RUNNER_JOB_PATS, {
         schema_version: 1,
         repo: redriveRepo,
@@ -5783,7 +6609,9 @@ export async function redriveOrphanedJobs(
         await releaseReconcileHandoff(env.RUNNER_JOB_PATS, redriveRepo, redriveJobId);
         continue;
       }
-      if (await claim(env.RUNNER_JOB_PATS, redriveJobId)) {
+      const spawnClaim = spawnClaimCallbacks(env, redriveJobId);
+      const useInjectedClaim = !!dependencies.claimSpawn;
+      if (useInjectedClaim ? await claim(env.RUNNER_JOB_PATS!, redriveJobId) : await spawnClaim.claim()) {
         logEvent("info", "reconciler_redrive", {
           jobId: redriveJobId,
           repo: redriveRepo,
@@ -5791,9 +6619,11 @@ export async function redriveOrphanedJobs(
         });
         ctx.waitUntil((async () => {
           try {
-            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels });
+            if (!useInjectedClaim && !(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
+            await drive(env, { jobId: redriveJobId, repo: redriveRepo, installationId: reInstallationId, labels, bindProviderIdentity: spawnClaim.bindProvider });
           } catch (e) {
-            await releaseSpawnClaim(env.RUNNER_JOB_PATS, redriveJobId);
+            if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
+            else await spawnClaim.release();
             if (!(e instanceof SpawnRefusedError)) {
               await bumpMetrics(env, "spawn_failed");
               logEvent("error", "spawn_drive_failed", { jobId: redriveJobId, error: (e as Error).message });
@@ -5830,7 +6660,7 @@ export async function retryOrphanedSpawns(
   now: number,
   drive: (
     env: Env,
-    opts: { jobId: string; repo: string; installationId: string; labels: string[]; credential_source?: "installation-only" },
+    opts: ContainmentDriveOpts,
     prepared?: ContainerEnvResult,
   ) => Promise<ProviderDriveReceipt | void> = driveSpawn,
   // Injected for the same reason as `drive` — so the placement-confirmation
@@ -5843,6 +6673,9 @@ export async function retryOrphanedSpawns(
     installationId: string,
   ) => Promise<{ status?: string; runner_id?: number | null } | null> = fetchJobPlacement,
 ): Promise<void> {
+  // Dead-letter retry is also a NEW spawn admission. Existing teardown/status
+  // retries continue independently from the scheduled tick.
+  if (admissionPaused(env.FABRIC_ADMISSION_PAUSED)) return;
   let redriveState: ContainmentSwitch;
   try {
     redriveState = parseContainmentSwitch(env.AUTOSCALER_REDRIVE_PAUSED);
@@ -5895,7 +6728,7 @@ export async function retryOrphanedSpawns(
       const expectedInstallationId = identity
         ? installationIdForRepo(env.REPO_INSTALLATION_MAP, identity.repo)
         : "";
-      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || !/^[1-9][0-9]*$/.test(orphan.installationId) || (expectedInstallationId !== "" && expectedInstallationId !== orphan.installationId)) continue;
+      if (!identity || !labelsAreStrings || !labelsAreUnique || !labelsMatchExactly || typeof orphan.installationId !== "string" || canonicalInstallationId(orphan.installationId) !== orphan.installationId || (expectedInstallationId !== "" && expectedInstallationId !== orphan.installationId)) continue;
       // From this point onward, every effectful seam uses the one normalized
       // identity. Keep the orphan's installation id byte-for-byte; no map or
       // first-party fallback is ever substituted into this retry.
@@ -5910,6 +6743,9 @@ export async function retryOrphanedSpawns(
     // KV is only a projection. Read the durable count before placement checks
     // or the cap decision, so stale KV cannot reset the bound.
     if (!rec) continue;
+    // This must precede placement verification, retry epoch writes, reservation
+    // acquisition and every provider/GitHub retry seam.
+    if (await installationIsTombstoned(env, rec.installationId)) continue;
     const durableAttempts = await readRetryAttempts(env, jobId);
     if (durableAttempts === null) continue;
     rec = { ...rec, attempts: Math.max(rec.attempts, durableAttempts) };
@@ -6026,6 +6862,7 @@ export async function retryOrphanedSpawns(
       const effect = ownedReservation.effect_id;
       const spawnOpts: ContainmentDriveOpts = { jobId: ownedReservation.job_id, repo: bumped.repo, installationId: bumped.installationId, labels: bumped.labels, credential_source: "installation-only" };
       let prepared: ContainerEnvResult | undefined;
+      const spawnClaim = spawnClaimCallbacks(env, ownedReservation.job_id);
       const result = await runCanonicalEffect({
         ledger: ownedAuthority,
         tuple: await redriveOwnerTuple(ownedReservation.repo, ownedReservation.job_id, effect, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch),
@@ -6033,7 +6870,9 @@ export async function retryOrphanedSpawns(
         provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
-        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, bumped.installationId)).status === "eligible",
+        fence: async () => !(await ownedAuthority.installationTombstoned(bumped.installationId)),
+        releaseFence: () => ownedAuthority.releaseInstallationFence(bumped.installationId, effect),
         beforeClaim: async () => {
           if (deferredPlacementUnconfirmed) {
             logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });
@@ -6043,11 +6882,14 @@ export async function retryOrphanedSpawns(
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
         abandonPreparation: () => abandonPreparedSpawn(env, ownedAuthority, ownedReservation.job_id, prepared),
-        claim: () => claimSpawn(kv, ownedReservation.job_id),
-        release: () => releaseSpawnClaim(kv, ownedReservation.job_id),
+        claim: spawnClaim.claim,
+        release: spawnClaim.release,
+        beforeDrive: spawnClaim.active,
         drive: async driveOpts => {
           await bindContainmentSpawnClaim(env, driveOpts);
-          return drive(env, driveOpts, prepared);
+          const receipt = await drive(env, { ...driveOpts, bindProviderIdentity: spawnClaim.bindProvider }, prepared);
+          if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
+          return receipt;
         },
         finalize: async () => {
           const terminal = await ownedAuthority.completeRedrive(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, effect);
@@ -6064,15 +6906,19 @@ export async function retryOrphanedSpawns(
       });
     // Idempotent: if the job is already claimed (a live path / another tick won
     // it), skip this tick and LEAVE the record for later.
-    if (!(await claimSpawn(kv, jobId))) continue;
+    const spawnClaim = spawnClaimCallbacks(env, jobId);
+    if (!(await spawnClaim.claim())) continue;
     try {
-      await drive(env, {
+      if (!(await spawnClaim.active())) throw new Error("spawn claim authority unavailable");
+      const receipt = await drive(env, {
         jobId,
         repo: bumped.repo,
         installationId: bumped.installationId,
         labels: bumped.labels,
         ...(reservation ? { credential_source: "installation-only" as const } : {}),
+        bindProviderIdentity: spawnClaim.bindProvider,
       });
+      if (receipt && !(await spawnClaim.bindProvider(receipt.provider_signature))) throw new Error("spawn claim provider binding unavailable");
       // Re-driven ⇒ do NOT delete the record here.
       //
       // This used to delete it, which was correct only while "drive returned" meant
@@ -6094,7 +6940,7 @@ export async function retryOrphanedSpawns(
       });
     } catch (e) {
       // Release the claim either way so a later tick (or the live path) can re-drive.
-      await releaseSpawnClaim(kv, jobId);
+      await spawnClaim.release();
       if (e instanceof SpawnRefusedError) {
         // BACKPRESSURE, not failure — the fleet was full again this tick. Do NOT
         // consume the 3-strike budget: that budget bounds genuine errors, and

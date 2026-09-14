@@ -1,5 +1,5 @@
 //! Cross-repo conformance vector for the attestation KEY-SET SELECTION layer
-//! (rotation) — the seam the hugit TL froze (2026-06-25 reply): the v2 verifier
+//! (rotation) — the seam the contract owner froze (2026-06-25 decision): the v2 verifier
 //! adds a thin selection layer ABOVE its existing single-key crypto verify, and
 //! both repos pin the SAME decision cases so neither hand-rolls the shape.
 //!
@@ -7,8 +7,9 @@
 //! through the reference selector [`corelink_fabric_api::select_attestation_key`]
 //! and asserts the verdict — pinning the SEMANTICS (key_id match → accept;
 //! unknown key_id → reject; expired, incl. the exact-cutover instant → reject).
-//! `KeyEntry`'s `deny_unknown_fields` pins the key SHAPE on top. hugit transcribes
-//! the same selector + the same vector; a divergence on either side breaks here.
+//! `KeyEntry`'s `deny_unknown_fields` pins the key SHAPE on top. External clients
+//! transcribe the same selector + the same vector; a divergence on either side
+//! breaks here.
 //!
 //! Companion to `conformance_attestation_key_set.rs`, which pins the response
 //! SHAPE + the DEV key_id derivation.

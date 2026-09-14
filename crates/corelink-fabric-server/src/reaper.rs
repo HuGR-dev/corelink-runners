@@ -98,7 +98,7 @@
 //! accumulated through the SAME finalize/redaction path as a normal close (no
 //! exemption), stamps `close_reason=expired|crashed` + `capture_incomplete:true`
 //! (WRAPPER-level, never inside the frozen §13.4 `IntentMetrics`), and emits it
-//! to the M1 forensic sink (a structured log line; the real push to hugit is
+//! to the M1 forensic sink (a structured log line; the real push to the external consumer is
 //! the P2 transport WP). A lease with no hook is a no-op; an already-closed
 //! hook (a normal close raced in) returns the exactly-once `Err`, which is
 //! logged and skipped — no second envelope, no double-anything.
@@ -106,7 +106,7 @@
 //! ## Remaining non-goals
 //!
 //! - **Live push of the partial envelope**: at M1 the flush is the forensic
-//!   log record; the actual transport to hugit is the P2 transport WP.
+//!   log record; the actual transport to the external consumer is the P2 transport WP.
 //!
 //! ## Lock ordering
 //!
@@ -339,10 +339,10 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
 /// §13.5 best-effort partial-envelope flush on an ABNORMAL lease termination
 /// (Expired / Crashed), fire-and-forget.
 ///
-/// **Ruling (hugit, owner-ratified 2026-06-13, Option B).** When the deadline
+/// **Ruling (the contract owner, ratified 2026-06-13, Option B).** When the deadline
 /// reaper ([`reap_once`]) or the crash sweep ([`surface_crashes`]) reclaims a
 /// lease, whatever the lease's [`CaptureHook`] accumulated MUST be flushed as a
-/// PARTIAL envelope — explicitly marked incomplete — rather than dropped. hugit
+/// PARTIAL envelope — explicitly marked incomplete — rather than dropped. The external consumer
 /// prices flat, so a partial trajectory carries no billing risk; it is forensic
 /// provenance.
 ///
@@ -350,7 +350,7 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
 /// the lease, so it can NEVER block or break reclamation: a flush failure is
 /// logged and the sweep moves on.
 ///
-/// # 3-tier abnormal flush (ADR-0004 Decision-2; hugit §13 Item-3 SLA)
+/// # 3-tier abnormal flush (ADR-0004 Decision-2; the §13 Item-3 SLA)
 /// The `CaptureHook` registry is in-memory PER INSTANCE, so the reaper that wins
 /// the terminal CAS may not be the one holding the hook. Rather than silently
 /// drop the forensic envelope, the flush falls back through three tiers:
@@ -388,12 +388,12 @@ pub async fn dispatch_tenant_suspension_events(state: &crate::AppState) {
 /// `Held→Released`), so a normal close and this abnormal flush can never both fire.
 ///
 /// **There is no live push transport at M1** (the envelope is poll-drain;
-/// hugit consumes at P2). So at M1 the flush = FINALIZE the partial envelope
+/// external clients consume at P2). So at M1 the flush = FINALIZE the partial envelope
 /// (markers + the SAME finalize/redaction write-path as a normal close — no
 /// exemption) and emit it best-effort to the available forensic sink: a single
 /// structured log line carrying `lease_id`, `tenant`, `close_reason`,
 /// `capture_incomplete`, and a metrics SUMMARY (the `IntentMetrics` scalar
-/// fields — NOT raw trajectory text). The real push to hugit is the P2
+/// fields — NOT raw trajectory text). The real push to the external consumer is the P2
 /// transport WP; at M1 this log line IS the forensic record.
 ///
 /// All calls here ([`HookRegistry::close_handle_any`] + `JobClose::close_abnormal`)
@@ -549,7 +549,7 @@ fn zero_intent_metrics() -> corelink_runners_contracts::IntentMetrics {
 }
 
 /// Emit ONE consistent structured forensic line — the M1 forensic record for an
-/// abnormal-close envelope (the P2 transport pushes it to hugit). All three
+/// abnormal-close envelope (the P2 transport pushes it to the external consumer). All three
 /// flush tiers route through here so the record shape is identical regardless of
 /// whether the metrics came from a live hook (tier 1), a durable checkpoint
 /// (tier 2), or the `no_capture` zero floor (tier 3); `source` names which.
@@ -571,7 +571,7 @@ fn emit_forensic(
         CloseReason::Normal => "normal",
     };
     eprintln!(
-        "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to hugit) \
+        "envelope-flush: partial envelope FINALIZED (M1 forensic record; P2 pushes to external consumers) \
          lease_id={lease_id} tenant={tenant} close_reason={reason} source={source} \
          capture_incomplete={capture_incomplete} no_capture={no_capture} \
          tokens_total={} tool_calls={} cost_usd_micros={} \
