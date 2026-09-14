@@ -2389,8 +2389,8 @@
       "id": "F-20260905-006",
       "wp": "T8-W5",
       "sprint": 2,
-      "state": "open",
-      "blocks_delivery": true,
+      "state": "fixed",
+      "blocks_delivery": false,
       "severity": "high",
       "owner": "wp_t8_w5",
       "summary": "KV revocation receipts cannot authoritatively identify the current credential or atomically remove its mapping.",
@@ -2398,13 +2398,17 @@
       "acceptance": "Credential registration, enumeration and confirmed revocation use a transactional authority keyed by exact job/tenant/pat identity. Different credentials for one job remain independent obligations; stale KV absence or old receipts cannot close a newer obligation. Cold receipt corruption and concurrent replacement tests fail closed. Pending obligations persist until confirmed; actual delivery acceptance remains a separate sprint gate. Registered live credentials remain separate from durably requested revocations; background retry must never revoke healthy active jobs. Tests exercise production authority, not only injected verdict stubs.",
       "commits": [
         "86e9c0865070174edf149e17dfe4d8984530ee7c",
-        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c"
+        "3ee3d74297327bd0efc0a8acd9f18faaf4c50c7c",
+        "f8dbc46fc19da8ad791ab1ed6ecde1bdbb513840",
+        "ac13325322715b132fc202ab1e86371d34ef8970"
       ],
       "evidence": [
         "https://developers.cloudflare.com/kv/concepts/how-kv-works/",
         "https://developers.cloudflare.com/kv/api/write-key-value-pairs/",
-        "Root9focusedtests passed including actual DO+cron active/requested isolation, restart, remint during revoke preserving projection, staleKV and legacyemptyrefusal. Global migration/event completion still F008; retain open until paired lifecycle closure."
+        "docs/plan/evidence/F006-source-resolution-2026-09-14.md",
+        "Focused source acceptance is resolved by the durable authority and completion-fence implementation; overall T8-W5 delivery remains blocked by F-20260905-008."
       ],
+      "origin": "Source component closure of the original KV receipt finding. Suspension epoch, migration coverage and live qualification remain separately tracked by F-20260905-008.",
       "historical_sprint": 2
     },
     {
