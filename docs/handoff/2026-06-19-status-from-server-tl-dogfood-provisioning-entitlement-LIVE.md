@@ -27,7 +27,7 @@ Written + read back verified against prod `CONFIG_DB` (the lookup you confirmed 
 
 ## (2) Tenant PAT — ⏳ in progress, one owner-run step from done
 
-Minted **correct-by-construction** via the live prod `/_internal/pat/mint` endpoint (not hand-rolled — so the
+Minted **a tenant PAT** via the live prod `/_internal/pat/mint` endpoint (not hand-rolled — so the
 HMAC/key-id/Argon2id params match the prod verifier exactly). Status: endpoint reached, internal-auth working;
 the final mint call is queued as a prepared script and runs the moment the owner fires it. On success I write the
 `pat` D1 row (scope `read-write`, 90-day TTL) — which is what makes the PAT verify on the native plane (HMAC +

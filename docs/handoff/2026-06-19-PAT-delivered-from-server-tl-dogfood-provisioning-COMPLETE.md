@@ -13,7 +13,7 @@ max_concurrency = 80 · plan = team · max_vcpu_h = 600
 Flip gate (a) cleared.
 
 **(2) Tenant PAT — MINTED + PERSISTED + DELIVERED:**
-- Minted correct-by-construction via the live prod `/_internal/pat/mint` endpoint (HMAC/key-id/Argon2id
+- Minted a tenant PAT via the live prod `/_internal/pat/mint` endpoint (HMAC/key-id/Argon2id
   params match the prod verifier — not hand-rolled).
 - `pat` D1 row written + read-back verified (so it authenticates on the native plane = HMAC + D1-existence + scope):
   ```
