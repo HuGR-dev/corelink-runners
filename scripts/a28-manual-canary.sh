@@ -9,7 +9,8 @@
 # credential is printed or persisted.
 #
 # Required: GH_REPO, GH_TOKEN, SPAWN_WORKER_URL, CORELINK_SPAWN_AUTH_TOKEN_FILE,
-# CANARY_IMAGE_DIGEST (the expected full ref@sha256:... digest). Optional:
+# CORELINK_LIFECYCLE_AUTH_TOKEN_FILE, CANARY_IMAGE_DIGEST (the expected full
+# ref@sha256:... digest). Spawn and lifecycle credentials are distinct. Optional:
 # CANARY_REF (default main),
 # CANARY_EXPIRY_MS (default 900000).
 
@@ -22,6 +23,7 @@ need GH_REPO
 need GH_TOKEN
 need SPAWN_WORKER_URL
 need CORELINK_SPAWN_AUTH_TOKEN_FILE
+need CORELINK_LIFECYCLE_AUTH_TOKEN_FILE
 need CANARY_IMAGE_DIGEST
 
 [[ "${CANARY_IMAGE_DIGEST}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
@@ -36,23 +38,30 @@ command -v npx >/dev/null || die "npx is required"
 command -v curl >/dev/null || die "curl is required"
 
 SPAWN_WORKER_URL="${SPAWN_WORKER_URL%/}"
-AUTH_TOKEN_FILE="${CORELINK_SPAWN_AUTH_TOKEN_FILE}"
-[[ -f "${AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file does not exist"
-[[ "$(stat -f '%Lp' "${AUTH_TOKEN_FILE}")" == 600 ]] ||
+SPAWN_AUTH_TOKEN_FILE="${CORELINK_SPAWN_AUTH_TOKEN_FILE}"
+LIFECYCLE_AUTH_TOKEN_FILE="${CORELINK_LIFECYCLE_AUTH_TOKEN_FILE}"
+[[ -f "${SPAWN_AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file does not exist"
+[[ "$(stat -f '%Lp' "${SPAWN_AUTH_TOKEN_FILE}")" == 600 ]] ||
   die "CoreLink spawn token file must have mode 600"
-[[ -s "${AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file is empty"
+[[ -s "${SPAWN_AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file is empty"
+[[ -f "${LIFECYCLE_AUTH_TOKEN_FILE}" ]] || die "CoreLink lifecycle token file does not exist"
+[[ "$(stat -f '%Lp' "${LIFECYCLE_AUTH_TOKEN_FILE}")" == 600 ]] ||
+  die "CoreLink lifecycle token file must have mode 600"
+[[ -s "${LIFECYCLE_AUTH_TOKEN_FILE}" ]] || die "CoreLink lifecycle token file is empty"
 umask 077
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/a28-manual-canary.XXXXXXXX")" ||
   die "unable to create secure temporary directory"
 chmod 700 "${TMP_DIR}"
-AUTH_HEADER_FILE="${TMP_DIR}/auth.header"
+SPAWN_AUTH_HEADER_FILE="${TMP_DIR}/spawn-auth.header"
+LIFECYCLE_AUTH_HEADER_FILE="${TMP_DIR}/lifecycle-auth.header"
 SPAWN_BODY_FILE="${TMP_DIR}/spawn.json"
 TEARDOWN_BODY_FILE="${TMP_DIR}/teardown.json"
 RUNNER_ID=""
 HANDLE=""
 trap cleanup EXIT INT TERM
-printf 'Authorization: Bearer %s\n' "$(<"${AUTH_TOKEN_FILE}")" >"${AUTH_HEADER_FILE}"
-chmod 600 "${AUTH_HEADER_FILE}"
+printf 'Authorization: Bearer %s\n' "$(<"${SPAWN_AUTH_TOKEN_FILE}")" >"${SPAWN_AUTH_HEADER_FILE}"
+printf 'Authorization: Bearer %s\n' "$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")" >"${LIFECYCLE_AUTH_HEADER_FILE}"
+chmod 600 "${SPAWN_AUTH_HEADER_FILE}" "${LIFECYCLE_AUTH_HEADER_FILE}"
 LABEL="a28-manual-canary-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 [[ "${LABEL}" =~ ^a28-manual-canary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
   die "uuidgen returned a non-canonical UUID"
@@ -63,7 +72,7 @@ cleanup() {
   if [[ -n "${HANDLE}" ]]; then
     curl --silent --show-error --fail-with-body \
       -X POST "${SPAWN_WORKER_URL}/v1/teardown" \
-      -H "@${AUTH_HEADER_FILE}" \
+      -H "@${LIFECYCLE_AUTH_HEADER_FILE}" \
       -H 'Content-Type: application/json' \
       --data-binary "@${TEARDOWN_BODY_FILE}" >/dev/null || true
   fi
@@ -134,7 +143,7 @@ fi
 chmod 600 "${SPAWN_BODY_FILE}"
 SPAWN_JSON="$(curl --silent --show-error --fail-with-body \
   -X POST "${SPAWN_WORKER_URL}/v1/spawn" \
-  -H "@${AUTH_HEADER_FILE}" \
+  -H "@${SPAWN_AUTH_HEADER_FILE}" \
   -H 'Content-Type: application/json' \
   --data-binary "@${SPAWN_BODY_FILE}")" ||
   die "direct /v1/spawn failed"
