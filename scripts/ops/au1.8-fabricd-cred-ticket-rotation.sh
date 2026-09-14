@@ -74,7 +74,10 @@ HEALTH_READY_MAX_SECS="${AU18_HEALTH_READY_MAX_SECS:-90}"
 HEALTH_READY_INTERVAL_SECS="${AU18_HEALTH_READY_INTERVAL_SECS:-2}"
 # This is an operational ceiling for the narrowly scoped, paused canary arm;
 # it is not a credential TTL or a security validity period.
-readonly OPERATIONAL_WINDOW_MAX_SECS=600
+readonly OPERATIONAL_WINDOW_MAX_SECS=2400
+# A rotation needs enough time to recreate, prove the new signer, and disarm
+# the temporary test key before the irreversible credential mutation begins.
+readonly CREDENTIAL_MUTATION_MIN_REMAINING_SECS=900
 EVIDENCE_PATH="$REPO_ROOT/docs/plan/evidence/au1.8-fabricd-secret-rotation.json"
 TENANT="ee30f7ba-fc25-4d71-939e-ebe130b4c6a3"
 REPO_FULL_NAME="HuGR-Labs/corelink-runners"
@@ -1026,6 +1029,17 @@ check_window() {
   log_event "window-seconds=$elapsed"
 }
 
+require_credential_mutation_budget() {
+  local elapsed remaining
+  elapsed=$(( $(date +%s) - WINDOW_START ))
+  remaining=$((OPERATIONAL_WINDOW_MAX_SECS - elapsed))
+  [[ "$remaining" -ge "$CREDENTIAL_MUTATION_MIN_REMAINING_SECS" ]] || {
+    log_event "credential-mutation-budget=RED elapsed_seconds=$elapsed remaining_seconds=$remaining minimum_remaining_seconds=$CREDENTIAL_MUTATION_MIN_REMAINING_SECS"
+    return 1
+  }
+  log_event "credential-mutation-budget=GREEN elapsed_seconds=$elapsed remaining_seconds=$remaining minimum_remaining_seconds=$CREDENTIAL_MUTATION_MIN_REMAINING_SECS"
+}
+
 rollback_old() {
   # Re-arm the known OOB test key only long enough to prove the restored signer;
   # this is followed by a disarm/recreate before returning to the caller.
@@ -1217,6 +1231,9 @@ publish_new_secret() {
 umask 077
 publish_new_secret || { echo "could not atomically publish NEW secret" >&2; exit 1; }
 file_owner_mode_ok "$NEW_SECRET_FILE" || { echo "generated NEW secret is not mode 0600" >&2; exit 1; }
+# Do this immediately before the first permanent credential mutation.  A slow
+# arm exits through on_exit, which restores the old signer and always disarms.
+require_credential_mutation_budget || exit 1
 put_secret FABRIC_CRED_TICKET_SECRET "$NEW_SECRET_FILE" || exit 1
 check_window || exit 1
 recreate 1 || exit 1

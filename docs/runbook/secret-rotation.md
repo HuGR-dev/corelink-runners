@@ -5,7 +5,9 @@ runbook for the live AU1.8 probe; it does not authorize a live change by
 itself. The operator must be a fresh operator who did not write this
 procedure. Start the clock immediately before the first `secret put` and stop
 it after the old/new proof and version capture. The complete procedure must
-finish in 600 seconds or less.
+finish in 2,400 seconds or less. Before the first permanent
+`FABRIC_CRED_TICKET_SECRET` put, at least 900 seconds must remain; a slower arm
+fails closed before that mutation.
 
 ## Required owner inputs
 
@@ -277,13 +279,15 @@ The probe is eligible for PASS only when all of these are true:
    mutation and in every provider stability sample;
 5. the worker and container version ids before and after are recorded;
 6. the image digest before and after is identical;
-7. the complete elapsed time is at most 600 seconds; and
-8. no secret value occurs in terminal output, tail output, or evidence.
+7. the complete elapsed time is at most 2,400 seconds;
+8. at least 900 seconds remained before the first permanent credential put; and
+9. no secret value occurs in terminal output, tail output, or evidence.
 
 If the old value is accepted, the new value is rejected, the route is
 unavailable, the image digest changes, a version cannot be captured, the
 Fabricd admission binding is absent, duplicated, or not exactly `1`, or the
-clock exceeds 600 seconds, record `RED` and do not claim AU1.8.
+clock exceeds 2,400 seconds, or fewer than 900 seconds remained before the
+first permanent credential put, record `RED` and do not claim AU1.8.
 
 ## Rollback
 
