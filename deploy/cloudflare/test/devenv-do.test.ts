@@ -221,8 +221,16 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
     it("rejects malformed stop identities without creating a tombstone", async () => {
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await expect(instance.stopAuthorizedDevenv({ tenantId: "not-a-uuid", sessionUuid: crypto.randomUUID() }))
-        .resolves.toEqual({ sessionUuid: expect.any(String), status: "not_current" });
+        .rejects.toThrow("DEVENV_INVALID_STOP_IDENTITY");
       expect([...mockStorage.keys()].some((key) => key.startsWith("devenv:authorized-stop:"))).toBe(false);
+    });
+
+    it("accepts non-RFC UUID-shaped identities used by legacy server records", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = "ee30f7ba-fc25-0d71-739e-ebe130b4c6a3";
+      const sessionUuid = "ee30f7ba-fc25-0d71-739e-ebe130b4c6a3";
+      await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid }))
+        .resolves.toEqual({ sessionUuid, status: "not_current" });
     });
 
     it("expires tombstones, refuses a live full bound, and protects renewed entries from stale cleanup", async () => {
@@ -239,13 +247,23 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       await instance.expireAuthorizedStop({ tenantId, sessionUuid: firstSession, canceledAt: renewed.canceledAt });
       expect(mockStorage.has(`devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(firstSession)}`)).toBe(false);
 
-      const entries = Array.from({ length: 64 }, (_, i) => ({
-        key: `devenv:authorized-stop:${i}`, canceledAt: 1, expiresAt: Date.now() + 3600000,
-      }));
+      const entries = Array.from({ length: 64 }, (_, i) => {
+        const session = `ee30f7ba-fc25-4d71-739e-${String(i + 1).padStart(12, "0")}`;
+        const key = `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(session)}`;
+        mockStorage.set(key, { canceledAt: 1 });
+        return { key, canceledAt: 1, expiresAt: Date.now() + 3600000 };
+      });
       mockStorage.set("devenv:authorized-stop-index", entries);
       await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid: crypto.randomUUID() }))
         .rejects.toThrow("DEVENV_AUTHORIZED_STOP_CAPACITY");
       vi.useRealTimers();
+    });
+
+    it("fails closed on corrupt tombstone index and mismatched expired values", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      mockStorage.set("devenv:authorized-stop-index", { corrupt: true });
+      await expect(instance.stopAuthorizedDevenv({ tenantId: crypto.randomUUID(), sessionUuid: crypto.randomUUID() }))
+        .rejects.toThrow("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
     });
 
     it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
