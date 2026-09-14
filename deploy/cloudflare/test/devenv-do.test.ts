@@ -261,9 +261,14 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
     it("fails closed on corrupt tombstone index and mismatched expired values", async () => {
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = crypto.randomUUID();
+      const sessionUuid = crypto.randomUUID();
+      await instance.stopAuthorizedDevenv({ tenantId, sessionUuid });
+      const key = `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
       mockStorage.set("devenv:authorized-stop-index", { corrupt: true });
-      await expect(instance.stopAuthorizedDevenv({ tenantId: crypto.randomUUID(), sessionUuid: crypto.randomUUID() }))
+      await expect(instance.expireAuthorizedStop({ tenantId, sessionUuid, canceledAt: mockStorage.get(key).canceledAt }))
         .rejects.toThrow("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      expect(mockStorage.has(key)).toBe(true);
     });
 
     it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
