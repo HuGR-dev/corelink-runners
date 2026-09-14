@@ -176,11 +176,11 @@ describe("normal webhook durable acknowledgement", () => {
     let release!: () => void;
     const selectedAtAdmission = new Promise<void>(resolve => { selected = resolve; });
     const deletionCommitted = new Promise<void>(resolve => { release = resolve; });
-    const originalAdmit = f.d.instance.normalIntakeAdmit.bind(f.d.instance);
-    vi.spyOn(f.d.instance, "normalIntakeAdmit").mockImplementation(async eventId => {
+    const originalFence = f.d.instance.normalIntakeAdmissionFence.bind(f.d.instance);
+    vi.spyOn(f.d.instance, "normalIntakeAdmissionFence").mockImplementation(async eventId => {
       selected();
       await deletionCommitted;
-      return originalAdmit(eventId);
+      return originalFence(eventId);
     });
 
     const drain = runNormalIntakeDrain(f.runtime);

@@ -909,6 +909,9 @@ export class ContainmentDO extends DurableObject<Env> {
   async normalIntakeAdmit(eventId: string): Promise<boolean> {
     return new NormalIntakeInbox(this.ctx.storage).admit(eventId);
   }
+  async normalIntakeAdmissionFence(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admissionFence(eventId);
+  }
 
   async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict"> {
     return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
@@ -5204,6 +5207,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        fence: async () => !(await authority.installationTombstoned(event.installation_id)),
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
@@ -5294,6 +5298,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
         && (await authority.snapshot()).backlog_count === 0
         && await authority.normalIntakeAdmit(event.event_id),
+      fence: () => authority.normalIntakeAdmissionFence(event.event_id),
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
       abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
       claim: spawnClaim.claim,
@@ -6551,6 +6556,7 @@ export async function redriveOrphanedJobs(
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
             admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, reInstallationId)).status === "eligible",
+            fence: async () => !(await ownedAuthority.installationTombstoned(reInstallationId)),
             beforeClaim: async () => {
               if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
@@ -6849,6 +6855,7 @@ export async function retryOrphanedSpawns(
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
         admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, bumped.installationId)).status === "eligible",
+        fence: async () => !(await ownedAuthority.installationTombstoned(bumped.installationId)),
         beforeClaim: async () => {
           if (deferredPlacementUnconfirmed) {
             logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });
