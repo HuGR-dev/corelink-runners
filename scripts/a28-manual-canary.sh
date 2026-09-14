@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# A2.8: manually bind one queued GitHub job to one directly spawned runner.
+# A2.8: manually bind one queued GitHub job to one fabric-acquired runner lease.
 #
 # This is intentionally separate from the production webhook/re-drive path.
 # The generated label is `a28-manual-canary-<uuid>` (outside `corelink-*`), so
 # the Worker autoscaler cannot claim this job even if its intake is resumed.
-# The caller must provide the direct spawn bearer and a GitHub credential with
-# repository Administration:write; neither credential is printed or persisted.
+# The lease API mints the one-use JIT configuration and provisions the deployed
+# RunnerContainer; neither credential is printed or persisted.
 #
-# Required: GH_REPO, GH_TOKEN, SPAWN_WORKER_URL, SPAWN_AUTH_TOKEN,
+# Required: GH_REPO, GH_TOKEN, FABRIC_URL, and FABRIC_PAT or FABRIC_PAT_FILE,
 # CANARY_IMAGE_DIGEST (the expected full ref@sha256:... digest). Optional:
 # CANARY_REF (default main),
 # CANARY_EXPIRY_MS (default 900000).
@@ -19,8 +19,7 @@ need() { [[ -n "${!1:-}" ]] || die "$1 is required"; }
 
 need GH_REPO
 need GH_TOKEN
-need SPAWN_WORKER_URL
-need SPAWN_AUTH_TOKEN
+need FABRIC_URL
 need CANARY_IMAGE_DIGEST
 
 [[ "${CANARY_IMAGE_DIGEST}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
@@ -32,33 +31,38 @@ command -v gh >/dev/null || die "gh is required"
 command -v jq >/dev/null || die "jq is required"
 command -v uuidgen >/dev/null || die "uuidgen is required"
 command -v npx >/dev/null || die "npx is required"
+command -v curl >/dev/null || die "curl is required"
 
-SPAWN_WORKER_URL="${SPAWN_WORKER_URL%/}"
+FABRIC_URL="${FABRIC_URL%/}"
+PAT_FILE="${FABRIC_PAT_FILE:-${HOME}/.corelink/canary-pat-20260913-2227}"
+if [[ -z "${FABRIC_PAT:-}" ]]; then
+  [[ -f "${PAT_FILE}" ]] || die "FABRIC_PAT or FABRIC_PAT_FILE is required"
+  [[ "$(stat -f '%Lp' "${PAT_FILE}")" == 600 ]] || die "PAT file must have mode 600"
+  FABRIC_PAT="$(<"${PAT_FILE}")"
+fi
+[[ -n "${FABRIC_PAT}" ]] || die "fabric PAT is empty"
+probe_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "${FABRIC_URL}/v1/leases" -H "Authorization: Bearer ${FABRIC_PAT}")" ||
+  die "fabric lease route probe failed"
+[[ "${probe_status}" == 200 ]] || die "fabric lease route probe returned HTTP ${probe_status}"
 LABEL="a28-manual-canary-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 [[ "${LABEL}" =~ ^a28-manual-canary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
   die "uuidgen returned a non-canonical UUID"
-RUNNER_NAME="a28-manual-${LABEL#a28-manual-canary-}"
-RUNNER_ID=""
-HANDLE=""
+LEASE_ID=""
+ACQUIRE_STARTED_MS=""
 
 cleanup() {
   local rc=$?
-  if [[ -n "${HANDLE}" ]]; then
-    curl --silent --show-error --fail-with-body \
-      -X POST "${SPAWN_WORKER_URL}/v1/teardown" \
-      -H "Authorization: Bearer ${SPAWN_AUTH_TOKEN}" \
-      -H 'Content-Type: application/json' \
-      --data "$(jq -cn --arg h "${HANDLE}" '{handle:$h}')" >/dev/null || true
-  fi
-  if [[ -n "${RUNNER_ID}" ]]; then
-    gh api --silent --method DELETE \
-      "repos/${GH_REPO}/actions/runners/${RUNNER_ID}" >/dev/null 2>&1 || true
+  if [[ -n "${LEASE_ID}" ]]; then
+    curl --silent --show-error --output /dev/null \
+      -X POST "${FABRIC_URL}/v1/leases/${LEASE_ID}/cancel" \
+      -H "Authorization: Bearer ${FABRIC_PAT}" || true
   fi
   exit "${rc}"
 }
 trap cleanup EXIT INT TERM
 
-# image_digest is an assertion at /v1/spawn. Read the authoritative
+# image_digest is an assertion at lease acquire. Read the authoritative
 # RunnerContainer application configuration through the sanctioned Wrangler
 # OAuth session first, and refuse to proceed if it does not exactly match the
 # operator's expected target. The UUID is fixed to the deployed RunnerContainer
@@ -73,15 +77,31 @@ CF_IMAGE="$(jq -er '.configuration.image' <<<"${CF_IMAGE_JSON}")" ||
 [[ "${CF_IMAGE}" == "${CANARY_IMAGE_DIGEST}" ]] ||
   die "deployed RunnerContainer image does not match CANARY_IMAGE_DIGEST"
 
-# generate-jitconfig creates a repo-scoped, single-use registration. Its body
-# is held only in memory and is passed directly to /v1/spawn.
-JIT_JSON="$(gh api --method POST \
-  "repos/${GH_REPO}/actions/runners/generate-jitconfig" \
-  -f name="${RUNNER_NAME}" -F runner_group_id=1 \
-  -f "labels[]=${LABEL}" -f work_folder=_work)" ||
-  die "GitHub JIT mint failed"
-JIT="$(jq -er '.encoded_jit_config' <<<"${JIT_JSON}")" || die "JIT response missing encoded_jit_config"
-RUNNER_ID="$(jq -r '.runner.id // empty' <<<"${JIT_JSON}")"
+OWNER="${GH_REPO%%/*}"
+REPO="${GH_REPO#*/}"
+ACQUIRE_STARTED_MS=$(( $(date +%s) * 1000 ))
+ACQUIRE_JSON="$(jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --arg owner "${OWNER}" \
+  --arg repo "${REPO}" --arg label "${LABEL}" --argjson expiry "${CANARY_EXPIRY_MS:-900000}" \
+  '{image_digest:$image,net_policy:"egress-runner",tmp_root:"/tmp",expiry_ms:$expiry,
+    runner:{target:{repo:{owner:$owner,repo:$repo}},labels:[$label]}}')"
+LEASE_JSON="$(curl --silent --show-error --fail-with-body -X POST "${FABRIC_URL}/v1/leases" \
+  -H "Authorization: Bearer ${FABRIC_PAT}" -H 'Content-Type: application/json' \
+  --data "${ACQUIRE_JSON}")" || die "fabric POST /v1/leases failed"
+LEASE_ID="$(jq -r '.lease.lease_id // .lease_id // empty' <<<"${LEASE_JSON}")"
+if [[ -z "${LEASE_ID}" ]]; then
+  # The normal response always carries .lease.lease_id. If a proxy returns a
+  # malformed body after admission, recover only an unambiguous newly-created
+  # held lease before failing; never leave a lease silently unreleased.
+  now_ms=$(( $(date +%s) * 1000 ))
+  candidates="$(curl --silent --show-error --fail-with-body \
+    "${FABRIC_URL}/v1/leases" -H "Authorization: Bearer ${FABRIC_PAT}" |
+    jq -r --argjson start "${ACQUIRE_STARTED_MS}" --argjson now "${now_ms}" \
+      --argjson ttl "${CANARY_EXPIRY_MS:-900000}" \
+      '.leases[] | select(.state == "held" and .created_at_ms >= $start and .created_at_ms <= $now and .deadline_ms != null and .deadline_ms >= ($start + $ttl - 10000) and .deadline_ms <= ($now + $ttl + 10000)) | .lease_id')" || true
+  [[ "$(wc -l <<<"${candidates}")" -eq 1 ]] || die "acquire response missing lease id; no unambiguous lease to cancel"
+  LEASE_ID="${candidates}"
+  die "acquire response missing lease id; recovered and cancelled lease"
+fi
 
 gh workflow run a28-manual-runner-canary.yml --repo "${GH_REPO}" --ref "${CANARY_REF:-main}" \
   -f "label=${LABEL}"
@@ -93,32 +113,14 @@ JOB_ID=""
 for _ in $(seq 1 30); do
   while read -r candidate; do
     [[ -n "${candidate}" ]] || continue
-    JOB_JSON="$(gh api "repos/${GH_REPO}/actions/runs/${candidate}/jobs?per_page=100" \
-      2>/dev/null || true)"
-    JOB_MATCH="$(jq -r --arg label "${LABEL}" \
-      '.jobs[] | select(.labels | index($label)) | "\(.id) \(.run_id)"' \
-      <<<"${JOB_JSON}" 2>/dev/null | head -n 1 || true)"
-    if [[ -n "${JOB_MATCH}" ]]; then
-      JOB_ID="${JOB_MATCH%% *}"
-      RUN_ID="${JOB_MATCH##* }"
-      break 2
-    fi
-  done < <(gh run list --workflow a28-manual-runner-canary.yml --repo "${GH_REPO}" \
-    --event workflow_dispatch --limit 20 --json databaseId --jq '.[].databaseId')
+    JOB_JSON="$(gh api "repos/${GH_REPO}/actions/runs/${candidate}/jobs?per_page=100" 2>/dev/null || true)"
+    JOB_MATCH="$(jq -r --arg label "${LABEL}" '.jobs[] | select(.labels | index($label)) | "\(.id) \(.run_id)"' <<<"${JOB_JSON}" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${JOB_MATCH}" ]]; then JOB_ID="${JOB_MATCH%% *}"; RUN_ID="${JOB_MATCH##* }"; break 2; fi
+  done < <(gh run list --workflow a28-manual-runner-canary.yml --repo "${GH_REPO}" --event workflow_dispatch --limit 20 --json databaseId --jq '.[].databaseId')
   sleep 2
 done
 [[ -n "${RUN_ID}" && -n "${JOB_ID}" ]] || die "dispatched workflow job with exact canary label did not appear"
 
-SPAWN_JSON="$(curl --silent --show-error --fail-with-body \
-  -X POST "${SPAWN_WORKER_URL}/v1/spawn" \
-  -H "Authorization: Bearer ${SPAWN_AUTH_TOKEN}" \
-  -H 'Content-Type: application/json' \
-  --data "$(jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --arg jit "${JIT}" \
-    --arg label "${LABEL}" --argjson expiry "${CANARY_EXPIRY_MS:-900000}" \
-    '{image_digest:$image,jitconfig:$jit,env:{CORELINK_RUNNER_JITCONFIG:$jit},labels:[$label],expiry_ms:$expiry}')")" ||
-  die "direct /v1/spawn failed"
-HANDLE="$(jq -er '.handle' <<<"${SPAWN_JSON}")" || die "spawn response missing handle"
-
-echo "A2.8 canary queued: run=${RUN_ID} job=${JOB_ID} label=${LABEL} handle=${HANDLE} image=${CF_IMAGE}"
+echo "A2.8 canary queued: run=${RUN_ID} job=${JOB_ID} label=${LABEL} lease=${LEASE_ID} image=${CF_IMAGE}"
 gh run watch "${RUN_ID}" --repo "${GH_REPO}" --exit-status --interval 5
 echo "A2.8 canary passed: runner booted and workflow succeeded"
