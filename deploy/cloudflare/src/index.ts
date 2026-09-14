@@ -906,6 +906,10 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
 
+  async normalIntakeAdmit(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admit(eventId);
+  }
+
   async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict"> {
     return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
   }
@@ -1131,6 +1135,7 @@ export class ContainmentDO extends DurableObject<Env> {
     path: "redrive" = "redrive",
     effectId?: string,
     now = Date.now(),
+    installationId?: string,
   ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: ContainmentRedrivePermit }> {
     const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || path !== "redrive") return { status: "invalid" };
@@ -1140,6 +1145,7 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.tx(async (s) => {
       const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
       if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      if (installationId && await s.get(installationTombstoneKey(installationId)) !== undefined) return { status: "ineligible" as const };
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
       // a fresh tuple through reserveRedriveCandidate first.
@@ -5286,7 +5292,8 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       opts: spawnOpts, provider: "cloudflare-container",
       resource_id: `job:${event.repo}/${event.job_id}`, idempotency_key: `containment:v1:${event.event_id}`,
       admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
-        && (await authority.snapshot()).backlog_count === 0,
+        && (await authority.snapshot()).backlog_count === 0
+        && await authority.normalIntakeAdmit(event.event_id),
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
       abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
       claim: spawnClaim.claim,
@@ -6543,7 +6550,7 @@ export async function redriveOrphanedJobs(
             provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
-            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, reInstallationId)).status === "eligible",
             beforeClaim: async () => {
               if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
@@ -6841,7 +6848,7 @@ export async function retryOrphanedSpawns(
         provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
-        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, bumped.installationId)).status === "eligible",
         beforeClaim: async () => {
           if (deferredPlacementUnconfirmed) {
             logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });

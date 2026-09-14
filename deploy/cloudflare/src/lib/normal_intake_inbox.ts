@@ -275,6 +275,21 @@ export class NormalIntakeInbox {
     return (await this.storage.get(installationTombstoneKey(installationId))) !== undefined;
   }
 
+  /**
+   * Admit a selected normal-intake record in the same authority transaction as
+   * the installation deletion fence.  Selection is only advisory: a deletion
+   * committed before this transaction linearizes must refuse every later
+   * authorization, claim, mint, and provider effect.
+   */
+  async admit(eventId: string): Promise<boolean> {
+    if (!text(eventId)) return false;
+    return this.storage.transaction(async tx => {
+      const record = await tx.get<unknown>(eventKey(eventId));
+      if (!validRecord(record, eventId) || record.state !== "pending") return false;
+      return (await tx.get(installationTombstoneKey(record.installation_id))) === undefined;
+    });
+  }
+
   async pending(now: number, limit = 25): Promise<NormalIntakeRecord[]> {
     validateNow(now);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw new Error("invalid normal intake limit");

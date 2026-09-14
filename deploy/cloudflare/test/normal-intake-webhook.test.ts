@@ -163,6 +163,39 @@ describe("normal webhook durable acknowledgement", () => {
     expect(getContainer).toHaveBeenCalledTimes(1);
   });
 
+  it("fences a selected normal intake when installation deletion commits before effect admission", async () => {
+    const f = setup(false);
+    const context = ctx();
+    expect((await worker.fetch(await webhook(8250, "delete-race-8250"), f.runtime, context as never)).status).toBe(202);
+    await settle(context); // rate-limited intake is durable but not yet eligible
+    const record = f.d.storage.map.get("normal-inbox:v1:event:delete-race-8250") as { next_attempt_ms: number };
+    vi.spyOn(Date, "now").mockReturnValue(record.next_attempt_ms);
+    f.limiter.mockResolvedValue({ success: true });
+
+    let selected!: () => void;
+    let release!: () => void;
+    const selectedAtAdmission = new Promise<void>(resolve => { selected = resolve; });
+    const deletionCommitted = new Promise<void>(resolve => { release = resolve; });
+    const originalAdmit = f.d.instance.normalIntakeAdmit.bind(f.d.instance);
+    vi.spyOn(f.d.instance, "normalIntakeAdmit").mockImplementation(async eventId => {
+      selected();
+      await deletionCommitted;
+      return originalAdmit(eventId);
+    });
+
+    const drain = runNormalIntakeDrain(f.runtime);
+    await selectedAtAdmission;
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
+    release();
+    await drain;
+
+    // The tombstone won the authority transaction. No auth, claim, mint, JIT,
+    // or container start may follow the selected-but-not-admitted event.
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    expectNoSpawnState(f);
+    expect(f.d.storage.map.get("normal-inbox:v1:event:delete-race-8250")).toMatchObject({ state: "complete" });
+  });
+
   it.each([
     ["missing production mint key", { mintKey: "" }],
     ["wrong production mint key", { mintKey: "wrong-runtime-key", expectedInternalKey: "mint-auth" }],
