@@ -23,7 +23,7 @@ while (($#)); do
 done
 if ((EXECUTE)) && (( ! ACK )); then echo 'refusing: --execute requires --ack-destructive' >&2; exit 2; fi
 
-for c in curl jq npx openssl shasum stat mktemp git; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
+for c in curl jq npx node openssl shasum stat mktemp git; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
 ROOT="$(cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 SPAWN=corelink-spawn-worker; FABRIC=corelink-fabricd
 SPAWN_URL=https://corelink-spawn-worker.gmhelmold.workers.dev
@@ -32,6 +32,8 @@ RUNNER_APP=a03d11a2-7e03-48a4-96bb-4d2c43892cd4
 RUNNER_DIGEST=sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330
 FABRIC_APP_EXPECTED=a0325be3-f845-460f-95f6-ae678ec46a94
 FABRIC_DIGEST_EXPECTED=sha256:300d5fb008877d5ba9de82b5555572894b1bbae180b7567a909f777ae2d0b5f5
+CF_ACCOUNT_ID=6a1fc1c626fc2628823e60b9db01f5cd
+FABRIC_ROLLOUT_HELPER="$ROOT/scripts/ops/a28-fabricd-same-config-rollout.mjs"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/a28-spawn-token.XXXXXXXX")"; chmod 700 "$TMP"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 EVIDENCE="${A28_EVIDENCE_FILE:-$ROOT/docs/validation/evidence/a28-spawn-token-rotation-$(date -u +%Y%m%dT%H%M%SZ).json}"
@@ -66,6 +68,11 @@ if ((SELFTEST)); then
   fabric_identity_ok "$FABRIC_APP_EXPECTED" "$good" || { echo 'selftest failed: expected identity rejected' >&2; exit 1; }
   ! fabric_identity_ok '00000000-0000-0000-0000-000000000000' "$good" || { echo 'selftest failed: wrong app accepted' >&2; exit 1; }
   ! fabric_identity_ok "$FABRIC_APP_EXPECTED" "$bad_digest" || { echo 'selftest failed: wrong digest accepted' >&2; exit 1; }
+  node "$ROOT/scripts/ops/a28-fabricd-same-config-rollout.selftest.mjs"
+  forbidden_worker_cmd='wrangler'; forbidden_worker_cmd+=" deploy"
+  ! rg -F -n -- "$forbidden_worker_cmd" "$0" "$ROOT/scripts/ops/a28-fabricd-same-config-rollout.mjs" >/dev/null || { echo 'selftest failed: Worker deployment path remains forbidden' >&2; exit 1; }
+  forbidden_container_flag='containers'; forbidden_container_flag+='-rollout'
+  ! rg -F -n -- "$forbidden_container_flag" "$0" "$ROOT/scripts/ops/a28-fabricd-same-config-rollout.mjs" >/dev/null || { echo 'selftest failed: container rollout flag remains forbidden' >&2; exit 1; }
   echo 'selftest green: expected identity accepted; wrong app and digest rejected'
   exit 0
 fi
@@ -116,16 +123,23 @@ need_file "${A28_FABRIC_PAT_FILE:-}" A28_FABRIC_PAT_FILE
 git -C "$ROOT" diff --quiet -- deploy/cloudflare-fabricd || { echo 'NO-GO: Fabricd deploy tree has unstaged/staged changes' >&2; exit 1; }
 [[ -z "$(git -C "$ROOT" ls-files --others --exclude-standard deploy/cloudflare-fabricd)" ]] || { echo 'NO-GO: Fabricd deploy tree has untracked files' >&2; exit 1; }
 LOCAL_FABRIC_DIGEST="$(awk '/"class_name": "FabricdContainer"/{seen=1} seen && /"image":/{if (match($0,/sha256:[0-9a-f]{64}/)) {print substr($0,RSTART,RLENGTH); exit}}' "$ROOT/deploy/cloudflare-fabricd/wrangler.jsonc")"
-[[ "$LOCAL_FABRIC_DIGEST" == "$FABRIC_DIGEST" ]] || { echo 'NO-GO: checked-in Fabricd image pin is stale; refusing deploy' >&2; exit 1; }
+[[ "$LOCAL_FABRIC_DIGEST" == "$FABRIC_DIGEST" ]] || { echo 'NO-GO: checked-in Fabricd image pin is stale; refusing rollout' >&2; exit 1; }
+[[ -f "$FABRIC_ROLLOUT_HELPER" && ! -L "$FABRIC_ROLLOUT_HELPER" ]] || { echo 'NO-GO: same-config Fabricd rollout helper is missing or symlinked' >&2; exit 1; }
 
 TOKEN="$TMP/new-token"; openssl rand -base64 48 | tr -d '\n' >"$TOKEN"; chmod 600 "$TOKEN"
 [[ "$(wc -c <"$TOKEN" | tr -d ' ')" -ge 48 ]] || { echo 'token generation failed' >&2; exit 1; }
 wr secret put CLOUDFLARE_SPAWN_AUTH_TOKEN --name "$SPAWN" <"$TOKEN" >/dev/null
 NEW_SPAWN_V="$(latest_version "$SPAWN")"; pause_is_one "$SPAWN" "$NEW_SPAWN_V" AUTOSCALER_INTAKE_PAUSED; pause_is_one "$SPAWN" "$NEW_SPAWN_V" AUTOSCALER_REDRIVE_PAUSED; secret_present "$SPAWN"
 wr secret put CLOUDFLARE_SPAWN_AUTH_TOKEN --name "$FABRIC" <"$TOKEN" >/dev/null
-# The container reads its env only at boot. This is permitted only after the exact
-# provider-pin and source gates above; --keep-vars --strict retains remote bindings.
-(cd "$ROOT/deploy/cloudflare-fabricd" && wr deploy --keep-vars --strict --containers-rollout=immediate >/dev/null)
+# The container reads its env only at boot. The raw Containers API restarts it
+# with the authenticated configuration copied verbatim into target_configuration.
+# It does not publish a Worker version or modify any Worker binding.
+node "$FABRIC_ROLLOUT_HELPER" --execute --ack-destructive \
+  --account-id "$CF_ACCOUNT_ID" --application-id "$FABRIC_APP" \
+  --expected-digest "$FABRIC_DIGEST_EXPECTED" \
+  --wrangler-dir "$ROOT/deploy/cloudflare-fabricd" >"$TMP/fabricd-rollout.json"
+chmod 600 "$TMP/fabricd-rollout.json"
+[[ "$(jq -er '.status' "$TMP/fabricd-rollout.json")" == completed ]] || { echo 'NO-GO: Fabricd same-config rollout did not complete' >&2; exit 1; }
 NEW_FABRIC_V="$(latest_version "$FABRIC")"; pause_is_one "$FABRIC" "$NEW_FABRIC_V" FABRIC_ADMISSION_PAUSED; secret_present "$FABRIC"
 NEW_FABRIC_INFO="$(wr containers info "$FABRIC_APP" --json)"
 fabric_identity_ok "$FABRIC_APP" "$NEW_FABRIC_INFO" || { echo 'NO-GO: Fabricd app identity or digest changed during rollout' >&2; exit 1; }
