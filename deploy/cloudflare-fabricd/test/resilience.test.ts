@@ -29,6 +29,7 @@ vi.mock("@cloudflare/containers", () => ({
 
 import worker, {
   idleGateDecision,
+  isColdWake403,
   isLongLivedRoute,
   pgLedgerEnvVars,
   watchdogAction,
@@ -342,6 +343,53 @@ describe("proxyFetch — wedged upstream → structured 503 (bounded routes only
     await expect(
       worker.fetch(new Request("http://fabricd/v1/leases/lease-x", { method: "GET" }), envWithShards(1)),
     ).rejects.toThrow(/connection refused/);
+  });
+});
+
+describe("cold wake — retry only the platform's transient health 403", () => {
+  const platform403 = () =>
+    new Response(JSON.stringify({ error: "Container is not running" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("retries platform 403 once and returns the subsequent health response", async () => {
+    await expect(isColdWake403(platform403())).resolves.toBe(true);
+    const fetch = vi.fn().mockResolvedValueOnce(platform403()).mockResolvedValueOnce(new Response("ok"));
+    getContainer.mockReturnValue({ fetch });
+    const response = await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the final platform 403 after the retry is exhausted", async () => {
+    const final = platform403();
+    const fetch = vi.fn().mockResolvedValueOnce(platform403()).mockResolvedValueOnce(final);
+    getContainer.mockReturnValue({ fetch });
+    const response = await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    expect(response).toBe(final);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry application 403 or non-health routes", async () => {
+    const auth = () => new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+    await expect(isColdWake403(auth())).resolves.toBe(false);
+    const fetch = vi.fn().mockResolvedValue(auth());
+    getContainer.mockReturnValue({ fetch });
+    await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    await worker.fetch(new Request("http://fabricd/v1/health"), envWithShards(1));
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("translates an abort without retrying", async () => {
+    const fetch = vi.fn().mockRejectedValue(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    getContainer.mockReturnValue({ fetch });
+    const response = await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    expect(response.status).toBe(503);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
