@@ -1156,12 +1156,15 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.tx(async (s) => {
       const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
       if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      // Eligibility is decided before acquiring the deletion fence. An expired
+      // or already-promoted tuple has no external effect to protect and must
+      // never leave a durable fence behind.
+      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       if (installationId && await s.get(installationTombstoneKey(installationId)) !== undefined) return { status: "ineligible" as const };
       if (installationId && !await acquireInstallationFenceInTransaction(s, installationId, expectedEffectId)) return { status: "ineligible" as const };
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
       // a fresh tuple through reserveRedriveCandidate first.
-      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
       await s.put(containmentReservationKey(repo, jobId), eligible);
       return { status: "eligible" as const, permit: reservationPermit(eligible) };

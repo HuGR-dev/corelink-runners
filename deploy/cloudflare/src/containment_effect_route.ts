@@ -132,6 +132,10 @@ export async function runCanonicalEffect<TOpts extends object>(
   const req = request(tuple);
   let claimAdmitted = false;
   let effectStarted = false;
+  // A recovered or newly-marked DRIVING owner may have a provider call in
+  // flight. Keep the deletion fence until a later canonical recovery proves a
+  // terminal receipt; never use a TTL to guess that fact.
+  let retainFence = false;
   const releaseClaim = async () => {
     if (claimAdmitted && deps.release) { await deps.release().catch(() => undefined); claimAdmitted = false; }
   };
@@ -146,6 +150,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     const recovered = existing.kind === "committed" || (existing.kind === "owned" && existing.state === "DRIVING")
       ? terminal(existing) : null;
     if (recovered) {
+      if (existing.kind === "owned" && existing.state === "DRIVING") retainFence = true;
       if (recovered.status === "committed" && deps.finalize) recovered.finalized = await deps.finalize(recovered.receipt);
       return recovered;
     }
@@ -300,6 +305,7 @@ export async function runCanonicalEffect<TOpts extends object>(
       return terminal(driving) ?? { status: "unknown_terminal" };
     }
     effectStarted = true;
+    retainFence = true;
     let provider: ProviderDriveResult;
     try {
       if (!(await fenced())) return { status: "busy" };
@@ -311,6 +317,7 @@ export async function runCanonicalEffect<TOpts extends object>(
         effect_proof_id: proof.proof_id,
         effect_binding: boundBinding,
       });
+      retainFence = false;
     } catch (error) {
       return { status: "unknown_terminal", reason: error instanceof Error ? error.message : "provider failed" };
     }
@@ -350,7 +357,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (!effectStarted) await releaseClaim();
     return { status: "unavailable", reason: error instanceof Error ? error.message : "route failure" };
   } finally {
-    if (deps.releaseFence) await deps.releaseFence().catch(() => undefined);
+    if (!retainFence && deps.releaseFence) await deps.releaseFence().catch(() => undefined);
     // Preparation can mint a credential before this route wins the external
     // spawn claim. If the provider was not started, revoke only that exact
     // invocation's credential. Cleanup failures are recorded by its durable

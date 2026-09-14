@@ -172,14 +172,18 @@ describe("normal webhook durable acknowledgement", () => {
     vi.spyOn(Date, "now").mockReturnValue(record.next_attempt_ms);
     f.limiter.mockResolvedValue({ success: true });
 
-    // Admission has returned and its durable lease is live. A deletion racing
-    // the interval before the canonical claim cannot commit; it must retry.
-    expect(await f.d.instance.normalIntakeAdmit("delete-race-8250")).toBe(true);
+    let entered!: () => void; let finish!: () => void;
+    const atProvider = new Promise<void>(resolve => { entered = resolve; });
+    const releaseProvider = new Promise<void>(resolve => { finish = resolve; });
+    vi.mocked(getContainer).mockReturnValue({ startWithEnv: vi.fn(async () => { entered(); await releaseProvider; }), teardown: vi.fn(async () => {}) } as never);
+    const drain = runNormalIntakeDrain(f.runtime);
+    await atProvider;
+    // The real canonical route is past admission and paused in its provider
+    // seam. Deletion cannot commit while its durable lease remains live.
     expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("busy");
-    expect(f.fetchMock).not.toHaveBeenCalled();
-    expectNoSpawnState(f);
     expect(await f.d.instance.installationTombstoned("42")).toBe(false);
-    await f.d.instance.normalIntakeReleaseFence("delete-race-8250");
+    finish(); await drain;
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
   });
 
   it.each([
