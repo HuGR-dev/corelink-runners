@@ -1,0 +1,25 @@
+{
+  "name": "corelink-spawn-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CoreLink spawn-Worker + Container DO — Cloudflare substrate (ADR-0008). LIVE — autoscaler (/webhook) + /v1/* spawn surface deployed.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "jsonc-parser": "^3.2.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^4.103.0"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "journey": "Point CI at the fleet — mint substrate live, App owner-gated",
+  "sid": [
+    "S5.1.2"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-7.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the attestation key the JIT-runner path binds to is served (fabric ready to mint)",
+      "ok": true,
+      "assertion": "attestation key faa5b7726ccd2c52 serves a 32-byte ed25519 pubkey (FLIP-B live)",
+      "artifact": {
+        "status": 200,
+        "keyId": "faa5b7726ccd2c52",
+        "pubkeyBytes": 32
+      }
+    },
+    {
+      "step": "record the residual: the App install and full cache-hit smoke are gated",
+      "ok": true,
+      "assertion": "substrate live under key faa5b7726ccd2c52; the on-ramp itself is gated",
+      "artifact": {
+        "app": "installation 144561227 — owner-gated (GitHub App live)",
+        "fullSmoke": "X4-external (needs a real CoreLink PAT or hugit dispatch)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:01.025Z"
+}

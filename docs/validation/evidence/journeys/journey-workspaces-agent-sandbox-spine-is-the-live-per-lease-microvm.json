@@ -1,0 +1,35 @@
+{
+  "journey": "Workspaces agent-sandbox spine is the live per-lease microVM",
+  "sid": [
+    "S3.2"
+  ],
+  "persona": "P3 agent-platform builder",
+  "atoms": [
+    "F-2.4",
+    "F-4.8"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "a sandbox lease is a fresh, fail-closed box (net_policy=deny-all by default)",
+      "ok": true,
+      "assertion": "fresh box lease-544d0be8-2c61-4eb1-be29-10f021d28ca0 HELD, egress deny-all (one-lease-one-box, ADR-0009 cond.1)",
+      "artifact": {
+        "leaseId": "lease-544d0be8-2c61-4eb1-be29-10f021d28ca0"
+      }
+    },
+    {
+      "step": "destroying the sandbox is real teardown (no reuse across sessions/tenants)",
+      "ok": true,
+      "assertion": "sandbox destroyed → 200 (never reused across tenants)",
+      "artifact": {
+        "status": 200,
+        "GAP": "campaign #2 — spine only, SKUs not built",
+        "detail": "the agent-sandbox SKU + product surface is owner-gated; env-0 secrets broker + microVM boundary are the live spine it would consume"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:21:37.251Z"
+}

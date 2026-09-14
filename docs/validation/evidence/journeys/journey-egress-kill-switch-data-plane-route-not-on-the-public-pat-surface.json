@@ -1,0 +1,34 @@
+{
+  "journey": "Egress kill-switch — data-plane route, not on the public PAT surface",
+  "sid": [
+    "S5.4.2"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-4.2",
+    "F-7.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the fabric is up to accept operator controls (health 200)",
+      "ok": true,
+      "assertion": "GET /v1/health → 200 (control plane reachable)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "record the residual: egress-cutoff is a spawn-worker, box-handle, operator-authed control",
+      "ok": true,
+      "assertion": "the kill-switch is not exposed on the public tenant read surface",
+      "artifact": {
+        "egressCutoff": "GAP — POST /v1/egress-cutoff is a spawn-worker data-plane route, keyed by a box handle + operator auth; not exercisable from a tenant PAT",
+        "hardSever": "teardown()/destroy() is the fail-closed control (raw-socket caveat, ADR-0009 Why-3)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:53.700Z"
+}

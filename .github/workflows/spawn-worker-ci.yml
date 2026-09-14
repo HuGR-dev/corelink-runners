@@ -1,0 +1,95 @@
+# spawn-Worker PR gate — the suite that covers the fleet's placement logic.
+#
+# WHY THIS EXISTS: until 2026-08-03 the spawn-Worker's 351-test vitest suite ran
+# ONLY inside `deploy-spawn-worker.yml`, which is `workflow_dispatch`-only. So
+# every TypeScript change to the Worker that places customer jobs merged with its
+# tests never having run — `ci.yml` is Rust-only plus one `node --test`, and a PR
+# touching `deploy/cloudflare/**` showed two green checks (`dco`, `gates`) that do
+# not execute a single line of this code.
+#
+# That was found while reviewing PR #444 (burst jobs left permanently queued): the
+# PR was CLEAN and green, and the only evidence its fix worked was a suite the
+# author ran on a laptop. A gate that is green because it never looked is the
+# failure mode this repo family has been hunting all week.
+#
+# The deploy workflow keeps its own `test` job — that gate is about not shipping a
+# red build, and it stays. This one is about not MERGING an untested one.
+name: spawn-worker CI
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/cloudflare/**'
+      # The Worker-side conformance tests read shared vectors from the repo
+      # root; rerun them when a vector changes even if the Worker source does
+      # not.
+      - 'conformance/**'
+      - '.github/workflows/spawn-worker-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/cloudflare/**'
+      - 'conformance/**'
+      - '.github/workflows/spawn-worker-ci.yml'
+
+permissions:
+  contents: read
+
+# A force-push should not leave an obsolete run burning minutes.
+concurrency:
+  group: spawn-worker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: spawn-Worker typecheck + vitest
+    # Self-hosted corelink fleet — zero GitHub-hosted spend (the hosted lane was
+    # billing-blocked, silently failing this gate on any deploy/cloudflare/** PR).
+    runs-on: corelink
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `vitest run` exits non-zero on any failure. Deliberately NOT
+      # `continue-on-error` and deliberately NOT filtered to changed files: the
+      # placement logic is one state machine and a change anywhere in it can
+      # strand a customer's job somewhere else.
+      - name: Test (vitest) + coverage floor
+        # `test:coverage` is `vitest run --coverage`. The `--coverage` half is
+        # LOAD-BEARING: vitest evaluates the `coverage.thresholds` block in
+        # vitest.config.ts ONLY when the provider is enabled, so reverting this
+        # to `npm run test` would disarm the floor without failing anything.
+        # Exit code is vitest's own (no pipe, no `|| true`).
+        run: npm run test:coverage
+
+      # A suite that silently stops collecting tests would pass vacuously — the
+      # exact shape this workflow exists to prevent. Assert the count is in the
+      # expected band instead of trusting the green.
+      - name: Assert the suite actually ran
+        run: |
+          set -euo pipefail
+          count="$(npx vitest run --reporter=json 2>/dev/null \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const j=JSON.parse(s.slice(s.indexOf("{")));
+                console.log(j.numTotalTests ?? 0);
+              })')"
+          echo "tests collected: ${count}"
+          if [ "${count}" -lt 300 ]; then
+            echo "::error ::spawn-Worker suite collected only ${count} tests (expected >=300)." \
+                 "A suite that stops collecting passes vacuously; that is the failure this gate exists to catch."
+            exit 1
+          fi

@@ -1,0 +1,47 @@
+{
+  "journey": "client-side verify: v2 result-binding sig + attestation key",
+  "sid": [
+    "S1.5.1"
+  ],
+  "persona": "P1 security-conscious dev",
+  "atoms": [
+    "F-4.10",
+    "F-9.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "the attestation key endpoint serves the fabric public key (200, a real pubkey)",
+      "ok": true,
+      "assertion": "GET /v1/attestation/key → 200, serves key_id=faa5b7726ccd2c52 with a pubkey",
+      "artifact": {
+        "status": 200,
+        "keyId": "faa5b7726ccd2c52",
+        "hasPub": true
+      }
+    },
+    {
+      "step": "acquires a runner and closes it — a no-result close still signs the empty v2 pre-image",
+      "ok": true,
+      "assertion": "close → 200, result_binding_sig_v2 present (EBrtCtkxEBG7…)",
+      "artifact": {
+        "status": 200,
+        "hasSigV2": true,
+        "closeKeyId": "faa5b7726ccd2c52"
+      }
+    },
+    {
+      "step": "the close's key_id matches a key the attestation endpoint serves (verifier can fetch it)",
+      "ok": true,
+      "assertion": "close.fabric_key_id (faa5b7726ccd2c52) === served key_id (faa5b7726ccd2c52) — the verify loop is wired",
+      "artifact": {
+        "closeKeyId": "faa5b7726ccd2c52",
+        "servedKeyId": "faa5b7726ccd2c52",
+        "gap": "the ed25519 pre-image recompute (memo_key‖stdout‖stderr‖exit‖artifacts) + ✓/✗ verdict is the client-side `corelink verify` CLI, not a /v1 verb; here we prove the sig+key are on the wire and consistent"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:57:11.389Z"
+}

@@ -1,0 +1,13 @@
+ts	attempt	http	verdict	detail
+03:33:28	1	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:33:53	2	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:34:14	3	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:34:40	4	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:35:10	5	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:35:42	6	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:36:06	7	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:36:36	8	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:36:56	9	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:37:17	10	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:37:43	11	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()
+03:38:07	12	500	BOOT_FAILED	Failed to start container: The container is not running, consider calling start()

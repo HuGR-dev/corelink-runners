@@ -1,0 +1,69 @@
+# Example: run a build + test suite on CoreLink fabric via Buildkite
+#
+# Prerequisites:
+#   1. Store your CoreLink PAT as a Buildkite secret named CORELINK_PAT.
+#      (Organization Settings → Secrets → New Secret)
+#   2. Until corelink is published to crates.io / has a release artifact, build
+#      the binary in an earlier step (see "Build corelink CLI" below).
+#
+# Pricing: flat concurrency, never per-minute. You buy N parallel runners
+# and minutes are unlimited. A re-run whose result is memoized returns from
+# cache in milliseconds — you are never billed as if it re-ran.
+
+steps:
+  # --------------------------------------------------------------------------
+  # TEMPORARY: build the corelink binary until a release artifact exists.
+  # Replace this step with a download step once releases are published.
+  # --------------------------------------------------------------------------
+  - label: ":rust: Build corelink CLI"
+    key: "build-corelink-cli"
+    commands:
+      - cargo build -p corelink-cli --release --locked
+      # Upload the binary as a Buildkite artifact for use in downstream steps.
+      - buildkite-agent artifact upload target/release/corelink
+
+  - wait
+
+  # --------------------------------------------------------------------------
+  # CoreLink: run tests on the fabric
+  # --------------------------------------------------------------------------
+  - label: ":corelink: Run tests on CoreLink fabric"
+    key: "run-tests-on-fabric"
+    depends_on: "build-corelink-cli"
+    commands:
+      # Download the corelink binary built above and put it on PATH.
+      - buildkite-agent artifact download target/release/corelink .
+      - chmod +x target/release/corelink
+      - export PATH="$PWD/target/release:$PATH"
+    plugins:
+      # Use HuGR-Labs/corelink#v0.1.0 from the Buildkite Plugin Registry
+      # once the plugin is published.  For local/dev use, reference the repo
+      # directory directly.
+      - HuGR-Labs/corelink#v0.1.0:
+          # url is read from CORELINK_URL env var if not specified here.
+          url: "https://runners.corelink.dev"
+          check: "cargo test --workspace --locked"
+          check-id: "cargo-test"
+          # Image MUST include a sha256 digest — unpinned images are rejected
+          # by the fabric (X4 supply-chain floor enforced before box contact).
+          image: "ubuntu@sha256:a6d2b38300ce017add71440577d5b0a90460d0602a9f4920e2cae943d53c8fac"
+          verify: true
+    # CORELINK_PAT must be a Buildkite secret; never hard-code here.
+    # The plugin reads it from the environment automatically.
+
+  # --------------------------------------------------------------------------
+  # CoreLink: run lints in parallel (demonstrates N parallel runners)
+  # --------------------------------------------------------------------------
+  - label: ":mag: Lint on CoreLink fabric"
+    key: "run-lint-on-fabric"
+    depends_on: "build-corelink-cli"
+    commands:
+      - buildkite-agent artifact download target/release/corelink .
+      - chmod +x target/release/corelink
+      - export PATH="$PWD/target/release:$PATH"
+    plugins:
+      - HuGR-Labs/corelink#v0.1.0:
+          check: "cargo clippy --workspace --all-targets --locked -- -D warnings"
+          check-id: "cargo-clippy"
+          image: "ubuntu@sha256:a6d2b38300ce017add71440577d5b0a90460d0602a9f4920e2cae943d53c8fac"
+          verify: true

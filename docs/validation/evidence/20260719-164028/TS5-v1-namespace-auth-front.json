@@ -1,0 +1,19 @@
+{
+  "cell": "TS5-v1-namespace-auth-front",
+  "atoms": [
+    "F-3.2",
+    "F-5.1",
+    "S7.4"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-5·security-gates",
+  "stimulus": "GET https://corelink-fabricd.gmhelmold.workers.dev/v1/this-route-does-not-exist (no PAT)",
+  "assertion": "auth fronts the entire /v1 namespace — unknown route still 401, no route-existence oracle for the unauthenticated",
+  "pass": true,
+  "artifact": {
+    "status": 401,
+    "body": "{\"code\":\"unauthorized\",\"message\":\"missing Bearer PAT\"}"
+  },
+  "ts": "2026-07-19T16:40:29.756Z"
+}

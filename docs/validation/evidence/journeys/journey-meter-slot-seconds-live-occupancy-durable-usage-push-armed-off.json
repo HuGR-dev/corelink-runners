@@ -1,0 +1,57 @@
+{
+  "journey": "Meter slot-seconds — live occupancy + durable usage, push armed-off",
+  "sid": [
+    "S5.3.1"
+  ],
+  "persona": "P5 operator",
+  "atoms": [
+    "F-5.6"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "read the occupancy baseline",
+      "ok": true,
+      "assertion": "baseline active_now=0",
+      "artifact": {
+        "status": 200,
+        "base": 0
+      }
+    },
+    {
+      "step": "acquire a runner — occupancy metering reflects it immediately",
+      "ok": true,
+      "assertion": "active_now rose to 1 (SlotMeter counts the held box)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-bf0bf154-62d5-4c1f-8387-e15c12349404",
+        "activeNow": 1
+      }
+    },
+    {
+      "step": "the durable usage-history surface returns the tenant-scoped vCPU·ms of record",
+      "ok": true,
+      "assertion": "GET /v1/usage/history → 200, 12-month series, vcpu_ms=0, tenant=00000000-0000-4000-8000-0000000f0004",
+      "artifact": {
+        "status": 200,
+        "tenant": "00000000-0000-4000-8000-0000000f0004",
+        "vcpu_ms": 0,
+        "periods": 12,
+        "peak_this_instance": 2
+      }
+    },
+    {
+      "step": "the history is the caller's OWN tenant only (no cross-tenant parameter exists)",
+      "ok": true,
+      "assertion": "usage/history tenant (00000000-0000-4000-8000-0000000f0004) == the caller's own (00000000-0000-4000-8000-0000000f0004) — no cross-tenant read",
+      "artifact": {
+        "historyTenant": "00000000-0000-4000-8000-0000000f0004",
+        "usageTenant": "00000000-0000-4000-8000-0000000f0004",
+        "pushExporter": "armed-off (owner) — BILLING_INGEST_URL unset ⇒ no push (durable table backs it)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:47:45.718Z"
+}

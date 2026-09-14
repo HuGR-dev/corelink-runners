@@ -1,0 +1,38 @@
+{
+  "journey": "Forge a verdict — the published verify key is the anti-forge mechanism; verify_strict is client-side (gap)",
+  "sid": [
+    "S7.3"
+  ],
+  "persona": "P7 attacker / MITM",
+  "atoms": [
+    "F-3.1",
+    "F-3.3",
+    "F-5.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "POSITIVE CONTROL — the attestation key is served unauthenticated (200, real pubkey)",
+      "ok": true,
+      "assertion": "GET /v1/attestation/key → 200, pubkey_b64 present (key_id=faa5b7726ccd2c52)",
+      "artifact": {
+        "status": 200,
+        "key_id": "faa5b7726ccd2c52",
+        "pubkeyLen": 44
+      }
+    },
+    {
+      "step": "the published key is STABLE across reads (a client can pin it to verify every verdict)",
+      "ok": true,
+      "assertion": "key stable across two reads (pinnable) → true",
+      "artifact": {
+        "stable": true,
+        "gap": "v2 verify_strict rejecting a flipped exit:1→0 or a rewritten artifacts[] (result_binding_sig_v2, conformance_result_binding_v2.rs) is exercised in the SDK/Rust suite, not over the live HTTP API.",
+        "reachableFrom": "client verify / Rust conformance — the fabric HTTP surface only PUBLISHES the key, it does not expose a tamper-a-verdict endpoint."
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:36:47.923Z"
+}

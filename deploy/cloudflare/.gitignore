@@ -1,0 +1,5 @@
+node_modules/
+.dev.vars
+.dev.vars.*
+*.dev.vars
+# audit r9: never commit local Worker secrets (wrangler dev secrets)

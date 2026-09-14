@@ -1,0 +1,49 @@
+{
+  "journey": "A refused spawn leaks no seat; recovery is immediate",
+  "sid": [
+    "S1.4.1",
+    "S1.4.2",
+    "S1.4.3"
+  ],
+  "persona": "P1 Free dev",
+  "atoms": [
+    "F-2.1",
+    "F-4.6",
+    "F-5.5"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "fill the single seat and record the occupied count",
+      "ok": true,
+      "assertion": "seat HELD, active_now=1",
+      "artifact": {
+        "leaseId": "lease-f20c9af0-3591-47f9-b2e7-16ddc78b7408",
+        "activeNow": 1
+      }
+    },
+    {
+      "step": "a spawn beyond the cap is refused — and the account is UNCHANGED (no leaked slot)",
+      "ok": true,
+      "assertion": "refused (429); active_now still 1 (a refused spawn subtracts nothing from usable N)",
+      "artifact": {
+        "refusedStatus": 429,
+        "activeAfter": 1,
+        "activeBefore": 1
+      }
+    },
+    {
+      "step": "releasing the seat makes it immediately re-acquirable (self-healing recovery)",
+      "ok": true,
+      "assertion": "close → 200, re-acquire → HELD lease-e4c8a58b-3b6d-4268-afff-36474d93f69c (the seat is never stranded)",
+      "artifact": {
+        "close": 200,
+        "reacquired": "lease-e4c8a58b-3b6d-4268-afff-36474d93f69c",
+        "gap": "the reconciler orphan re-drive (S1.4.1), transient-CF-reset retry (S1.4.2), and webhook fail-open-to-cold (S1.4.3) live on the internal spawn/webhook path — not injectable via /v1 (⚪ X4-external)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T23:05:09.531Z"
+}

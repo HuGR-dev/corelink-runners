@@ -1,0 +1,42 @@
+{
+  "journey": "Enterprise SSO/SAML: fabric consumes resolved tenant PAT; identity layer owner-gated",
+  "sid": [
+    "S10.6"
+  ],
+  "persona": "P10 enterprise IT reviewer",
+  "atoms": [
+    "F-8.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "a RESOLVED tenant PAT (however the user authenticated) is accepted by the /v1 surface",
+      "ok": true,
+      "assertion": "authed GET /v1/usage → 200 for tenant=00000000-0000-4000-8000-0000000f0004 — the fabric only consumes PAT verification + tenancy (auth method is upstream)",
+      "artifact": {
+        "status": 200,
+        "tenant": "00000000-0000-4000-8000-0000000f0004"
+      }
+    },
+    {
+      "step": "there is NO fabric login to SSO-enable — a missing PAT → 401 unauthorized (identity is consumed, not owned)",
+      "ok": true,
+      "assertion": "no PAT → 401 code=unauthorized (the fabric has no user base; identity is CoreLink/Clerk's)",
+      "artifact": {
+        "status": 401,
+        "code": "unauthorized"
+      }
+    },
+    {
+      "step": "records the SSO residual — SAML/SCIM live in the identity layer, owner-gated",
+      "ok": true,
+      "assertion": "the org→tenant mapping resolving a PAT the /v1 surface accepts is the fabric's whole obligation; SSO/SAML/SCIM are not here",
+      "artifact": {
+        "sso": "owner-gated (ADR-0002 identity — HuGR account / Clerk pool; SAML/SCIM = identity layer, not in repo; gated on CoreLink self-serve GA M2)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:25:10.699Z"
+}

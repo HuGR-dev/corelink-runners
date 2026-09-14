@@ -1,0 +1,161 @@
+# moat-benchmark — prove the cache-moat EARNS its keep: memoized re-runs ≈ 0.
+#
+# Runs a deterministic "check" (a real `cargo build` of a generated crate) twice
+# through `clw run` on a CoreLink ephemeral runner:
+#   - COLD  (1st): cache MISS → the check actually runs → result memoized to CAS.
+#   - WARM  (2nd): same inputs → cache HIT → clw returns the memoized verdict
+#                  WITHOUT re-running → wall-clock ≈ 0.
+# The COLD→WARM wall-clock delta is the moat's real signal (the #12 pricing proof).
+#
+# Memoization model (verified clw 0.1.1): `clw run --input <paths> -- <cmd>`; the
+# cache key = hash(inputs ‖ named env ‖ cmd). --input is the SOURCE only (NOT
+# target/, else the 2nd run's artifacts would change the key → false miss).
+#
+# North star: this is a benchmark, not the product path. If the moat is COLD
+# (CLW_* not injected) clw run can't memoize — the workflow reports that and the
+# raw build time, never hangs.
+# The action-level optional|required-hit contract is asserted by moat-action-test;
+# this benchmark remains a direct clw capability measurement.
+name: moat-benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      fns:
+        description: "generated fn count (tunes the cold build cost; deterministic)"
+        default: "6000"
+
+jobs:
+  bench:
+    runs-on: corelink-dogfood
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Moat posture
+        run: |
+          if [ -n "${CLW_ENDPOINT:-}" ] && [ -n "${CLW_TOKEN:-}" ]; then
+            echo "moat=WARM — clw run will memoize to the CoreLink CAS"
+          else
+            echo "moat=COLD — CLW_* not injected; clw run cannot memoize (benchmark will show raw time only)"
+          fi
+          command -v clw >/dev/null 2>&1 && clw --version || echo "clw not on PATH"
+
+      - name: Generate a deterministic crate (fixed inputs ⇒ stable cache key)
+        run: |
+          set -euo pipefail
+          N="${{ github.event.inputs.fns }}"; N="${N:-6000}"
+          mkdir -p moatbench/src
+          # .clwignore so --input moatbench excludes build output from the key.
+          printf 'target/\n' > moatbench/.clwignore
+          cat > moatbench/Cargo.toml <<'TOML'
+          [package]
+          name = "moatbench"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          [profile.release]
+          opt-level = 2
+          TOML
+          # N dependency-free #[inline(never)] fns ⇒ a real, deterministic, network-free
+          # compile whose cost scales with N. Same N ⇒ byte-identical source ⇒ same key.
+          # Pure bash (the runner image has no python3).
+          {
+            for ((i=0; i<N; i++)); do
+              m=$(( (i * 2654435761) & 0xffffffff ))
+              printf '#[inline(never)] fn f%d(x:u64)->u64{x.wrapping_mul(%d).wrapping_add(%d)}\n' "$i" "$m" "$i"
+            done
+            printf 'fn main(){let mut a=1u64;\n'
+            for ((i=0; i<N; i++)); do printf 'a=a.wrapping_add(f%d(a));\n' "$i"; done
+            printf 'println!("{a}");}\n'
+          } > moatbench/src/main.rs
+          # Bake a per-run-unique marker into the SOURCE so the cache key is fresh
+          # every dispatch ⇒ the COLD run is a GUARANTEED miss (real compile), and
+          # WARM1/2 (same source, same run) are guaranteed hits. Without this, a
+          # repeat dispatch reuses the prior run's CAS entry and COLD is also a hit.
+          printf '\n// run-unique: %s-%s\n' "${{ github.run_id }}" "${{ github.run_attempt }}" >> moatbench/src/main.rs
+          echo "generated moatbench with N=$N fns ($(wc -l < moatbench/src/main.rs) lines), run-unique key"
+
+      # D11/T6-W2: the installed clw 0.1.5 has no authenticated atomic
+      # no-exec HIT/restore operation. The real action must refuse
+      # required-hit with 78 before invoking the planted child command.
+      - name: Required-hit planted miss refuses before child execution
+        id: required_hit
+        continue-on-error: true
+        uses: ./actions/corelink-memoize
+        with:
+          cache-policy: required-hit
+          run: printf 'child-ran\n' > t6-w2-required-hit-child.marker
+          inputs: moatbench/Cargo.toml moatbench/src
+
+      - name: Assert required-hit refusal and no child execution
+        run: |
+          set -euo pipefail
+          test "${{ steps.required_hit.outcome }}" = failure
+          test ! -e t6-w2-required-hit-child.marker
+          echo "required-hit refused; planted child never executed (exact exit 78 is covered by actions/corelink-memoize/test/policy.sh)"
+
+      # Helper note: clw 0.1.5 does not provide machine-readable HIT status for
+      # `run`; --json is ignored and child stdout/stderr are proxied. Capture
+      # both streams for diagnostics only; the benchmark does not infer a HIT.
+      - name: COLD run (cache MISS — the check actually runs + memoizes)
+        id: cold
+        run: |
+          set +e
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-cold.json 2>clw-cold.err
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "--- clw stdout (json) ---"; cat clw-cold.json || true
+          echo "--- clw stderr (tail) ---"; tail -5 clw-cold.err || true
+          echo "cold_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "cold_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: WARM run #1 (same inputs ⇒ cache HIT ⇒ memoized)
+        id: warm
+        run: |
+          set +e
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-warm.json 2>clw-warm.err
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "--- clw stdout (json) ---"; cat clw-warm.json || true
+          echo "--- clw stderr (tail) ---"; tail -5 clw-warm.err || true
+          echo "warm_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "warm_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: WARM run #2 (stability — a HIT should match WARM #1, not COLD)
+        id: warm2
+        run: |
+          set +e
+          export CLW_REF_DOMAIN=runner
+          t0=$(date +%s%3N)
+          clw run --json --input moatbench/Cargo.toml --input moatbench/src \
+                  -- bash -c 'cd moatbench && cargo build --release -q' >clw-warm2.json 2>clw-warm2.err
+          rc=$?
+          t1=$(date +%s%3N)
+          echo "rc=$rc  ms=$((t1-t0))"
+          echo "--- clw stdout (json) ---"; cat clw-warm2.json || true
+          echo "warm2_ms=$((t1-t0))" >> "$GITHUB_OUTPUT"; echo "warm2_rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Result — COLD vs WARM (the moat delta)
+        run: |
+          C="${{ steps.cold.outputs.cold_ms }}"; W="${{ steps.warm.outputs.warm_ms }}"; W2="${{ steps.warm2.outputs.warm2_ms }}"
+          echo "=============================================="
+          echo " MOAT BENCHMARK (clw run memoization, N=${{ github.event.inputs.fns || '6000' }} fns)"
+          echo "  COLD  (miss, ran):      ${C} ms  (rc=${{ steps.cold.outputs.cold_rc }})"
+          echo "  WARM1 (hit, memoized):  ${W} ms  (rc=${{ steps.warm.outputs.warm_rc }})"
+          echo "  WARM2 (hit, stability): ${W2} ms (rc=${{ steps.warm2.outputs.warm2_rc }})"
+          if [ "${W:-0}" -gt 0 ] && [ "${C:-0}" -gt 0 ]; then
+            echo "  speedup: $(awk "BEGIN{printf \"%.1fx\", ${C}/${W}}")  saved: $((C-W)) ms/run"
+          fi
+          echo "  clw verdict — COLD: $(grep -ho 'cache hit\|cache miss' clw-cold.err 2>/dev/null | head -1 || echo '?')"
+          echo "               WARM1: $(grep -ho 'cache hit\|cache miss' clw-warm.err 2>/dev/null | head -1 || echo '?')"
+          echo "               WARM2: $(grep -ho 'cache hit\|cache miss' clw-warm2.err 2>/dev/null | head -1 || echo '?')"
+          echo "=============================================="
+          echo "WARM is NOT zero: a clw run HIT restores the memoized OUTPUT (build"
+          echo "artifacts) from the CAS — you skip the compile, pay the CAS restore."
+          echo "Expected: COLD=miss (real compile), WARM1/2=hit (run-unique key)."

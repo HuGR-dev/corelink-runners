@@ -1,0 +1,45 @@
+{
+  "journey": "Fence escape is rejected — tmp_root injection guard, in-box FenceManifest recorded as gap",
+  "sid": [
+    "S7.1"
+  ],
+  "persona": "P7 attacker",
+  "atoms": [
+    "F-4.2",
+    "F-4.4"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "POSITIVE CONTROL — a clean, absolute tmp_root is admitted (a legit job runs)",
+      "ok": true,
+      "assertion": "clean absolute tmp_root → 200 HELD (lease-f36f76d9-eadd-4eca-a6c2-dc6299b9a0e8)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-f36f76d9-eadd-4eca-a6c2-dc6299b9a0e8"
+      }
+    },
+    {
+      "step": "ATTACK — a shell-injection tmp_root is rejected BEFORE any box (400, no lease)",
+      "ok": true,
+      "assertion": "injection tmp_root → 400 invalid, no box spawned",
+      "artifact": {
+        "status": 400,
+        "leaseId": null
+      }
+    },
+    {
+      "step": "ATTACK — a relative tmp_root (ambient-FS escape) is rejected (400, no lease)",
+      "ok": true,
+      "assertion": "relative tmp_root → 400 invalid (fence is the claimed set, not ambient FS)",
+      "artifact": {
+        "status": 400,
+        "gap": "The `..` traversal / absolute-injection / `srcfoo`-vs-`src/` prefix-collision fence is enforced by the per-claim FenceManifest at EXEC time inside the box (C5a suite, contract §4).",
+        "reachableFrom": "in-box only — needs a spawned box shell running a job against the FenceManifest, not the API."
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:36:13.065Z"
+}

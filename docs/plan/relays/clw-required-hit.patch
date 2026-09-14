@@ -1,0 +1,333 @@
+diff --git a/crates/clw-cli/src/subcmds/run.rs b/crates/clw-cli/src/subcmds/run.rs
+index fcd7b78..53986b9 100644
+--- a/crates/clw-cli/src/subcmds/run.rs
++++ b/crates/clw-cli/src/subcmds/run.rs
+@@ -19,7 +19,7 @@ use std::io::Write as _;
+ 
+ use clap::Args;
+ use clw_client::HttpClient;
+-use clw_run::{run_memoized, RunOptions};
++use clw_run::{run_memoized, run_memoized_required_hit, RunOptions};
+ use clw_types::ClwError;
+ 
+ use crate::config::ResolvedConfig;
+@@ -57,6 +57,14 @@ pub struct RunArgs {
+     )]
+     pub env: Vec<String>,
+ 
++    /// Require a complete verified cache hit; never execute the child.
++    #[arg(
++        long = "require-hit",
++        visible_alias = "no-exec",
++        help = "Require a verified cache hit; on miss/corruption/transport failure exit 78 without spawning"
++    )]
++    pub require_hit: bool,
++
+     /// The command to run (after `--`).
+     #[arg(
+         last = true,
+@@ -95,6 +103,9 @@ pub const CLW_RUN_INTERNAL_NOT_RUN: i32 = 125;
+ /// clean exit 0, and this is an error return that never reaches memoization).
+ pub const CLW_RUN_OUTPUT_TOO_LARGE: i32 = 137;
+ 
++/// Required-hit miss/error: the command was deliberately not executed.
++pub const CLW_RUN_REQUIRED_HIT_MISS: i32 = 78;
++
+ /// Map a `run_memoized` failure to the `clw run` exit code. The child NEVER ran →
+ /// the reserved [`CLW_RUN_INTERNAL_NOT_RUN`] (125); the child RAN but clw killed it
+ /// for exceeding the output cap ([`ClwError::TooLarge`]) → the distinct
+@@ -115,6 +126,7 @@ pub async fn run(args: RunArgs, cfg: ResolvedConfig, json: bool) -> Result<(), C
+         eprintln!("{JSON_NOT_APPLICABLE_HINT}");
+     }
+ 
++    let require_hit = args.require_hit;
+     let opts = RunOptions {
+         inputs: args.input,
+         command: args.cmd,
+@@ -129,38 +141,54 @@ pub async fn run(args: RunArgs, cfg: ResolvedConfig, json: bool) -> Result<(), C
+     // code and must NOT be cached. Signal it with the RESERVED exit code 125 — the
+     // docker / `env` / `timeout` "the wrapper itself failed" convention — which is
+     // distinct from the child passthrough. (A child SHOULD avoid emitting 125-127.)
+-    let outcome = match async move {
+-        let client = HttpClient::new(cfg.clw_config)?;
+-        let cwd = std::env::current_dir()?;
+-        run_memoized(&cwd, &client, &opts).await
+-    }
+-    .await
+-    {
+-        Ok(outcome) => outcome,
+-        Err(e) => {
+-            // Two distinct clw-error exits (see `run_err_exit_code`):
+-            //   * TooLarge — the child DID run but clw killed it for exceeding the
+-            //     output cap → 137 (SIGKILL), NOT the reserved 125 child-never-ran
+-            //     sentinel, so the runner does not mis-classify a real killed child.
+-            //   * everything else — clw-internal, the child NEVER ran → reserved 125.
+-            // Both are error returns that never reached memoization, so NOT cached.
+-            match &e {
+-                ClwError::TooLarge { size, cap } => {
+-                    eprintln!(
++    let outcome = if require_hit {
++        match async move {
++            let client = HttpClient::new(cfg.clw_config)?;
++            let cwd = std::env::current_dir()?;
++            run_memoized_required_hit(&cwd, &client, &opts).await
++        }
++        .await
++        {
++            Ok(Some(outcome)) => outcome,
++            Ok(None) | Err(_) => {
++                eprintln!("[clw] required cache hit unavailable; child not run");
++                std::process::exit(CLW_RUN_REQUIRED_HIT_MISS);
++            }
++        }
++    } else {
++        match async move {
++            let client = HttpClient::new(cfg.clw_config)?;
++            let cwd = std::env::current_dir()?;
++            run_memoized(&cwd, &client, &opts).await
++        }
++        .await
++        {
++            Ok(outcome) => outcome,
++            Err(e) => {
++                // Two distinct clw-error exits (see `run_err_exit_code`):
++                //   * TooLarge — the child DID run but clw killed it for exceeding the
++                //     output cap → 137 (SIGKILL), NOT the reserved 125 child-never-ran
++                //     sentinel, so the runner does not mis-classify a real killed child.
++                //   * everything else — clw-internal, the child NEVER ran → reserved 125.
++                // Both are error returns that never reached memoization, so NOT cached.
++                match &e {
++                    ClwError::TooLarge { size, cap } => {
++                        eprintln!(
+                         "[clw] child output exceeded the cap ({size} bytes > {cap}); child killed"
+                     );
++                    }
++                    // Route through `actionable_error` so a clw-internal failure on the
++                    // `run` path (hydrate/lookup) surfaces the ACTIONABLE message — most
++                    // importantly a 402 renders the quota/plan/upgrade guidance instead of
++                    // a bare `HTTP 402 from …`. Message text only: the reserved exit-125
++                    // "child never ran" contract below is unchanged.
++                    _ => eprintln!(
++                        "[clw] internal error — child not run: {}",
++                        crate::actionable_error(&e)
++                    ),
+                 }
+-                // Route through `actionable_error` so a clw-internal failure on the
+-                // `run` path (hydrate/lookup) surfaces the ACTIONABLE message — most
+-                // importantly a 402 renders the quota/plan/upgrade guidance instead of
+-                // a bare `HTTP 402 from …`. Message text only: the reserved exit-125
+-                // "child never ran" contract below is unchanged.
+-                _ => eprintln!(
+-                    "[clw] internal error — child not run: {}",
+-                    crate::actionable_error(&e)
+-                ),
++                std::process::exit(run_err_exit_code(&e));
+             }
+-            std::process::exit(run_err_exit_code(&e));
+         }
+     };
+ 
+diff --git a/crates/clw-run/src/lib.rs b/crates/clw-run/src/lib.rs
+index ee20db4..4528167 100644
+--- a/crates/clw-run/src/lib.rs
++++ b/crates/clw-run/src/lib.rs
+@@ -753,6 +753,48 @@ pub async fn run_memoized<C: CasTransport + AcTransport>(
+     })
+ }
+ 
++/// Look up a memoized result without ever spawning the wrapped command.
++///
++/// `Ok(None)` means the exact computed key did not have a complete, parseable
++/// and CAS-verifiable record. Callers that require a cache hit must treat that
++/// as a miss and choose their own fail-closed exit policy.
++pub async fn run_memoized_required_hit<C: CasTransport + AcTransport>(
++    cwd: &Path,
++    client: &C,
++    opts: &RunOptions,
++) -> Result<Option<RunOutcome>> {
++    if opts.command.is_empty() {
++        return Err(ClwError::InvalidManifest("empty command".to_string()));
++    }
++
++    let key = compute_key(cwd, opts).await?;
++    let Some(record_bytes) = AcTransport::get(client, &key).await? else {
++        return Ok(None);
++    };
++    let Ok(record) = serde_json::from_slice::<RunRecord>(&record_bytes) else {
++        return Ok(None);
++    };
++    let (Ok(stdout), Ok(stderr)) = (
++        CasTransport::get(client, &record.stdout).await,
++        CasTransport::get(client, &record.stderr).await,
++    ) else {
++        return Ok(None);
++    };
++    // Keep the required-hit policy fail-closed even for a transport that does
++    // not uphold the CasTransport integrity contract internally.
++    if Digest::of_bytes(&stdout) != record.stdout || Digest::of_bytes(&stderr) != record.stderr {
++        return Ok(None);
++    }
++
++    Ok(Some(RunOutcome {
++        key,
++        hit: true,
++        exit_code: record.exit_code,
++        stdout,
++        stderr,
++    }))
++}
++
+ // ---------------------------------------------------------------------------
+ // Tests
+ // ---------------------------------------------------------------------------
+@@ -1059,6 +1101,150 @@ mod tests {
+         AcTransport::delete(&store, &key).await.unwrap();
+     }
+ 
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn required_hit_miss_never_spawns_the_command() {
++        let tmp = TempDir::new().unwrap();
++        std::fs::write(tmp.path().join("in.txt"), b"x").unwrap();
++        let marker = tmp.path().join("spawned");
++        let opts = RunOptions {
++            inputs: vec!["in.txt".into()],
++            command: vec![
++                "/bin/sh".into(),
++                "-c".into(),
++                format!("touch {}", marker.display()),
++            ],
++            env_keys: vec![],
++        };
++
++        assert!(
++            run_memoized_required_hit(tmp.path(), &FakeStore::default(), &opts)
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(!marker.exists(), "required-hit miss must not spawn");
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn required_hit_corrupt_record_never_spawns_the_command() {
++        let tmp = TempDir::new().unwrap();
++        std::fs::write(tmp.path().join("in.txt"), b"x").unwrap();
++        let marker = tmp.path().join("spawned");
++        let opts = RunOptions {
++            inputs: vec!["in.txt".into()],
++            command: vec![
++                "/bin/sh".into(),
++                "-c".into(),
++                format!("touch {}", marker.display()),
++            ],
++            env_keys: vec![],
++        };
++        let store = FakeStore::default();
++        let key = compute_key(tmp.path(), &opts).await.unwrap();
++        AcTransport::put(&store, &key, b"not a RunRecord".to_vec())
++            .await
++            .unwrap();
++
++        assert!(run_memoized_required_hit(tmp.path(), &store, &opts)
++            .await
++            .unwrap()
++            .is_none());
++        assert!(
++            !marker.exists(),
++            "corrupt required-hit record must not spawn"
++        );
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn required_hit_replays_cached_nonzero_without_spawning() {
++        let tmp = TempDir::new().unwrap();
++        std::fs::write(tmp.path().join("in.txt"), b"x").unwrap();
++        let marker = tmp.path().join("spawned");
++        let opts = RunOptions {
++            inputs: vec!["in.txt".into()],
++            command: vec![
++                "/bin/sh".into(),
++                "-c".into(),
++                format!("touch {}", marker.display()),
++            ],
++            env_keys: vec![],
++        };
++        let store = FakeStore::default();
++        let stdout = b"cached stdout".to_vec();
++        let stderr = b"cached stderr".to_vec();
++        let stdout_digest = Digest::of_bytes(&stdout);
++        let stderr_digest = Digest::of_bytes(&stderr);
++        let key = compute_key(tmp.path(), &opts).await.unwrap();
++        AcTransport::put(
++            &store,
++            &key,
++            serde_json::to_vec(&RunRecord {
++                exit_code: 7,
++                stdout: stdout_digest,
++                stderr: stderr_digest,
++            })
++            .unwrap(),
++        )
++        .await
++        .unwrap();
++        CasTransport::put(&store, &stdout_digest, stdout.clone())
++            .await
++            .unwrap();
++        CasTransport::put(&store, &stderr_digest, stderr.clone())
++            .await
++            .unwrap();
++
++        let outcome = run_memoized_required_hit(tmp.path(), &store, &opts)
++            .await
++            .unwrap()
++            .expect("complete record must be a hit");
++        assert_eq!(outcome.exit_code, 7);
++        assert_eq!(outcome.stdout, stdout);
++        assert_eq!(outcome.stderr, stderr);
++        assert!(!marker.exists(), "required-hit replay must not spawn");
++    }
++
++    #[tokio::test]
++    async fn required_hit_rejects_cas_bytes_under_the_wrong_digest() {
++        let tmp = TempDir::new().unwrap();
++        std::fs::write(tmp.path().join("in.txt"), b"x").unwrap();
++        let opts = RunOptions {
++            inputs: vec!["in.txt".into()],
++            command: vec!["/bin/true".into()],
++            env_keys: vec![],
++        };
++        let store = FakeStore::default();
++        let expected = Digest::of_bytes(b"expected");
++        let stderr = Digest::of_bytes(b"");
++        let key = compute_key(tmp.path(), &opts).await.unwrap();
++        AcTransport::put(
++            &store,
++            &key,
++            serde_json::to_vec(&RunRecord {
++                exit_code: 0,
++                stdout: expected,
++                stderr,
++            })
++            .unwrap(),
++        )
++        .await
++        .unwrap();
++        CasTransport::put(&store, &expected, b"substituted".to_vec())
++            .await
++            .unwrap();
++        CasTransport::put(&store, &stderr, Vec::new())
++            .await
++            .unwrap();
++
++        assert!(run_memoized_required_hit(tmp.path(), &store, &opts)
++            .await
++            .unwrap()
++            .is_none());
++    }
++
+     // -----------------------------------------------------------------------
+     // Test: miss executes, stores; identical second call is a hit (no re-exec)
+     // -----------------------------------------------------------------------

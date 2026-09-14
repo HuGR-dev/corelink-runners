@@ -1,0 +1,73 @@
+[package]
+name = "corelink-fabric-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "corelink-fabricd"
+path = "src/main.rs"
+
+[dependencies]
+axum       = { workspace = true }
+# WP-API3: the exec mechanism is fail-closed (`anyhow::Result`, no result
+# ever fabricated) and content-addresses captured output + the frozen
+# memo-key formula via SHA-256 (sha2 is the workspace-pinned hash dep).
+anyhow     = { workspace = true }
+sha2       = { workspace = true }
+# WP-BILLING-TARGET: idem_key = BLAKE3(lease_id‖period) for the corelink-billing
+# usage-push adapter. blake3 is already in Cargo.lock (corelink-runner uses it),
+# so naming it here as a direct dep adds ZERO new crates.
+blake3     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# WP-CORELINK-AUTH: the CoreLinkTokenStore transport (UreqIntrospect).
+# ureq is already a workspace/lock dep (corelink-cloud-engine uses it) — adding
+# it here adds ZERO new crates to Cargo.lock.
+ureq       = { workspace = true }
+# WP-ENV1: standard-base64 wire form of the drained raw transcript bytes
+# (same alphabet convention as the attestation wire form).
+base64     = { workspace = true }
+# WP-ENV2: the close handler drives the frozen JobClose state machine, which
+# blocks for up to the runner-configured ack window — it runs on a blocking
+# thread (`tokio::task::spawn_blocking`), never on the async workers. The
+# `sync` feature (Semaphore) bounds how many such waits may pin a blocking
+# thread at once (the close ack-window concurrency gate, audit P1).
+tokio      = { workspace = true }
+# AUDIT P2: the global in-flight concurrency cap + load-shedding (503 when
+# saturated) is a tower `GlobalConcurrencyLimitLayer` + `LoadShedLayer` wired in
+# app_full. tower was previously dev-only (oneshot); promoting it to a normal
+# dep with the `limit`/`load-shed` features adds ZERO crates to Cargo.lock (all
+# its transitive deps were already present from the dev-dep + axum).
+tower      = { workspace = true }
+# WP-FIX-LEASE-ID-UUID: the acquire handler mints `lease_id` from a UUID v4 so
+# the persistent PgLedger PRIMARY KEY can never collide across restarts or
+# instances (the in-memory monotonic counter could).
+uuid       = { workspace = true }
+# WP-BROKER: RS256 JWT signing for the GitHub-App runner-registration broker
+# (ADR-0007 C1). `ring` is already in Cargo.lock (rustls' crypto provider via
+# ureq's TLS) — naming it here as a direct dep adds ZERO new crates. The crypto
+# is quarantined behind the broker's `AppJwtSigner` trait (only `RingRsaJwtSigner`
+# touches `ring`), so the mint flow tests need no real RSA key.
+ring       = { workspace = true }
+# Same-workspace path deps (house law allows these; the crates.io-only rule in
+# deny.toml governs EXTERNAL deps): the FROZEN API vocabulary (paths, DTOs,
+# error semantics), the control-plane core types (TenantId), the frozen
+# wire-contract transcriptions the lease handlers (API2/3) will carry, and
+# the §13 envelope mechanism (CaptureHook/Subscriber — consumed, never
+# modified) the ENV1 transport adapter drains.
+corelink-fabric-api        = { path = "../corelink-fabric-api" }
+corelink-fabric            = { path = "../corelink-fabric" }
+corelink-runner            = { path = "../corelink-runner" }
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+corelink-cloud-engine      = { path = "../corelink-cloud-engine" }
+# corelink-runner serves two consumers: validation reuse (API2 —
+# `ContainerSpec::from_lease` is the runner's own lease gate: pinned image,
+# allowed net_policy, tmp_root injection guard; no box/VM is ever contacted
+# from this crate in API2, pinned at source level by
+# `acquire_unpinned_image_rejected_400_before_box_contact`) and the §13
+# envelope mechanism (ENV1 — see above).
+
+[dev-dependencies]
+tokio = { workspace = true }

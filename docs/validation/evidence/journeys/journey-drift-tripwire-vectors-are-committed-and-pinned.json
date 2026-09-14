@@ -1,0 +1,43 @@
+{
+  "journey": "Drift-tripwire vectors are committed and pinned",
+  "sid": [
+    "S16.1",
+    "S16.2"
+  ],
+  "persona": "P16 seam owner",
+  "atoms": [
+    "F-3.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "the manifest pins the named wire-type vectors by exact hash",
+      "ok": true,
+      "assertion": "RunnerLease/FenceManifest/IntentMetrics all pinned byte-exact in manifest.sha256",
+      "artifact": {
+        "pins": {
+          "RunnerLease": true,
+          "FenceManifest": true,
+          "IntentMetrics": true
+        },
+        "GAP": "enforcement is a BUILD-TIME Rust golden test (cargo test acceptance_cf0_transcriptions / acceptance_s13_contracts), NOT a live fabric API — a drift is a red build, caught pre-merge"
+      }
+    },
+    {
+      "step": "each pinned vector file round-trips to its committed bytes (the tripwire substrate)",
+      "ok": true,
+      "assertion": "all 3 vector files are committed, valid JSON",
+      "artifact": {
+        "names": [
+          "RunnerLease.json",
+          "FenceManifest.json",
+          "IntentMetrics.json"
+        ],
+        "note": "a benign-looking field add still breaks the byte-exact vector — the tripwire forces the cross-repo conversation (S16.3)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:20:28.836Z"
+}

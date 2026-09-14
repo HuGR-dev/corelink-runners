@@ -1,0 +1,53 @@
+{
+  "journey": "Multiple agents contend for the tenant's N (tenant is the fairness unit)",
+  "sid": [
+    "S4.6"
+  ],
+  "persona": "P4 agent-fleet operator",
+  "atoms": [
+    "F-5.2"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 4,
+  "narrative": [
+    {
+      "step": "the tenant's aggregate usage is per-TENANT, not per-agent",
+      "ok": true,
+      "assertion": "usage 200: cap=10, active=0, NO per-agent field (the tenant is opaque below its PAT)",
+      "artifact": {
+        "cap": 10,
+        "activeNow": 0,
+        "perAgent": null
+      }
+    },
+    {
+      "step": "agent-α draws a slot from the shared tenant pool",
+      "ok": true,
+      "assertion": "agent-α lease lease-5898ba4a-cdde-4236-8643-27629dd8fb8c HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-5898ba4a-cdde-4236-8643-27629dd8fb8c"
+      }
+    },
+    {
+      "step": "agent-β draws a SECOND slot from the SAME pool (shared N, no per-agent partition)",
+      "ok": true,
+      "assertion": "agent-β lease lease-835b2af6-f07c-46b9-b27e-0040f8faacc1 HELD; active_now=2 (both drew from one tenant pool)",
+      "artifact": {
+        "status": 200,
+        "activeNow": 2
+      }
+    },
+    {
+      "step": "records the honest boundary — per-agent quota is NOT a fabric primitive (by design)",
+      "ok": true,
+      "assertion": "fair-share protects ACROSS tenants (S2.4.1), not WITHIN one; intra-tenant per-agent scheduling is the operator's to own — a designed absence, not a missing feature",
+      "artifact": {
+        "boundary": "tenant is the cap/fairness unit (ADR-0002)",
+        "perAgentQuota": "not a fabric primitive (by design)"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:43:49.305Z"
+}

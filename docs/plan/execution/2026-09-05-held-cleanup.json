@@ -1,0 +1,11 @@
+{
+  "scope": "T3-W10 safety repair; durable restart reclaim remains open F-20260905-002",
+  "source_commit": "dd7ea7f80980d453c57bca9f6f8fa5afe6149fb5",
+  "review": "root reviewed realprovider unknown=>refusal, instance-scoped no-box evidence, atomic registry evidence, handleGC onlypostterminal, expiry/crash/close/cancel/queuedrollback/suspension ordering.",
+  "checks": "Warm cargo check of cancel_teardown_confirmation and held_teardown_confirmation passed in combined36.56secondcheck; no runtime/CI.",
+  "limits": [
+    "LeaseRecord.box_ref still placeholder; restarted unknown identity retains Held/cap until authoritative recovery.",
+    "No provider operation/deployment performed."
+  ],
+  "observed_at": "2026-09-06T00:11:03.400636+00:00"
+}

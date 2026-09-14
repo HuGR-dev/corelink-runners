@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    # The correctness gate (fmt/clippy/test/deny/audit) runs on the self-hosted
+    # `corelink` ephemeral fleet — $0 GitHub billing (zero-hosted mandate).
+    #
+    # Supersedes the 2026-07-19 "keep it on ubuntu-latest" rationale, which was
+    # about the self-hosted *builder-Mac* being a single point of failure (a
+    # pipeline-service brownout inflated its reconnect backoff to ~3h). That risk
+    # does NOT apply to `runs-on: corelink`: this is the ephemeral Firecracker
+    # FLEET (many boxes, the product itself), not the one Mac — and it serves
+    # these jobs live. It also sidesteps the shared-home `cargo install` race
+    # (os-error-2): each lease is a fresh microVM with its own $HOME/$CARGO_HOME,
+    # so the in-job setup actions below install with no cross-job contention. The
+    # gate's whole toolchain is still set up in-job by the pinned actions
+    # (rust-toolchain + rust-cache + install-action), so it runs identically on a
+    # clean lease. A self-hosted label does not bypass GitHub's workflow-start
+    # boundary: GitHub must create a job before a CoreLink runner can receive it.
+    # An organization Actions budget/payment block may therefore end the suite as
+    # a zero-job `startup_failure`; that is no CI evidence and must not be replaced
+    # by a local PASS.
+    runs-on: corelink
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
+        with:
+          fetch-depth: 0
+
+      # G0 · container entrypoint signal discipline — pinned after the 2026-08-23
+      # leaked-box incident (3 boxes alive 10.5 h against a 15-minute idle window,
+      # ~126 vCPU-h). The platform's only soft stop is SIGTERM and an untrapped
+      # PID 1 discards it, so a regression here is invisible until the bill arrives.
+      # Pure bash, no toolchain, ~6 s — placed first so it fails before anything heavy.
+      - name: entrypoint signal discipline (G0)
+        run: bash deploy/runner/test/entrypoint-signal.test.sh
+
+      - name: entrypoint /dev/shm provisioning
+        run: bash deploy/runner/test/entrypoint-devshm.test.sh
+
+      # G1 · e2e completeness-critic — proves EVERY product atom (55 features + 155
+      # scenarios, parsed live from the ledger) is bound to a validation cell. Zero-dep
+      # `node --test`; placed first so a coverage regression fails in seconds, before the
+      # heavy Rust build. Adding an F-id/S-id to the ledger without a cell turns this red.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4; node for the critic (matches build-cf-container-images.yml)
+        with:
+          node-version: '22'
+
+      - name: e2e completeness-critic (G1)
+        run: node --test scripts/e2e/completeness.test.mjs
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (pinned)
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+
+      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2.81.10
+        with:
+          # Pinned tool versions (proven on the corelink-builder box). The
+          # @latest default broke on a checksum mismatch between the action's
+          # vendored manifest and a re-published cargo-deny release asset.
+          tool: cargo-audit@0.22.2,cargo-deny@0.19.8
+
+      # Ensure ~/.cargo/bin is on PATH for every gate step below: rust-toolchain
+      # and install-action both install into CARGO_HOME/bin, and prepending it
+      # once here guarantees cargo / cargo-deny / cargo-audit resolve (guards the
+      # exit-127 "binary present but not on PATH" class in one place).
+      - name: ensure cargo bin on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      - name: deny
+        run: cargo deny check
+
+      - name: audit
+        run: cargo audit --deny warnings

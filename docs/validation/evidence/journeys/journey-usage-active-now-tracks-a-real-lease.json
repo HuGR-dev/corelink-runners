@@ -1,0 +1,61 @@
+{
+  "journey": "Usage active_now tracks a real lease",
+  "sid": [
+    "S14.1"
+  ],
+  "persona": "P14 self-serve customer",
+  "atoms": [
+    "F-5.1",
+    "F-5.2",
+    "F-4.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 5,
+  "narrative": [
+    {
+      "step": "reads the baseline active_now",
+      "ok": true,
+      "assertion": "baseline active_now=0",
+      "artifact": {
+        "active_now": 0
+      }
+    },
+    {
+      "step": "starts one runner",
+      "ok": true,
+      "assertion": "lease lease-06c6380f-fa3c-47af-8110-5a73b6ca1963 HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-06c6380f-fa3c-47af-8110-5a73b6ca1963"
+      }
+    },
+    {
+      "step": "active_now rose by at least one (the number is live, not stale)",
+      "ok": true,
+      "assertion": "active_now 0→1 (rose while held)",
+      "artifact": {
+        "base": 0,
+        "withLease": 1
+      }
+    },
+    {
+      "step": "releases the runner",
+      "ok": true,
+      "assertion": "close → 200",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "active_now settles back toward the baseline",
+      "ok": true,
+      "assertion": "active_now 1→0 after close (settled, not stuck high)",
+      "artifact": {
+        "withLease": 1,
+        "after": 0
+      }
+    }
+  ],
+  "ts": "2026-07-19T21:18:16.080Z"
+}

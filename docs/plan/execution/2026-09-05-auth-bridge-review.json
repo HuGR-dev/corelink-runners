@@ -1,0 +1,14 @@
+{
+  "scope": "T8-W4b static source code acceptance; full sprint execution and live proof remain pending",
+  "source_commit": "3194bd17867ec3b1206e8d89f8925b789fad8a79",
+  "reviewer": "delivery_ledger_validator (Luna)",
+  "verdict": "APPROVE",
+  "evidence": [
+    "Both entrypoints enforce regular0400 file, unset raw token and clean re-exec before durable children.",
+    "Rust refuses inherited raw token and opens expected file with O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK.",
+    "Worker consumers preserve ingress bearer and protected file bridge.",
+    "Existing shell acceptance covers both boot paths, durable child environment, proc surface and failure paths."
+  ],
+  "validation": "Static review only; no CI/fullsuite executed.",
+  "observed_at": "2026-09-05T23:42:42.808715+00:00"
+}

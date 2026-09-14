@@ -1,0 +1,56 @@
+{
+  "_README": "TEMPLATE — do NOT commit with real secrets. Fill every <FILL: ...> placeholder before POSTing. Secret values (marked SECRET) must be stored in Northflank's secret store and injected at runtime, not hard-coded here.",
+
+  "name": "corelink-fabricd",
+
+  "billing": {
+    "deploymentPlan": "nf-compute-20",
+    "buildPlan": "nf-compute-20"
+  },
+
+  "deployment": {
+    "instances": 1
+  },
+
+  "buildSource": "git",
+
+  "vcsData": {
+    "projectUrl": "https://github.com/HuGR-Labs/corelink-runners",
+    "projectType": "github",
+    "projectBranch": "main",
+    "vcsLinkId": "<FILL: github vcs link id>"
+  },
+
+  "buildSettings": {
+    "dockerfile": {
+      "dockerFilePath": "/crates/corelink-fabric-server/Dockerfile",
+      "dockerWorkDir": "/"
+    }
+  },
+
+  "ports": [
+    {
+      "name": "http",
+      "internalPort": 8080,
+      "public": true,
+      "protocol": "HTTP"
+    }
+  ],
+
+  "runtimeEnvironment": {
+    "_comment_secrets": "FABRIC_SIGNING_KEY and NORTHFLANK_API_TOKEN are SECRETS — set them in the Northflank secret store, not here. FABRIC_PAT is also a secret credential.",
+
+    "FABRIC_SIGNING_KEY":               "<FILL: SECRET — base64 of 32 random bytes; generate: head -c 32 /dev/urandom | base64>",
+    "FABRIC_PAT":                       "<FILL: SECRET — bootstrap PAT that maps to FABRIC_TENANT>",
+    "FABRIC_TENANT":                    "<FILL: bootstrap tenant id, lowercase [a-z0-9-], e.g. humangr>",
+    "FABRIC_TENANT_MAX_CONCURRENCY":    "<FILL: integer >= 1, e.g. 10>",
+
+    "FABRIC_TENANT_RATE_PER_MIN":       "120",
+    "FABRIC_BIND_ADDR":                 "0.0.0.0:8080",
+    "FABRIC_REAP_INTERVAL_SECS":        "30",
+
+    "NORTHFLANK_API_TOKEN":             "<FILL: SECRET — Northflank Org API token>",
+    "NORTHFLANK_TEAM_ID":               "humangr",
+    "NORTHFLANK_PROJECT_ID":            "corelink-runners"
+  }
+}

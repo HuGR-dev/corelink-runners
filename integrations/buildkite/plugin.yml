@@ -1,0 +1,69 @@
+---
+name: CoreLink Run
+description: >
+  Run a memoized, attested job on the CoreLink fabric in a single Buildkite
+  plugins: entry. Boot is cache-warm; a re-run whose result is already
+  memoized returns in milliseconds. Fails closed if the attestation does not
+  verify.
+author: https://github.com/HuGR-Labs
+requirements:
+  - corelink
+
+# ---------------------------------------------------------------------------
+# BINARY AVAILABILITY NOTE
+# ---------------------------------------------------------------------------
+# The `corelink` binary is not yet published to crates.io and has no public
+# release URL. Until a release exists, this plugin expects the binary to be
+# on PATH — built and cached in an earlier step of your pipeline.
+#
+# When a release is published the install step will download the binary
+# automatically. The release URL pattern will be:
+#
+#   https://github.com/HuGR-Labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+#
+# Until then, add a command step before this plugin to build the CLI:
+#
+#   commands:
+#     - cargo build -p corelink-cli --release --locked
+#     - export PATH="$PWD/target/release:$PATH"
+#
+# or cache a previously built binary and ensure it is on PATH.
+# ---------------------------------------------------------------------------
+
+configuration:
+  properties:
+    url:
+      type: string
+      description: >
+        CoreLink fabric base URL (e.g. https://runners.corelink.dev).
+        Overrides the CORELINK_URL environment variable when set.
+
+    check:
+      type: string
+      description: Shell command to run on the fabric (passed verbatim to --check).
+
+    check-id:
+      type: string
+      description: >
+        Stable identifier for this check; used in memoization and attestation.
+        Defaults to "ci" when not specified.
+
+    image:
+      type: string
+      description: >
+        Container image reference. MUST include a sha256 digest
+        (e.g. ubuntu@sha256:abc123...). The fabric rejects unpinned images
+        (X4 supply-chain floor) before a box is contacted.
+
+    verify:
+      type: boolean
+      default: true
+      description: >
+        Verify the fabric attestation after the run. Set to false only for
+        local / dev use where the fabric runs with FABRIC_DEV_UNSAFE=1.
+        A verification failure is always a hard step failure.
+
+  required:
+    - check
+
+  additionalProperties: false

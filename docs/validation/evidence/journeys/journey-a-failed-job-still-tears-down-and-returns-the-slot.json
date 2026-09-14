@@ -1,0 +1,45 @@
+{
+  "journey": "A failed job still tears down and returns the slot",
+  "sid": [
+    "S1.2.4"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-4.1",
+    "F-5.1",
+    "F-5.5",
+    "F-5.9"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "a job is running (Held)",
+      "ok": true,
+      "assertion": "lease lease-31acf82b-9b51-4a86-a30e-573e28bcf4cd HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-31acf82b-9b51-4a86-a30e-573e28bcf4cd"
+      }
+    },
+    {
+      "step": "the job reports FAILED — the close still succeeds (revoke+release+bill+teardown run)",
+      "ok": true,
+      "assertion": "close {status:'failed'} → 200 (a failure outcome is still a clean, accounted close)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "the box is gone and the slot is returned (blast radius = one job)",
+      "ok": true,
+      "assertion": "after failed-close the lease is not HELD (status=200, state=released)",
+      "artifact": {
+        "status": 200,
+        "state": "released"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:58:51.140Z"
+}

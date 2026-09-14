@@ -1,0 +1,44 @@
+{
+  "journey": "re-run economics: a failed run then a fresh warm re-run",
+  "sid": [
+    "S1.6.10"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-1.2",
+    "F-4.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 3,
+  "narrative": [
+    {
+      "step": "run #1 acquires a box, the flaky test fails → close as `failed`",
+      "ok": true,
+      "assertion": "run #1 lease-717d465e-2e46-45f2-a6cf-ba0c2468f777 HELD then closed failed (200)",
+      "artifact": {
+        "leaseId": "lease-717d465e-2e46-45f2-a6cf-ba0c2468f777",
+        "closeStatus": 200
+      }
+    },
+    {
+      "step": "the engineer clicks re-run → a fresh lease, a DIFFERENT box (no reuse)",
+      "ok": true,
+      "assertion": "re-run lease-6efb7d14-8010-4da3-bbb5-e1611e187f8d HELD, a NEW box (lease-6efb7d14-8010-4da3-bbb5-e1611e187f8d ≠ lease-717d465e-2e46-45f2-a6cf-ba0c2468f777) — never a reused container",
+      "artifact": {
+        "run1": "lease-717d465e-2e46-45f2-a6cf-ba0c2468f777",
+        "run2": "lease-6efb7d14-8010-4da3-bbb5-e1611e187f8d"
+      }
+    },
+    {
+      "step": "the re-run succeeds → close as `succeeded`",
+      "ok": true,
+      "assertion": "re-run closed succeeded (200)",
+      "artifact": {
+        "status": 200,
+        "gap": "the memo HIT (identical inputs → ~0 recompute) + the determinism guard (a close claiming a memo_key its bytes do not match → 400 invalid) is the exec/close-with-result path, X4-external; here we prove the fresh-lease-per-run economics"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:00:25.893Z"
+}

@@ -1,0 +1,19 @@
+{
+  "cell": "TS5-auth-fail-closed-nopat",
+  "atoms": [
+    "F-5.1",
+    "F-4.2",
+    "S7.4"
+  ],
+  "direction": "adversarial",
+  "grade": "E2",
+  "suite": "TS-2/TS-5·live-probes",
+  "stimulus": "POST https://corelink-fabricd.gmhelmold.workers.dev/v1/leases (no Authorization)",
+  "assertion": "unauthenticated acquire is rejected 401 (fail-closed), no lease created, no leak",
+  "pass": true,
+  "artifact": {
+    "status": 401,
+    "body": "{\"code\":\"unauthorized\",\"message\":\"missing Bearer PAT\"}"
+  },
+  "ts": "2026-07-19T17:20:39.255Z"
+}

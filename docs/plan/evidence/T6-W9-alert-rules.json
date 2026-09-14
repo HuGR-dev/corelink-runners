@@ -1,0 +1,95 @@
+{
+  "schema_version": "evidence/v1",
+  "artifact_id": "t6-w9-alert-rules",
+  "kind": "test+probe",
+  "status": "RED",
+  "observed_at": "2026-09-07T01:10:00Z",
+  "source": {
+    "repository": "corelink-runners",
+    "commit_sha": "f27de8ff384ce4bb6fea32dbbdea96f55b0c8a93",
+    "path": "docs/plan/evidence/T6-W9-alert-rules.json"
+  },
+  "claims": [],
+  "version": {
+    "id": "f27de8ff384ce4bb6fea32dbbdea96f55b0c8a93"
+  },
+  "evidence": {
+    "original": {
+      "schema_version": "evidence/v1",
+      "artifact_id": "t6-w9-alert-rules",
+      "kind": "test+probe",
+      "status": "RED",
+      "observed_at": "2026-09-07T01:10:00Z",
+      "source": {
+        "repository": "corelink-runners",
+        "commit_sha": "a2c18f6b2621824bd12a2a34426215efe9dfeec5",
+        "path": "docs/plan/evidence/T6-W9-alert-rules.json"
+      },
+      "claims": [
+        "T6-W9"
+      ],
+      "version": {
+        "id": "a2c18f6b2621824bd12a2a34426215efe9dfeec5"
+      },
+      "evidence": {
+        "acceptance_state": "READY-PENDING-LIVE",
+        "execution_card": "docs/plan/execution/2026-09-07-t6-w9-live-probe-card.md",
+        "deploy_target": {
+          "worker": "corelink-canary",
+          "config": "deploy/cloudflare-canary/wrangler.jsonc",
+          "account_id": "6a1fc1c626fc2628823e60b9db01f5cd",
+          "cron": "*/5 * * * *",
+          "service_bindings": [
+            "FABRICD_SVC=corelink-fabricd",
+            "SPAWN_SVC=corelink-spawn-worker"
+          ]
+        },
+        "secret_names": [
+          "FABRIC_OBSERVABILITY_KEY",
+          "METRICS_OBSERVABILITY_KEY",
+          "RESEND_API_KEY",
+          "CANARY_TICK_ENVELOPE_HMAC_KEY"
+        ],
+        "detector_binding": {
+          "owner": "T6-W15",
+          "route_channel": "external-primary-page",
+          "ingest_url": "PENDING_T6-W15_OWNER_BINDING",
+          "source": "PENDING_T6-W15_OWNER_BINDING",
+          "service": "PENDING_T6-W15_OWNER_BINDING",
+          "application": "PENDING_T6-W15_OWNER_BINDING",
+          "key_id": "PENDING_T6-W15_OWNER_BINDING",
+          "credential_epoch": "PENDING_T6-W15_OWNER_BINDING",
+          "monitor_rearm_tuple_digest": "PENDING_T6-W15_OWNER_BINDING",
+          "detector_version": "PENDING_DEPLOYED_VERSION_RECEIPT"
+        },
+        "probe": {
+          "status": "PREPARED",
+          "trial_count": "3/3 for selected injection classes",
+          "matrix": [
+            "all 19 C1-C5 classified positive conditions",
+            "malformed 200 bodies",
+            "401 and unarmed/armed 404 posture",
+            "429 and 5xx provider response drain",
+            "external page delivery and authenticated ACK",
+            "stopped-canary and monitor-path independence"
+          ],
+          "receipt_requirements": [
+            "canary Worker version id",
+            "T6-W15 detector version",
+            "route/channel reference",
+            "provider page and delivery ids",
+            "authenticated ACK ids and trusted timestamps"
+          ]
+        },
+        "blocked_on": [
+          "T6-W4 live binding",
+          "T6-W15 named ingest route",
+          "T7-W4b trust binding",
+          "real page delivery and ACK"
+        ]
+      },
+      "notes": "Execution card and non-secret target/secret-name contract are prepared. No endpoint credential, secret value, page payload, deployment receipt, page, or ACK is fabricated. This remains RED until the owner bindings close and the complete external probe runs against the immutable tuple."
+    }
+  },
+  "notes": "Canonical inventory record preserving the original candidate evidence payload. Status is explicit and remains RED when deployment or live proof is pending."
+}

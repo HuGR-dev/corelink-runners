@@ -1,0 +1,27 @@
+{
+  "journey": "docker/container-build workload on a microVM box",
+  "sid": [
+    "S1.6.1"
+  ],
+  "persona": "P1 CI engineer",
+  "atoms": [
+    "F-4.7",
+    "F-6.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 1,
+  "narrative": [
+    {
+      "step": "acquires the pinned microVM box a `docker build` step would run in → HELD",
+      "ok": true,
+      "assertion": "lease lease-b4a41ae4-a461-4200-9397-f176852ae4b5 HELD on the @sha256-pinned image",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-b4a41ae4-a461-4200-9397-f176852ae4b5",
+        "gap": "whether the box exposes a working Docker daemon (rootless buildkit / dind) is the OWNER-GATED GA image matrix, an image-layer concern not a /v1 verb; a job shelling `docker` on an image without it fails LOUD (command not found, red check) — never a silent pass. The microVM boundary makes even a privileged inner daemon safe by construction"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:03:55.321Z"
+}

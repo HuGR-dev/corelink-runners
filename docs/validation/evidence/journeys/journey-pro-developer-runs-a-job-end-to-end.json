@@ -1,0 +1,82 @@
+{
+  "journey": "Pro developer runs a job end-to-end",
+  "sid": [
+    "S1.2.4",
+    "S1.2.2"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-4.1",
+    "F-5.1",
+    "F-5.5",
+    "F-1.1"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 7,
+  "narrative": [
+    {
+      "step": "checks the plan — Pro cap, nothing running",
+      "ok": true,
+      "assertion": "plan is Pro (cap=10), active_now=0",
+      "artifact": {
+        "cap": 10,
+        "activeNow": 0
+      }
+    },
+    {
+      "step": "acquires a runner (valid pinned image) → HELD lease",
+      "ok": true,
+      "assertion": "lease lease-01b5fa85-62cd-465d-8277-eb285e6f959f is HELD",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-01b5fa85-62cd-465d-8277-eb285e6f959f",
+        "state": "held"
+      }
+    },
+    {
+      "step": "sees the runner in their own lease list",
+      "ok": true,
+      "assertion": "the held lease appears in GET /v1/leases (10 active)",
+      "artifact": {
+        "count": 10,
+        "found": true
+      }
+    },
+    {
+      "step": "inspects the single lease — it is theirs and held",
+      "ok": true,
+      "assertion": "GET /v1/leases/{id} → 200, state=held",
+      "artifact": {
+        "status": 200,
+        "state": "held"
+      }
+    },
+    {
+      "step": "usage now reflects one active runner",
+      "ok": true,
+      "assertion": "active_now=2 (>= 1 while held)",
+      "artifact": {
+        "activeNow": 2
+      }
+    },
+    {
+      "step": "releases the runner (close) → teardown",
+      "ok": true,
+      "assertion": "POST /v1/leases/{id}/close → 200 (released)",
+      "artifact": {
+        "status": 200
+      }
+    },
+    {
+      "step": "the lease is no longer readable as held / account returns toward zero",
+      "ok": true,
+      "assertion": "after close the lease is not HELD (status=200, state=released)",
+      "artifact": {
+        "status": 200,
+        "state": "released"
+      }
+    }
+  ],
+  "ts": "2026-07-19T17:34:55.544Z"
+}

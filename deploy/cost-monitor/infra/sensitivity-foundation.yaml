@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CoreLink independent sensitivity scheduler foundation; deploy only in account 286590629898.
+Parameters:
+  ResourcePrefix: {Type: String, Default: corelink-sensitivity, AllowedPattern: '^[a-z0-9-]{1,32}$'}
+Resources:
+  SchedulerState:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-state'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: pk, AttributeType: S}, {AttributeName: sk, AttributeType: S}]
+      KeySchema: [{AttributeName: pk, KeyType: HASH}, {AttributeName: sk, KeyType: RANGE}]
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+      DeletionProtectionEnabled: true
+  SchedulerKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: CoreLink sensitivity scheduler key; distinct account and role domain
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement: [{Sid: AccountAdministration, Effect: Allow, Principal: {AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'}, Action: 'kms:*', Resource: '*'}]
+  SchedulerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-scheduler-dlq'
+      SqsManagedSseEnabled: true
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-scheduler'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: scheduler.amazonaws.com}, Action: sts:AssumeRole}]
+      Policies:
+        - PolicyName: sensitivity-state-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - {Effect: Allow, Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:TransactWriteItems], Resource: !GetAtt SchedulerState.Arn}
+              - {Effect: Allow, Action: sqs:SendMessage, Resource: !GetAtt SchedulerDeadLetterQueue.Arn}
+Outputs:
+  SchedulerStateTableArn: {Value: !GetAtt SchedulerState.Arn}
+  SchedulerRoleArn: {Value: !GetAtt SchedulerRole.Arn}
+  SchedulerDeadLetterQueueArn: {Value: !GetAtt SchedulerDeadLetterQueue.Arn}

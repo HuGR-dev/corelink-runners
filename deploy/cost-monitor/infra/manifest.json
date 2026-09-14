@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "status": "review-only",
+  "region": "us-east-1",
+  "accounts": {"monitor": "975306274105", "sensitivity": "286590629898", "verifier": "888348805607"},
+  "templates": ["monitor-foundation.yaml", "monitor-runtime.yaml", "sensitivity-foundation.yaml", "sensitivity-runtime.yaml", "verifier-foundation.yaml"],
+  "secrets": false,
+  "deployment_evidence": false,
+  "resource_mutation_performed": false
+}

@@ -1,0 +1,32 @@
+# WP-CF0d — control-plane core types (CF0 freeze items 4+5).
+# Workspace-internal path dep only; wire-contract law (deny.toml: crates.io
+# only for external sources) is untouched.
+[package]
+name = "corelink-fabric"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+uuid       = { workspace = true }
+# Persistent lease ledger (WP-3-PGLEDGER) — the production `PgLedger` over
+# Postgres. The `LeaseLedger` trait stays sync; `PgLedger` bridges to these
+# async clients via `tokio::task::block_in_place` on the server's
+# rt-multi-thread runtime. tokio is needed only for the runtime `Handle` type.
+tokio-postgres    = { workspace = true }
+deadpool-postgres = { workspace = true }
+postgres-types    = { workspace = true }
+postgres-protocol = { workspace = true }
+tokio = { workspace = true }
+# Opt-in TLS for the Postgres connection (WP-B) — pure-Rust, hermetic. rustls
+# (ring provider) + webpki-roots (bundled Mozilla CA set) + the tokio-postgres
+# bridge. Used ONLY on the `FABRIC_PG_TLS=require` path; the default `disable`
+# path stays `NoTls`, byte-for-byte unchanged. No OpenSSL / no OS trust store.
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+tokio-postgres-rustls = { workspace = true }

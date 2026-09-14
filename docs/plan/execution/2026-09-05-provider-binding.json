@@ -1,0 +1,25 @@
+{
+  "scope": "T3-W10 durable ledger binding only; server restore implementation still under corrective review",
+  "source_commits": [
+    "5b44b72c3bdbe4964f8d1fc63f0eef591494446d",
+    "9fe16556b992175e0164ccfa69a743b392ef2322"
+  ],
+  "integration_commit": "255bab570e3d328aa99c88fe0a3737b59774de3f",
+  "review": "root inspected exact Pending/unclaimed marker and duplicate fencing, file append/fsync before index update, PG parent-row/tenant lock order and actual enum/columns.",
+  "checks": [
+    {
+      "command": "cargo check -p corelink-fabric --test provider_binding --locked",
+      "observer": "root",
+      "exit": 0,
+      "elapsed_seconds": 140,
+      "kind": "metadata compilation, no runtime tests"
+    }
+  ],
+  "limits": [
+    "PG race/persistence/reservation tests authored and compiled only; no database started.",
+    "Provider restore source is not integrated or approved.",
+    "Crash after provider create before reference persistence remains unknown; capacity must stay held until authoritative reconciliation.",
+    "No full suite, sprint CI or live recovery evidence."
+  ],
+  "observed_at": "2026-09-06T00:29:45.710723+00:00"
+}

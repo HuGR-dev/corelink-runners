@@ -1,0 +1,38 @@
+{
+  "journey": "net_policy-shaped egress (fail-closed default; allow-list is policy-gated)",
+  "sid": [
+    "S1.6.4",
+    "S1.6.15"
+  ],
+  "persona": "P1 Pro dev",
+  "atoms": [
+    "F-4.2",
+    "F-6.3"
+  ],
+  "pass": true,
+  "failedAt": null,
+  "steps": 2,
+  "narrative": [
+    {
+      "step": "a job acquires a lease under the fail-closed default net_policy (deny-all) → HELD",
+      "ok": true,
+      "assertion": "lease lease-61613888-2c08-448a-bb99-fea17aab6dde HELD under net_policy=deny-all (default closed posture)",
+      "artifact": {
+        "status": 200,
+        "leaseId": "lease-61613888-2c08-448a-bb99-fea17aab6dde",
+        "netPolicy": "deny-all"
+      }
+    },
+    {
+      "step": "the lease is the owner-scoped box the (proxied) egress would apply to",
+      "ok": true,
+      "assertion": "owner reads its held lease (200) — net_policy is a lease-carried contract",
+      "artifact": {
+        "status": 200,
+        "state": "held",
+        "gap": "allow-list host PROXYING (a private registry / license server reachable while the rest stays closed via the SDK egress proxy setDeniedHosts), the brokered service credential (env-0), the VPN/private-peering CAPABILITY GAP (hybrid, S1.3.4), and the partial IMDS denylist (G2, raw-socket bypass) are all in-box / policy-gated — not observable at /v1"
+      }
+    }
+  ],
+  "ts": "2026-07-19T22:02:48.260Z"
+}

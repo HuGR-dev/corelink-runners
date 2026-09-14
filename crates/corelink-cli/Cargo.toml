@@ -1,0 +1,38 @@
+[package]
+name = "corelink-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The customer-/ops-facing client: a single `corelink` binary that wraps the
+# raw `/v1` HTTP surface (acquire/status/cancel/attestation) and verifies the
+# v2 result-binding attestation. Language-agnostic adoption last-mile + the
+# automated live-deploy smoke + the dogfood entry point.
+[[bin]]
+name = "corelink"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+# Same-workspace path deps (house law: crates.io-only rule governs EXTERNAL deps
+# only). The CLI REUSES the frozen wire DTOs + types — never redefines them, so
+# the client can never drift from the server's wire shape.
+corelink-fabric-api = { path = "../corelink-fabric-api" }
+corelink-runners-contracts = { path = "../corelink-runners-contracts" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# Black-box e2e: spawn the REAL fabric router (mock exec backend) on a loopback
+# socket and drive the CLI's client/verify against it. Test-only — never in the
+# shipped binary.
+tokio = { workspace = true }
+axum = { workspace = true }
+corelink-fabric = { path = "../corelink-fabric" }
+corelink-fabric-server = { path = "../corelink-fabric-server" }

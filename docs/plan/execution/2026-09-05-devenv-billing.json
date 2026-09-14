@@ -1,0 +1,25 @@
+{
+  "scope": "T9-W1 canonicalbilling and durableterminal recovery only; credentialrectification remainsactive",
+  "source_commit": "9b87d3b5e588fe19357741fb76c270bad3fe7437",
+  "review": "root reviewed terminalsnapshot/publicretry/settled-before-delete after repairedreviewfindings; finalimplementation by sprint1_billing_recovery.",
+  "checks": [
+    {
+      "command": "focused Vitest devenv-do.test.ts devenv-usage.test.ts devenv-usage-outbox.test.ts",
+      "tests": 27,
+      "exit": 0,
+      "observer": "author"
+    },
+    {
+      "command": "tsc --noEmit",
+      "exit": 0,
+      "observer": "root with matching existing dependencies"
+    }
+  ],
+  "limits": [
+    "No fullsuite/CI/live billing proof.",
+    "Crash before first durable terminal write can lose exclusively in-memory timestamp; never claim durability before successful write.",
+    "Legacy errored records without trustworthy terminaltimestamp remain blocked for reconciliation.",
+    "RawPAT DevEnv interface stillpending pairedcredentialrepair."
+  ],
+  "observed_at": "2026-09-06T00:11:03.400636+00:00"
+}

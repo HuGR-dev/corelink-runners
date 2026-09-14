@@ -1,0 +1,31 @@
+{
+  "schema_version": "git-closeout-inventory-delta/v1",
+  "recorded_at": "2026-09-07T00:35:00Z",
+  "basis_inventory": "/private/tmp/corelink-techlead-takeover-20260906/docs/plan/execution/2026-09-06-git-closeout-inventory.json",
+  "scope": "Only refs, worktrees, pull requests, and known agent commits in the basis inventory that are tagged with one of the 12 Sprint 1/B1 WPs.",
+  "integration": {
+    "head": "766a40cbe1cb70f262fe7947d5c58aa640addb08",
+    "branch": "delivery/techlead-takeover-20260906",
+    "reachability_check": "git merge-base --is-ancestor <sha> 766a40cbe1cb70f262fe7947d5c58aa640addb08"
+  },
+  "sprint1_wps": [
+    "T4-W4", "T3-W10", "T6-W2", "T6-W4", "T6-W15", "T2-W3",
+    "T8-W4b", "T9-W1", "T1-W5", "T6-W9", "T3-W18", "T6-W13"
+  ],
+  "wp_status": {
+    "T4-W4": {"classification": "integrate", "proof": ["6dc7de983387a9f359ff6a275afcddc58431ea9d"], "reason": "Inventory PR/branch SHA is an ancestor of integration head."},
+    "T3-W10": {"classification": "integrate", "proof": ["fc4545e097b94dee89c38904f621f24a9a3be0c2"], "reason": "Inventory PR/branch SHA is an ancestor of integration head."},
+    "T6-W2": {"classification": "integrate", "proof": ["c49463935a3597be238a9eff3c845d3bc35e4211", "23f0bd1918bff08e2bb8f9b2582955505e9badd8", "387c1b1cfa55f11ed1d219e5d671cc50a292d47d", "9df0eaef6cbca789bebea37ab160094afd8add4c"], "reason": "All listed source refs resolve and are ancestors of integration head; one source is also reachable from origin/main."},
+    "T6-W4": {"classification": "integrate", "proof": ["c59c6d3d642fb6dc319dc278144b1029790e08fe"], "reason": "Inventory PR/branch SHA is an ancestor of integration head."},
+    "T6-W15": {"classification": "substituted", "proof": [{"source":"aaa68154d16524a2973eb80edbe43a3a47a892fc","destinations":["92837d51d483f54b594b2bda1c881c8a250c0a0d","b0253510ea5bd4cff30d99baf8a3b2d2934376a4","144200ea9ca2cc844c725c0e7900fe8fa92e2f7b"]},{"source":"7a400e14ad03024587634d8a60eb0157c314c024","destinations":["ffaea8c5b50b4d26f4c9bba955bbd768d185dc97"]},{"source":"d735ff3bbda8d6bd70396f7e7e6f110d52a99d99","destinations":["de13d45ee8a1683219802781680c193e2b117272"]},{"source":"7e1bf113cd9f8b17e4a108c67869d503ba2c68e8","destinations":["c600bd4be9c3016ca85fd6533641468e74ea204b"]}], "reason": "Each documented destination resolves and is an ancestor of integration head. Four active source worktrees remain preserved because they are not ancestors; witness-runtime-context and verifier-journal-prefix remain pending B1 composition."},
+    "T2-W3": {"classification": "ambiguous_missing_inventory", "proof": [], "reason": "No pull request, branch, worktree, or known-agent-commit entry tagged T2-W3 in the basis inventory; no global rescan performed."},
+    "T8-W4b": {"classification": "integrate", "proof": ["fce94563d7fb68d2dcb0dbbb4b108ab5306a5bd2", "6ef590395afef8d9804d7de7e662e81867a5eee1", "e1e1c18b170169e5c44524cb50daeb4412dc7a5f"], "reason": "All three stacked PR/branch SHAs are ancestors of integration head."},
+    "T9-W1": {"classification": "ambiguous_missing_inventory", "proof": [], "reason": "No pull request, branch, worktree, or known-agent-commit entry tagged T9-W1 in the basis inventory; no global rescan performed."},
+    "T1-W5": {"classification": "integrate", "proof": ["f43898914dab1ed65c37bbac196b394aa7acaa89"], "reason": "Inventory branch/worktree SHA is an ancestor of integration head."},
+    "T6-W9": {"classification": "integrate", "proof": ["f4149a55303ea9801df95bc8d79321f7e5a1447a", "04743acf9a7a7f2385ccce1ebd13882530b7d4f1"], "reason": "PR and close branch/worktree SHAs are ancestors of integration head."},
+    "T3-W18": {"classification": "integrate", "proof": ["e89f9a7c289bb8069ac266d4c94b8649f291a73c", "639bb58f121a8f27a9fe333260901a128944a359"], "reason": "Both stacked PR/branch SHAs are ancestors of integration head."},
+    "T6-W13": {"classification": "ambiguous_missing_inventory", "proof": [], "reason": "No pull request, branch, worktree, or known-agent-commit entry tagged T6-W13 in the basis inventory; no global rescan performed."}
+  },
+  "actions_taken": [],
+  "prohibited_actions_confirmed": ["no delete", "no reset", "no PR close", "no push", "no merge"]
+}
