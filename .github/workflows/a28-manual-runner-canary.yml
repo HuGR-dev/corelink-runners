@@ -1,0 +1,32 @@
+# A2.8 manual direct-spawn canary. The launcher supplies a one-use UUID label.
+# Keep this label outside corelink-* so the production autoscaler ignores it,
+# even if intake is resumed before this canary is cleaned up.
+name: a28-manual-runner-canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Globally unique label minted by scripts/a28-manual-canary.sh
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  boot:
+    runs-on: ${{ inputs.label }}
+    timeout-minutes: 15
+    steps:
+      - name: Prove runner boot
+        env:
+          CANARY_LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          echo "A2.8 runner booted"
+          echo "label=${CANARY_LABEL}"
+          echo "runner=${RUNNER_NAME:-<unset>}"
+          echo "host=$(uname -a)"
+          test -n "${RUNNER_NAME:-}"
+          test "${CANARY_LABEL#*a28-manual-canary-}" != "${CANARY_LABEL}"
