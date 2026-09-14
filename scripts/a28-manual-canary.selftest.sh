@@ -22,6 +22,8 @@ fi
 
 rg -n --fixed-strings 'CORELINK_SPAWN_AUTH_TOKEN_FILE' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'CORELINK_LIFECYCLE_AUTH_TOKEN_FILE' "${SCRIPT}" >/dev/null
+rg -n --fixed-strings 'SPAWN_AUTH_TOKEN="$(<"${SPAWN_AUTH_TOKEN_FILE}")"' "${SCRIPT}" >/dev/null
+rg -n --fixed-strings 'LIFECYCLE_AUTH_TOKEN="$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")"' "${SCRIPT}" >/dev/null
 [[ "$(rg -n --fixed-strings -- '-H "@${SPAWN_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
 [[ "$(rg -n --fixed-strings -- '-H "@${LIFECYCLE_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
 rg -n --fixed-strings -- '--data-binary "@${SPAWN_BODY_FILE}"' "${SCRIPT}" >/dev/null
@@ -62,6 +64,24 @@ if CORELINK_LIFECYCLE_AUTH_TOKEN_FILE="${SAME_TOKEN_FILE}" \
 fi
 rg -n --fixed-strings 'CoreLink spawn and lifecycle token files must contain distinct credentials' \
   "${VALIDATION_TMP}/same-output" >/dev/null
+
+# Command substitution removes trailing newlines. Distinct files containing
+# the same effective bearer must therefore be rejected as well.
+EFFECTIVE_SPAWN_FILE="${VALIDATION_TMP}/effective-spawn"
+EFFECTIVE_LIFECYCLE_FILE="${VALIDATION_TMP}/effective-lifecycle"
+printf '%s\n' 'effective-token' >"${EFFECTIVE_SPAWN_FILE}"
+printf '%s\n\n' 'effective-token' >"${EFFECTIVE_LIFECYCLE_FILE}"
+chmod 600 "${EFFECTIVE_SPAWN_FILE}" "${EFFECTIVE_LIFECYCLE_FILE}"
+if CORELINK_LIFECYCLE_AUTH_TOKEN_FILE="${EFFECTIVE_LIFECYCLE_FILE}" \
+    CORELINK_SPAWN_AUTH_TOKEN_FILE="${EFFECTIVE_SPAWN_FILE}" \
+    GH_REPO=test/repo GH_TOKEN=redacted SPAWN_WORKER_URL=https://example.invalid \
+    CANARY_IMAGE_DIGEST=registry.invalid/runner@sha256:$(printf '%064d' 0) \
+    "${SCRIPT}" >"${VALIDATION_TMP}/effective-output" 2>&1; then
+  echo "effectively identical credentials unexpectedly passed" >&2
+  exit 1
+fi
+rg -n --fixed-strings 'CoreLink spawn and lifecycle token files must contain distinct credentials' \
+  "${VALIDATION_TMP}/effective-output" >/dev/null
 
 # The canary is CoreLink-only; no Hugit secret path or input is permitted.
 if rg -ni 'hugit|\.hugit' "${SCRIPT}"; then

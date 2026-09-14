@@ -48,7 +48,9 @@ LIFECYCLE_AUTH_TOKEN_FILE="${CORELINK_LIFECYCLE_AUTH_TOKEN_FILE}"
 [[ "$(stat -f '%Lp' "${LIFECYCLE_AUTH_TOKEN_FILE}")" == 600 ]] ||
   die "CoreLink lifecycle token file must have mode 600"
 [[ -s "${LIFECYCLE_AUTH_TOKEN_FILE}" ]] || die "CoreLink lifecycle token file is empty"
-if cmp -s "${SPAWN_AUTH_TOKEN_FILE}" "${LIFECYCLE_AUTH_TOKEN_FILE}"; then
+SPAWN_AUTH_TOKEN="$(<"${SPAWN_AUTH_TOKEN_FILE}")"
+LIFECYCLE_AUTH_TOKEN="$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")"
+if [[ "${SPAWN_AUTH_TOKEN}" == "${LIFECYCLE_AUTH_TOKEN}" ]]; then
   die "CoreLink spawn and lifecycle token files must contain distinct credentials"
 fi
 umask 077
@@ -63,8 +65,8 @@ JIT_FILE="${TMP_DIR}/jitconfig"
 RUNNER_ID=""
 HANDLE=""
 trap cleanup EXIT INT TERM
-printf 'Authorization: Bearer %s\n' "$(<"${SPAWN_AUTH_TOKEN_FILE}")" >"${SPAWN_AUTH_HEADER_FILE}"
-printf 'Authorization: Bearer %s\n' "$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")" >"${LIFECYCLE_AUTH_HEADER_FILE}"
+printf 'Authorization: Bearer %s\n' "${SPAWN_AUTH_TOKEN}" >"${SPAWN_AUTH_HEADER_FILE}"
+printf 'Authorization: Bearer %s\n' "${LIFECYCLE_AUTH_TOKEN}" >"${LIFECYCLE_AUTH_HEADER_FILE}"
 chmod 600 "${SPAWN_AUTH_HEADER_FILE}" "${LIFECYCLE_AUTH_HEADER_FILE}"
 LABEL="a28-manual-canary-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 [[ "${LABEL}" =~ ^a28-manual-canary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
