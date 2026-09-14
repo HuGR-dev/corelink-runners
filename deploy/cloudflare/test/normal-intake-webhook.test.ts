@@ -182,7 +182,19 @@ describe("normal webhook durable acknowledgement", () => {
     // seam. Deletion cannot commit while its durable lease remains live.
     expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("busy");
     expect(await f.d.instance.installationTombstoned("42")).toBe(false);
-    finish(); await drain;
+    finish();
+    // This is a lifecycle assertion, not a Vitest escape hatch: the provider
+    // has resolved, so the real drain must settle promptly and leave no
+    // asynchronous work holding the focused process open.
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        drain,
+        new Promise<never>((_, reject) => { expiry = setTimeout(() => reject(new Error("normal drain did not settle after provider completion")), 2_000); }),
+      ]);
+    } finally {
+      if (expiry !== undefined) clearTimeout(expiry);
+    }
     expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
   });
 
