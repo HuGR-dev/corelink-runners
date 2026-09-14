@@ -4,10 +4,11 @@
 # This is intentionally separate from the production webhook/re-drive path.
 # The generated label is `a28-manual-canary-<uuid>` (outside `corelink-*`), so
 # the Worker autoscaler cannot claim this job even if its intake is resumed.
-# The caller must provide the direct spawn bearer and a GitHub credential with
-# repository Administration:write; neither credential is printed or persisted.
+# The caller must provide a CoreLink-only file containing the direct spawn
+# bearer and a GitHub credential with repository Administration:write; neither
+# credential is printed or persisted.
 #
-# Required: GH_REPO, GH_TOKEN, SPAWN_WORKER_URL, SPAWN_AUTH_TOKEN,
+# Required: GH_REPO, GH_TOKEN, SPAWN_WORKER_URL, CORELINK_SPAWN_AUTH_TOKEN_FILE,
 # CANARY_IMAGE_DIGEST (the expected full ref@sha256:... digest). Optional:
 # CANARY_REF (default main),
 # CANARY_EXPIRY_MS (default 900000).
@@ -20,7 +21,7 @@ need() { [[ -n "${!1:-}" ]] || die "$1 is required"; }
 need GH_REPO
 need GH_TOKEN
 need SPAWN_WORKER_URL
-need SPAWN_AUTH_TOKEN
+need CORELINK_SPAWN_AUTH_TOKEN_FILE
 need CANARY_IMAGE_DIGEST
 
 [[ "${CANARY_IMAGE_DIGEST}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
@@ -32,32 +33,47 @@ command -v gh >/dev/null || die "gh is required"
 command -v jq >/dev/null || die "jq is required"
 command -v uuidgen >/dev/null || die "uuidgen is required"
 command -v npx >/dev/null || die "npx is required"
+command -v curl >/dev/null || die "curl is required"
 
 SPAWN_WORKER_URL="${SPAWN_WORKER_URL%/}"
+AUTH_TOKEN_FILE="${CORELINK_SPAWN_AUTH_TOKEN_FILE}"
+[[ -f "${AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file does not exist"
+[[ "$(stat -f '%Lp' "${AUTH_TOKEN_FILE}")" == 600 ]] ||
+  die "CoreLink spawn token file must have mode 600"
+[[ -s "${AUTH_TOKEN_FILE}" ]] || die "CoreLink spawn token file is empty"
+umask 077
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/a28-manual-canary.XXXXXXXX")" ||
+  die "unable to create secure temporary directory"
+chmod 700 "${TMP_DIR}"
+AUTH_HEADER_FILE="${TMP_DIR}/auth.header"
+SPAWN_BODY_FILE="${TMP_DIR}/spawn.json"
+TEARDOWN_BODY_FILE="${TMP_DIR}/teardown.json"
+RUNNER_ID=""
+HANDLE=""
+trap cleanup EXIT INT TERM
+printf 'Authorization: Bearer %s\n' "$(<"${AUTH_TOKEN_FILE}")" >"${AUTH_HEADER_FILE}"
+chmod 600 "${AUTH_HEADER_FILE}"
 LABEL="a28-manual-canary-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 [[ "${LABEL}" =~ ^a28-manual-canary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
   die "uuidgen returned a non-canonical UUID"
 RUNNER_NAME="a28-manual-${LABEL#a28-manual-canary-}"
-RUNNER_ID=""
-HANDLE=""
 
 cleanup() {
   local rc=$?
   if [[ -n "${HANDLE}" ]]; then
     curl --silent --show-error --fail-with-body \
       -X POST "${SPAWN_WORKER_URL}/v1/teardown" \
-      -H "Authorization: Bearer ${SPAWN_AUTH_TOKEN}" \
+      -H "@${AUTH_HEADER_FILE}" \
       -H 'Content-Type: application/json' \
-      --data "$(jq -cn --arg h "${HANDLE}" '{handle:$h}')" >/dev/null || true
+      --data-binary "@${TEARDOWN_BODY_FILE}" >/dev/null || true
   fi
   if [[ -n "${RUNNER_ID}" ]]; then
     gh api --silent --method DELETE \
       "repos/${GH_REPO}/actions/runners/${RUNNER_ID}" >/dev/null 2>&1 || true
   fi
+  rm -rf -- "${TMP_DIR}"
   exit "${rc}"
 }
-trap cleanup EXIT INT TERM
-
 # image_digest is an assertion at /v1/spawn. Read the authoritative
 # RunnerContainer application configuration through the sanctioned Wrangler
 # OAuth session first, and refuse to proceed if it does not exactly match the
@@ -109,15 +125,22 @@ for _ in $(seq 1 30); do
 done
 [[ -n "${RUN_ID}" && -n "${JOB_ID}" ]] || die "dispatched workflow job with exact canary label did not appear"
 
+if ! jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --arg jit "${JIT}" \
+    --arg label "${LABEL}" --argjson expiry "${CANARY_EXPIRY_MS:-900000}" \
+    '{image_digest:$image,jitconfig:$jit,env:{CORELINK_RUNNER_JITCONFIG:$jit},labels:[$label],expiry_ms:$expiry}' \
+    >"${SPAWN_BODY_FILE}"; then
+  die "unable to prepare direct /v1/spawn request"
+fi
+chmod 600 "${SPAWN_BODY_FILE}"
 SPAWN_JSON="$(curl --silent --show-error --fail-with-body \
   -X POST "${SPAWN_WORKER_URL}/v1/spawn" \
-  -H "Authorization: Bearer ${SPAWN_AUTH_TOKEN}" \
+  -H "@${AUTH_HEADER_FILE}" \
   -H 'Content-Type: application/json' \
-  --data "$(jq -cn --arg image "${CANARY_IMAGE_DIGEST}" --arg jit "${JIT}" \
-    --arg label "${LABEL}" --argjson expiry "${CANARY_EXPIRY_MS:-900000}" \
-    '{image_digest:$image,jitconfig:$jit,env:{CORELINK_RUNNER_JITCONFIG:$jit},labels:[$label],expiry_ms:$expiry}')")" ||
+  --data-binary "@${SPAWN_BODY_FILE}")" ||
   die "direct /v1/spawn failed"
 HANDLE="$(jq -er '.handle' <<<"${SPAWN_JSON}")" || die "spawn response missing handle"
+jq -cn --arg h "${HANDLE}" '{handle:$h}' >"${TEARDOWN_BODY_FILE}"
+chmod 600 "${TEARDOWN_BODY_FILE}"
 
 echo "A2.8 canary queued: run=${RUN_ID} job=${JOB_ID} label=${LABEL} handle=${HANDLE} image=${CF_IMAGE}"
 gh run watch "${RUN_ID}" --repo "${GH_REPO}" --exit-status --interval 5
