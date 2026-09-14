@@ -29,4 +29,4 @@ jobs:
           echo "runner=${RUNNER_NAME:-<unset>}"
           echo "host=$(uname -a)"
           test -n "${RUNNER_NAME:-}"
-          test "${CANARY_LABEL#*a28-manual-canary-}" != "${CANARY_LABEL}"
+          [[ "${CANARY_LABEL}" =~ ^a28-manual-canary-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
