@@ -27,6 +27,11 @@ sys.modules[SLEEP_SPEC.name] = sleepwake
 SLEEP_SPEC.loader.exec_module(sleepwake)
 
 TEST_FABRIC_APP_ID = "recaptured-fabricd-app-20260908"
+# W2b's cold matrix is bound to the current live Fabricd observation. The
+# tracked wrangler config is a staged desired pin for the post-merge A2.9
+# probe, so it intentionally advances independently of this live fixture.
+DESIRED_FABRICD_DIGEST = "sha256:5c7d47513acdb7f426893b1cce8cc110428708976e52bb3975762fc720b33807"
+DESIRED_FABRICD_BUILD_SHA = "543fa5f253580056eb5f526d3f6d8694839e9c7c"
 TEST_FABRICD_DIGEST = matrix.CURRENT_FABRICD_DIGEST
 TEST_STABLE_VERSION = "11111111-1111-4111-8111-111111111111"
 TEST_STALE_VERSION = "22222222-2222-4222-8222-222222222222"
@@ -60,12 +65,13 @@ class WorkerMatrixTests(unittest.TestCase):
         assert image is not None
         digest, build_sha = provenance.groups()
         self.assertEqual(digest, image.group("digest"))
-        self.assertEqual(matrix.CURRENT_FABRICD_DIGEST, digest)
-        self.assertEqual(sleepwake.EXPECTED_DIGEST, digest)
-        self.assertEqual(sleepwake.EXPECTED_BUILD_SHA, build_sha)
+        self.assertEqual(DESIRED_FABRICD_DIGEST, digest)
+        self.assertNotEqual(matrix.CURRENT_FABRICD_DIGEST, digest)
+        self.assertEqual(sleepwake.EXPECTED_DIGEST, matrix.CURRENT_FABRICD_DIGEST)
+        self.assertEqual(DESIRED_FABRICD_BUILD_SHA, build_sha)
         metadata = json.loads((HARNESS_DIR / "provenance.json").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["digest"], digest)
-        self.assertEqual(metadata["build_sha"], build_sha)
+        self.assertEqual(metadata["digest"], matrix.CURRENT_FABRICD_DIGEST)
+        self.assertEqual(metadata["build_sha"], sleepwake.EXPECTED_BUILD_SHA)
 
     def test_stability_monitor_records_two_ordered_timestamps_and_default_is_120(self):
         class Stable:
