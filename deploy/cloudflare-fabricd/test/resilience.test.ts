@@ -347,39 +347,58 @@ describe("proxyFetch — wedged upstream → structured 503 (bounded routes only
 });
 
 describe("cold wake — retry only the platform's transient health 403", () => {
-  const platform403 = () =>
-    new Response(JSON.stringify({ error: "Container is not running" }), {
-      status: 403,
-      headers: { "content-type": "application/json" },
-    });
+  const platform403 = (body: BodyInit = JSON.stringify({ error: "Container is not running" })) =>
+    new Response(body, { status: 403, headers: { "content-type": "application/json" } });
 
-  it("retries platform 403 once and returns the subsequent health response", async () => {
-    await expect(isColdWake403(platform403())).resolves.toBe(true);
-    const fetch = vi.fn().mockResolvedValueOnce(platform403()).mockResolvedValueOnce(new Response("ok"));
+  it.each([platform403(), platform403("forbidden"), platform403("not-json")])(
+    "classifies every 403 envelope without consuming its body",
+    async (response) => {
+      await expect(isColdWake403(response)).resolves.toBe(true);
+      expect(response.bodyUsed).toBe(false);
+    },
+  );
+
+  it("retries 403, 403 with progressive delays, then returns health 200", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(platform403())
+      .mockResolvedValueOnce(platform403(JSON.stringify({ detail: "edge denied" })))
+      .mockResolvedValueOnce(new Response("ok"));
     getContainer.mockReturnValue({ fetch });
-    const response = await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    const pending = worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const response = await pending;
     expect(response.status).toBe(200);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(log.mock.calls.map(([message]) => message)).toEqual([
+      "proxy: health wake 403 attempt=1 status=403",
+      "proxy: health wake 403 attempt=2 status=403",
+    ]);
+    expect(log.mock.calls.flat().join(" ")).not.toMatch(/edge denied|fabricd\/|token|authorization/i);
+    vi.useRealTimers();
   });
 
-  it("preserves the final platform 403 after the retry is exhausted", async () => {
+  it("returns the sixth and final 403 after the bounded retry budget", async () => {
+    vi.useFakeTimers();
     const final = platform403();
-    const fetch = vi.fn().mockResolvedValueOnce(platform403()).mockResolvedValueOnce(final);
+    const fetch = vi.fn().mockResolvedValue(final);
     getContainer.mockReturnValue({ fetch });
-    const response = await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    const pending = worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 8_000]) await vi.advanceTimersByTimeAsync(delay);
+    const response = await pending;
     expect(response).toBe(final);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(6);
+    vi.useRealTimers();
   });
 
-  it("does not retry application 403 or non-health routes", async () => {
-    const auth = () => new Response(JSON.stringify({ error: "forbidden" }), {
-      status: 403,
-      headers: { "content-type": "application/json" },
-    });
-    await expect(isColdWake403(auth())).resolves.toBe(false);
-    const fetch = vi.fn().mockResolvedValue(auth());
+  it("does not retry a 403 on /v1/health or any non-health route", async () => {
+    const auth = () => new Response(JSON.stringify({ error: "forbidden" }), { status: 403 });
+    const fetch = vi.fn().mockImplementation(auth);
     getContainer.mockReturnValue({ fetch });
-    await worker.fetch(new Request("http://fabricd/health"), envWithShards(1));
+    await worker.fetch(new Request("http://fabricd/health", { method: "POST" }), envWithShards(1));
     await worker.fetch(new Request("http://fabricd/v1/health"), envWithShards(1));
     expect(fetch).toHaveBeenCalledTimes(2);
   });

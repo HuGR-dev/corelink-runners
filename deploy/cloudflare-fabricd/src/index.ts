@@ -859,10 +859,10 @@ async function tenantMetricsScatterGather(
 // no finite timeout is correct for them, so they forward unbounded as today.
 const PROXY_FETCH_TIMEOUT_MS = 30_000;
 // A scale-zero wake can briefly return a platform-generated 403 before the
-// container has accepted requests. Keep the public witness to one request while
-// retrying that one narrowly identified response inside the existing 30s bound.
-const COLD_WAKE_MAX_ATTEMPTS = 2;
-const COLD_WAKE_BACKOFF_MS = [250] as const;
+// container has accepted requests. Retry only the auth-free public /health
+// witness inside one absolute deadline; the platform response body is opaque.
+const COLD_WAKE_MAX_ATTEMPTS = 6;
+const COLD_WAKE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 8_000] as const;
 
 /** Minimal shape of a `getContainer(...)` handle — only the `fetch` we call. */
 interface ContainerLike {
@@ -874,23 +874,9 @@ function isAbortLikeError(e: unknown): boolean {
   return e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
 }
 
-/** Retry only the platform JSON 403 emitted while a container is starting. */
+/** Retry any internal 403 from the auth-free public health witness. */
 export async function isColdWake403(response: Response): Promise<boolean> {
-  if (response.status !== 403) return false;
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().includes("application/json")) return false;
-  let body: unknown;
-  try {
-    body = await response.clone().json();
-  } catch {
-    return false;
-  }
-  if (body === null || typeof body !== "object") return false;
-  const message = (body as { error?: unknown }).error;
-  return (
-    typeof message === "string" &&
-    /(?:container|instance).*(?:starting|start(?:ing)? up|not running|provisioning)|(?:starting|start(?:ing)? up|not running|provisioning).*(?:container|instance)/i.test(message)
-  );
+  return response.status === 403;
 }
 
 /** Structured 503 for a wedged upstream — a generic reason, NO internals leaked. */
@@ -931,15 +917,23 @@ async function proxyFetch(
   if (!applyTimeout) return container.fetch(request);
   const wakeRetry = request.method === "GET" && new URL(request.url).pathname === "/health";
   const deadline = Date.now() + PROXY_FETCH_TIMEOUT_MS;
-  for (let attempt = 1; ; attempt++) {
+  for (let attempt = 1; attempt <= COLD_WAKE_MAX_ATTEMPTS; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return upstreamTimeout503();
     const bounded = new Request(request, {
-      signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      signal: AbortSignal.timeout(remaining),
     });
     try {
       const response = await container.fetch(bounded);
-      if (wakeRetry && attempt < COLD_WAKE_MAX_ATTEMPTS && (await isColdWake403(response))) {
+      if (wakeRetry && (await isColdWake403(response))) {
+        // Deliberately omit URL, query, body, headers, and tokens from this
+        // diagnostic: wrangler tail is used to distinguish platform wake 403s.
+        console.log(`proxy: health wake 403 attempt=${attempt} status=${response.status}`);
+        if (attempt === COLD_WAKE_MAX_ATTEMPTS) return response;
         const delay = Math.min(COLD_WAKE_BACKOFF_MS[attempt - 1], Math.max(0, deadline - Date.now()));
-        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        if (delay <= 0) return upstreamTimeout503();
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (Date.now() >= deadline) return upstreamTimeout503();
         continue;
       }
       return response;
@@ -953,6 +947,7 @@ async function proxyFetch(
       throw e;
     }
   }
+  return upstreamTimeout503();
 }
 
 /**
