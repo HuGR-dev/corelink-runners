@@ -10,7 +10,7 @@ import { TenantSuspensionAuthority } from "../src/lib/tenant_suspension_authorit
 
 const INPUT: TenantSuspensionInput = {
   event_id: "suspend-event-1",
-  tenant_id: "11111111-1111-4111-8111-111111111111",
+  tenant_id: "abcdefab-cdef-4abc-8def-abcdefabcdef",
   lifecycle_generation: "7",
 };
 const ENV = { CORELINK_MINT_URL: "https://server.example", CORELINK_RUNNER_MINT_AUTH_KEY: "runner-key" };
