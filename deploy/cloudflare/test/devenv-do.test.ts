@@ -177,6 +177,123 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect((doInstance as any).devenvState.sessionUuid).toBe(firstSession);
     });
 
+    it("stops only the matching authorized tenant/session and is idempotent", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(instance, testPayload());
+      const active = (instance as any).devenvState;
+
+      await expect(instance.stopAuthorizedDevenv({ tenantId: active.tenantId, sessionUuid: crypto.randomUUID() }))
+        .resolves.toEqual({ sessionUuid: expect.any(String), status: "not_current" });
+      expect((instance as any).devenvState.status).toBe("starting");
+
+      await expect(instance.stopAuthorizedDevenv({ tenantId: active.tenantId, sessionUuid: active.sessionUuid }))
+        .resolves.toEqual({ sessionUuid: active.sessionUuid, status: "stopped" });
+      await expect(instance.stopAuthorizedDevenv({ tenantId: active.tenantId, sessionUuid: active.sessionUuid }))
+        .resolves.toEqual({ sessionUuid: active.sessionUuid, status: "already_stopped" });
+    });
+
+    it("fails closed on provider destroy failure and retains cleanup ownership", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(instance, testPayload());
+      const active = (instance as any).devenvState;
+      vi.spyOn(instance as any, "destroy").mockRejectedValue(new Error("provider unavailable"));
+
+      await expect(instance.stopAuthorizedDevenv({ tenantId: active.tenantId, sessionUuid: active.sessionUuid }))
+        .rejects.toThrow("DEVENV_PROVIDER_STOP_FAILED");
+      expect((instance as any).devenvState.status).toBe("stopping");
+      expect(mockStorage.get("devenv:credential-cleanup")).toMatchObject({
+        tenantId: active.tenantId, sessionUuid: active.sessionUuid, providerMayExist: true,
+      });
+    });
+
+    it("cancels a stop-before-start race without affecting other sessions", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const payload = {
+        config: { workspaceName: "delayed", profileName: "default", tier: "standard-4" as const },
+        grant: { tenantId: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3", sessionUuid: crypto.randomUUID(),
+          patId: crypto.randomUUID(), casPat: "cl_pat_delayed", expiresAtMs: Date.now() + 3600000 },
+      };
+      await expect(instance.stopAuthorizedDevenv({ tenantId: payload.grant.tenantId, sessionUuid: payload.grant.sessionUuid }))
+        .resolves.toEqual({ sessionUuid: payload.grant.sessionUuid, status: "not_current" });
+      await expect(instance.startAuthorizedDevenv(payload)).rejects.toThrow("DEVENV_AUTHORIZED_START_CANCELED");
+    });
+
+    it("rejects malformed stop identities without creating a tombstone", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await expect(instance.stopAuthorizedDevenv({ tenantId: "not-a-uuid", sessionUuid: crypto.randomUUID() }))
+        .rejects.toThrow("DEVENV_INVALID_STOP_IDENTITY");
+      expect([...mockStorage.keys()].some((key) => key.startsWith("devenv:authorized-stop:"))).toBe(false);
+    });
+
+    it("accepts non-RFC UUID-shaped identities used by legacy server records", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = "ee30f7ba-fc25-0d71-739e-ebe130b4c6a3";
+      const sessionUuid = "ee30f7ba-fc25-0d71-739e-ebe130b4c6a3";
+      await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid }))
+        .resolves.toEqual({ sessionUuid, status: "not_current" });
+    });
+
+    it("expires tombstones, refuses a live full bound, and protects renewed entries from stale cleanup", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3";
+      const firstSession = crypto.randomUUID();
+      await instance.stopAuthorizedDevenv({ tenantId, sessionUuid: firstSession });
+      const first = structuredClone(mockStorage.get(`devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(firstSession)}`));
+      vi.setSystemTime(new Date(first.canceledAt + 1));
+      await instance.stopAuthorizedDevenv({ tenantId, sessionUuid: firstSession });
+      const renewed = mockStorage.get(`devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(firstSession)}`);
+      await instance.expireAuthorizedStop({ tenantId, sessionUuid: firstSession, canceledAt: first.canceledAt });
+      expect(mockStorage.has(`devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(firstSession)}`)).toBe(true);
+      await instance.expireAuthorizedStop({ tenantId, sessionUuid: firstSession, canceledAt: renewed.canceledAt });
+      expect(mockStorage.has(`devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(firstSession)}`)).toBe(false);
+
+      const entries = Array.from({ length: 64 }, (_, i) => {
+        const session = `ee30f7ba-fc25-4d71-739e-${String(i + 1).padStart(12, "0")}`;
+        const key = `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(session)}`;
+        mockStorage.set(key, { canceledAt: 1 });
+        return { key, canceledAt: 1, expiresAt: Date.now() + 3600000 };
+      });
+      mockStorage.set("devenv:authorized-stop-index", entries);
+      await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid: crypto.randomUUID() }))
+        .rejects.toThrow("DEVENV_AUTHORIZED_STOP_CAPACITY");
+      vi.useRealTimers();
+    });
+
+    it("fails closed on corrupt tombstone index and mismatched expired values", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = crypto.randomUUID();
+      const sessionUuid = crypto.randomUUID();
+      await instance.stopAuthorizedDevenv({ tenantId, sessionUuid });
+      const key = `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
+      mockStorage.set("devenv:authorized-stop-index", { corrupt: true });
+      await expect(instance.expireAuthorizedStop({ tenantId, sessionUuid, canceledAt: mockStorage.get(key).canceledAt }))
+        .rejects.toThrow("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      expect(mockStorage.has(key)).toBe(true);
+    });
+
+    it("preflights all expired tombstones before mutating any durable state", async () => {
+      const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const tenantId = crypto.randomUUID();
+      const firstSession = crypto.randomUUID();
+      const secondSession = crypto.randomUUID();
+      const key = (sessionUuid: string) =>
+        `devenv:authorized-stop:${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
+      const firstKey = key(firstSession);
+      const secondKey = key(secondSession);
+      const index = [
+        { key: firstKey, canceledAt: 11, expiresAt: 0 },
+        { key: secondKey, canceledAt: 22, expiresAt: 0 },
+      ];
+      mockStorage.set(firstKey, { tenantId, sessionUuid: firstSession, canceledAt: 11, expiresAt: 0 });
+      mockStorage.set("devenv:authorized-stop-index", index);
+
+      await expect(instance.stopAuthorizedDevenv({ tenantId, sessionUuid: crypto.randomUUID() }))
+        .rejects.toThrow("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      expect(mockStorage.get(firstKey)).toEqual({ tenantId, sessionUuid: firstSession, canceledAt: 11, expiresAt: 0 });
+      expect(mockStorage.has(secondKey)).toBe(false);
+      expect(mockStorage.get("devenv:authorized-stop-index")).toEqual(index);
+    });
+
     it("rejects an invalid start payload before it can mutate the DevEnv state", async () => {
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await new Promise((resolve) => setTimeout(resolve, 10));

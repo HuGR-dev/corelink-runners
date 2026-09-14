@@ -170,6 +170,16 @@ export interface AuthorizedDevenvAck {
   readonly status: "starting" | "running";
 }
 
+export interface AuthorizedDevenvStop {
+  readonly tenantId: string;
+  readonly sessionUuid: string;
+}
+
+export type AuthorizedDevenvStopResponse = {
+  readonly sessionUuid: string;
+  readonly status: "stopped" | "already_stopped" | "not_current";
+};
+
 export interface StatusResponse {
   readonly status: DevenvStatus;
   readonly workspaceName: string | null;

@@ -6,6 +6,8 @@ import {
   DevenvTier,
   AuthorizedDevenvStart,
   AuthorizedDevenvAck,
+  AuthorizedDevenvStop,
+  AuthorizedDevenvStopResponse,
   StatusResponse,
   SnapshotRequest,
   SnapshotResponse,
@@ -35,6 +37,24 @@ const EXEC_SERVER_PORT = 9090;
 const EXEC_RPC_TIMEOUT_MS = 30_000;
 /** Max bytes queued per WS (backpressure: 1 MiB) */
 const MAX_WS_BUFFERED_BYTES = 1 << 20;
+const AUTHORIZED_STOP_KEY_PREFIX = "devenv:authorized-stop:";
+const AUTHORIZED_STOP_INDEX_KEY = "devenv:authorized-stop-index";
+const AUTHORIZED_STOP_TTL_MS = 8 * 3600 * 1000 + 3600 * 1000;
+const MAX_AUTHORIZED_STOP_TOMBSTONES = 64;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function authorizedStopKey(tenantId: unknown, sessionUuid: unknown): string | undefined {
+  if (typeof tenantId !== "string" || typeof sessionUuid !== "string" ||
+      !UUID.test(tenantId) || !UUID.test(sessionUuid) ||
+      tenantId === "00000000-0000-0000-0000-000000000000" || sessionUuid === "00000000-0000-0000-0000-000000000000") return undefined;
+  return `${AUTHORIZED_STOP_KEY_PREFIX}${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
+}
+
+function requireAuthorizedStopKey(tenantId: unknown, sessionUuid: unknown): string {
+  const key = authorizedStopKey(tenantId, sessionUuid);
+  if (!key) throw new Error("DEVENV_INVALID_STOP_IDENTITY");
+  return key;
+}
 
 interface WsPair {
   readonly connId: string;
@@ -177,6 +197,10 @@ export class RunnerDevEnvDO extends Container<any> {
 
   async startAuthorizedDevenv(payload: AuthorizedDevenvStart): Promise<AuthorizedDevenvAck> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      if (authorizedStopKey(payload?.grant?.tenantId, payload?.grant?.sessionUuid) &&
+          await this.ctx.storage.get(authorizedStopKey(payload.grant.tenantId, payload.grant.sessionUuid)!)) {
+        throw new Error("DEVENV_AUTHORIZED_START_CANCELED");
+      }
       const reservationId = payload?.grant?.computeReservationId;
       if (reservationId && (reservationId !== payload.grant.sessionUuid ||
           await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId)) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
@@ -201,6 +225,132 @@ export class RunnerDevEnvDO extends Container<any> {
         throw error;
       }
     });
+  }
+
+  /** Trusted server compensation for a start ACK that was not adopted. */
+  async stopAuthorizedDevenv(payload: AuthorizedDevenvStop): Promise<AuthorizedDevenvStopResponse> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const requestedSession = payload?.sessionUuid;
+      const requestedTenant = payload?.tenantId;
+      const cancellationKey = requireAuthorizedStopKey(requestedTenant, requestedSession);
+      {
+        // This tombstone also covers a stop that races ahead of a delayed start RPC.
+        const now = Date.now();
+        const index = await this.readStopTombstoneIndex(now);
+        const existing = index.find((entry) => entry.key === cancellationKey);
+        if (index.length >= MAX_AUTHORIZED_STOP_TOMBSTONES && !existing) {
+          throw new Error("DEVENV_AUTHORIZED_STOP_CAPACITY");
+        }
+        const entry = { key: cancellationKey, canceledAt: now, expiresAt: now + AUTHORIZED_STOP_TTL_MS };
+        await this.ctx.storage.put(cancellationKey, { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: now, expiresAt: entry.expiresAt });
+        await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, [...index.filter((item) => item.key !== cancellationKey), entry]);
+        await this.schedule(new Date(entry.expiresAt), "expireAuthorizedStop", { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: now });
+      }
+      const state = this.devenvState;
+      const terminalUsage = state.status === "stopped" || state.status === "errored"
+        ? state.terminalUsage
+        : undefined;
+      const stateMatches = state.status === "starting" || state.status === "running" || state.status === "stopping"
+        ? state.sessionUuid === requestedSession && state.tenantId === requestedTenant
+        : terminalUsage?.sessionId === requestedSession && terminalUsage.tenantId === requestedTenant;
+      if (!stateMatches) return { sessionUuid: requestedSession, status: "not_current" };
+
+      const credentialHandle = await this.credentials.current();
+      const credentialsMatch = credentialHandle
+        ? credentialHandle.sessionUuid === requestedSession && credentialHandle.tenantId === requestedTenant
+        : false;
+      if (credentialHandle && !credentialsMatch) {
+        return { sessionUuid: requestedSession, status: "not_current" };
+      }
+      if ((state.status === "stopped" || state.status === "errored") && !credentialHandle) {
+        return { sessionUuid: requestedSession, status: "already_stopped" };
+      }
+
+      if (state.status === "stopped" || state.status === "errored") {
+        await this.recoverTerminalCredentials();
+        return { sessionUuid: requestedSession, status: "already_stopped" };
+      }
+
+      if (state.status !== "stopping") {
+        await this.transitionState({
+          status: "stopping", createdAt: state.createdAt, startedAt: state.startedAt,
+          sessionUuid: state.sessionUuid, tenantId: state.tenantId, billingSeq: state.billingSeq,
+          generationId: state.generationId, workspaceName: state.workspaceName,
+          profileName: state.profileName, tier: state.tier,
+        });
+      }
+
+      let stopped = false;
+      try {
+        await this.destroy();
+        stopped = true;
+        await this.completeStoppedSession();
+      } catch (error) {
+        if (!stopped) throw new Error("DEVENV_PROVIDER_STOP_FAILED");
+        throw error;
+      } finally {
+        await this.credentials.cleanup(stopped);
+      }
+      return { sessionUuid: requestedSession, status: "stopped" };
+    });
+  }
+
+  async expireAuthorizedStop(payload: { tenantId: string; sessionUuid: string; canceledAt: number }): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const key = requireAuthorizedStopKey(payload?.tenantId, payload?.sessionUuid);
+      if (!Number.isSafeInteger(payload?.canceledAt)) throw new Error("DEVENV_INVALID_STOP_IDENTITY");
+      const current = await this.ctx.storage.get<{ canceledAt: number }>(key);
+      if (!current || current.canceledAt !== payload.canceledAt) return;
+      const rawIndex = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY);
+      if (rawIndex !== undefined && !Array.isArray(rawIndex)) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      const index = rawIndex ?? [];
+      this.validateStopTombstoneIndex(index);
+      const indexed = index.find((entry) => entry.key === key && entry.canceledAt === payload.canceledAt);
+      if (!indexed) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      // Validate all durable ownership before mutating either the index or tombstone.
+      await this.ctx.storage.delete(key);
+      const next = index.filter((entry) => entry.key !== key);
+      if (next.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, next);
+      else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
+    });
+  }
+
+  private async readStopTombstoneIndex(now: number): Promise<Array<{ key: string; canceledAt: number; expiresAt: number }>> {
+    const raw = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY);
+    if (raw !== undefined && !Array.isArray(raw)) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+    const index = raw ?? [];
+    this.validateStopTombstoneIndex(index);
+    const live = index.filter((entry) => entry && typeof entry.key === "string" && entry.expiresAt > now);
+    const expired = index.filter((entry) => !live.includes(entry));
+    // Preflight every expired entry before mutating any tombstone or index. A
+    // later corrupt owner must not leave an earlier valid entry deleted.
+    for (const entry of expired) {
+      const stored = await this.ctx.storage.get<{ canceledAt: number }>(entry.key);
+      if (!stored || stored.canceledAt !== entry.canceledAt) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+    }
+    for (const entry of expired) {
+      await this.ctx.storage.delete(entry.key);
+    }
+    if (live.length !== index.length) {
+      if (live.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, live);
+      else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
+    }
+    return live;
+  }
+
+  private validateStopTombstoneIndex(index: Array<{ key: string; canceledAt: number; expiresAt: number }>): void {
+    for (const entry of index) {
+      if (!entry || typeof entry.key !== "string" || !entry.key.startsWith(AUTHORIZED_STOP_KEY_PREFIX) ||
+          !Number.isSafeInteger(entry.canceledAt) || !Number.isSafeInteger(entry.expiresAt)) {
+        throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      }
+      const suffix = entry.key.slice(AUTHORIZED_STOP_KEY_PREFIX.length).split(":");
+      if (suffix.length !== 2) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      let tenantId: string, sessionUuid: string;
+      try { tenantId = decodeURIComponent(suffix[0]); sessionUuid = decodeURIComponent(suffix[1]); }
+      catch { throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT"); }
+      if (authorizedStopKey(tenantId, sessionUuid) !== entry.key) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+    }
   }
 
   private recoverTerminalCredentials(): Promise<void> {
