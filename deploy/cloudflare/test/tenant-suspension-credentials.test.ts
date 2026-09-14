@@ -155,6 +155,15 @@ describe("tenant suspension credential consumer", () => {
     await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, tenant_id: "00000000-0000-0000-0000-000000000000" }, deps())).rejects.toThrow("invalid tenant suspension input");
   });
 
+  it("matches the paired close-generation validator for canonical identity", async () => {
+    const fetchSpy = vi.fn(); vi.stubGlobal("fetch", fetchSpy);
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, tenant_id: INPUT.tenant_id.toUpperCase() }, deps())).rejects.toThrow("invalid tenant suspension input");
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: ` ${INPUT.event_id}` }, deps())).rejects.toThrow("invalid tenant suspension input");
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: "x".repeat(257) }, deps())).rejects.toThrow("invalid tenant suspension input");
+    await expect(consumeTenantSuspensionCredentials(ENV, { ...INPUT, event_id: "bad\u0001event" }, deps())).rejects.toThrow("invalid tenant suspension input");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("bounds a streaming body without content-length and cancels the reader", async () => {
     let canceled = false;
     const stream = new ReadableStream<Uint8Array>({
