@@ -926,7 +926,18 @@ def failure_artifact(config: RunConfig, failure: dict[str, str], fabric_url: str
     }
     return result_artifact(
         config,
-        {"status": "UNAVAILABLE", "provenance": {"source_repo": config.source_repo}},
+        {
+            "status": "UNAVAILABLE",
+            # These are requested phase bindings, not provider witnesses. Keep
+            # them on a preflight failure so the coordinator can correlate the
+            # RED artifact without treating the provider as contacted.
+            "app_id": config.app_id,
+            "source_sha": config.source_sha,
+            "provenance": {
+                "source_repo": config.source_repo,
+                "source_sha": config.source_sha,
+            },
+        },
         [attempt],
         failure,
         fabric_url,

@@ -510,6 +510,31 @@ class HarnessTests(unittest.TestCase):
         for sentinel in sentinels.values():
             self.assertNotIn(sentinel, artifact)
 
+    def test_preflight_failure_artifact_retains_requested_bindings(self):
+        config = self.config(
+            app_id="app-1",
+            source_repo=SOURCE_REPO,
+            source_sha="a" * 40,
+            fabric_url="https://fabric.example",
+        )
+        artifact = failure_artifact(
+            config,
+            {"kind": "harness", "message": "preflight unavailable"},
+            fabric_url=config.fabric_url,
+        )
+        self.assertEqual(artifact["status"], "RED")
+        self.assertEqual(artifact["contract"]["app_id"], config.app_id)
+        self.assertEqual(artifact["contract"]["source_sha"], config.source_sha)
+        self.assertEqual(artifact["preflight"]["app_id"], config.app_id)
+        self.assertEqual(artifact["preflight"]["source_sha"], config.source_sha)
+        self.assertEqual(artifact["preflight"]["provenance"]["source_sha"], config.source_sha)
+
+    def test_preflight_failure_artifact_preserves_missing_binding_for_rejection(self):
+        config = self.config(source_repo=SOURCE_REPO, source_sha="a" * 40, app_id=None)
+        artifact = failure_artifact(config, {"kind": "harness", "message": "missing app binding"})
+        self.assertIsNone(artifact["contract"]["app_id"])
+        self.assertIsNone(artifact["preflight"]["app_id"])
+
     def test_cli_failure_has_no_token_in_artifact_stdout_or_stderr(self):
         from harness import main
 

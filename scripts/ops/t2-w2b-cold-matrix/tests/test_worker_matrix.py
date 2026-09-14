@@ -452,19 +452,22 @@ class WorkerMatrixTests(unittest.TestCase):
     def test_real_sleepwake_red_artifact_flows_to_consumer_on_nonzero(self):
         """Exercise producer result_artifact -> worker consumer, including nested failure."""
         source_repo = SOURCE_REPO
-        request = {"matrix_run_id": "run-producer-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "expected_digest": TEST_FABRICD_DIGEST}
+        source_sha = "41293ef2457b0a728fcc25faad16bd0e1506ab62"
+        request = {"matrix_run_id": "run-producer-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "fabric_app_id": TEST_FABRIC_APP_ID, "expected_digest": TEST_FABRICD_DIGEST, "source_sha": source_sha}
         config = sleepwake.RunConfig(
             attempts=10,
             phase="candidate",
             matrix_id="run-producer-red",
             attempt_id_prefix="run-producer-red-candidate",
+            app_id=TEST_FABRIC_APP_ID,
             source_repo=source_repo,
+            source_sha=source_sha,
             worker_id="candidate-version",
             fabric_url="https://fabric.example",
         )
         produced = sleepwake.result_artifact(
             config,
-            {"provenance": {"source_repo": source_repo}},
+            {"app_id": TEST_FABRIC_APP_ID, "source_sha": source_sha, "provenance": {"source_repo": source_repo, "source_sha": source_sha}},
             [{
                 "attempt": 1,
                 "attempt_id": "run-producer-red-candidate-01",
@@ -499,6 +502,59 @@ class WorkerMatrixTests(unittest.TestCase):
         self.assertEqual(partial["attempts"][0]["worker_version"], None)
         self.assertEqual(partial["attempts"][0]["finished_at"], "2026-09-08T00:01:00Z")
         self.assertEqual(partial["failure"], {"kind": "assertion", "message": "fabricd health wake did not return HTTP 200"})
+
+    def test_preflight_failure_artifact_binds_app_and_source_for_partial_parser(self):
+        source_repo = SOURCE_REPO
+        source_sha = "41293ef2457b0a728fcc25faad16bd0e1506ab62"
+        request = {"matrix_run_id": "run-preflight-red", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "fabric_app_id": TEST_FABRIC_APP_ID, "expected_digest": TEST_FABRICD_DIGEST, "source_sha": source_sha, "sleep_after_seconds": 300}
+        config = sleepwake.RunConfig(
+            attempts=10,
+            phase="candidate",
+            matrix_id="run-preflight-red",
+            attempt_id_prefix="run-preflight-red-candidate",
+            app_id=TEST_FABRIC_APP_ID,
+            source_repo=source_repo,
+            source_sha=source_sha,
+            worker_id="candidate-version",
+            fabric_url="https://fabric.example",
+        )
+        produced = sleepwake.failure_artifact(config, {"kind": "harness", "message": "provider unavailable"}, fabric_url=config.fabric_url)
+        old_run = matrix.subprocess.run
+        try:
+            def fake_run(argv, **kwargs):
+                output_path = Path(argv[argv.index("--output") + 1])
+                output_path.write_text(json.dumps(produced))
+                output_path.chmod(0o600)
+                return types.SimpleNamespace(returncode=1)
+
+            matrix.subprocess.run = fake_run
+            with self.assertRaisesRegex(matrix.Stop, "returned nonzero") as raised:
+                matrix.cold_witness(["python3", "sleepwake.py"], request, source_repo)
+        finally:
+            matrix.subprocess.run = old_run
+        partial = raised.exception.partial_evidence
+        self.assertEqual(partial["status"], "RED")
+        self.assertEqual(partial["failure"], {"kind": "harness", "message": "provider unavailable"})
+
+    def test_preflight_failure_artifact_with_null_app_binding_is_rejected(self):
+        source_repo = SOURCE_REPO
+        source_sha = "41293ef2457b0a728fcc25faad16bd0e1506ab62"
+        request = {"matrix_run_id": "run-preflight-null-app", "phase": "candidate", "expected_version_id": "candidate-version", "fabric_origin": "https://fabric.example", "fabric_app_id": TEST_FABRIC_APP_ID, "expected_digest": TEST_FABRICD_DIGEST, "source_sha": source_sha, "sleep_after_seconds": 300}
+        config = sleepwake.RunConfig(matrix_id="run-preflight-null-app", app_id=None, source_repo=source_repo, source_sha=source_sha, fabric_url="https://fabric.example")
+        produced = sleepwake.failure_artifact(config, {"kind": "harness", "message": "missing app binding"}, fabric_url=config.fabric_url)
+        old_run = matrix.subprocess.run
+        try:
+            def fake_run(argv, **kwargs):
+                output_path = Path(argv[argv.index("--output") + 1])
+                output_path.write_text(json.dumps(produced))
+                output_path.chmod(0o600)
+                return types.SimpleNamespace(returncode=1)
+
+            matrix.subprocess.run = fake_run
+            with self.assertRaisesRegex(matrix.Stop, "app binding is unsupported"):
+                matrix.cold_witness(["python3", "sleepwake.py"], request, source_repo)
+        finally:
+            matrix.subprocess.run = old_run
 
     def test_red_artifact_without_structured_cause_is_refused(self):
         fixture = Path(__file__).with_name("fixtures") / "sleepwake-red-missing-failure.json"
