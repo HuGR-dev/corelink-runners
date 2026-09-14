@@ -7,6 +7,8 @@ import {
   DevenvTier,
   AuthorizedDevenvStart,
   AuthorizedDevenvAck,
+  AuthorizedDevenvStop,
+  AuthorizedDevenvStopResponse,
   StatusResponse,
   SnapshotRequest,
   SnapshotResponse,
@@ -36,6 +38,13 @@ const EXEC_SERVER_PORT = 9090;
 const EXEC_RPC_TIMEOUT_MS = 30_000;
 /** Max bytes queued per WS (backpressure: 1 MiB) */
 const MAX_WS_BUFFERED_BYTES = 1 << 20;
+const AUTHORIZED_STOP_KEY_PREFIX = "devenv:authorized-stop:";
+
+function authorizedStopKey(tenantId: unknown, sessionUuid: unknown): string | undefined {
+  if (typeof tenantId !== "string" || typeof sessionUuid !== "string" || !tenantId || !sessionUuid ||
+      tenantId.length > 256 || sessionUuid.length > 256) return undefined;
+  return `${AUTHORIZED_STOP_KEY_PREFIX}${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
+}
 
 interface WsPair {
   readonly connId: string;
@@ -179,6 +188,10 @@ export class RunnerDevEnvDO extends Container<any> {
 
   async startAuthorizedDevenv(payload: AuthorizedDevenvStart): Promise<AuthorizedDevenvAck> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      if (authorizedStopKey(payload?.grant?.tenantId, payload?.grant?.sessionUuid) &&
+          await this.ctx.storage.get(authorizedStopKey(payload.grant.tenantId, payload.grant.sessionUuid)!)) {
+        throw new Error("DEVENV_AUTHORIZED_START_CANCELED");
+      }
       const reservationId = payload?.grant?.computeReservationId;
       if (reservationId && (reservationId !== payload.grant.sessionUuid ||
           await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId)) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
@@ -202,6 +215,65 @@ export class RunnerDevEnvDO extends Container<any> {
         }
         throw error;
       }
+    });
+  }
+
+  /** Trusted server compensation for a start ACK that was not adopted. */
+  async stopAuthorizedDevenv(payload: AuthorizedDevenvStop): Promise<AuthorizedDevenvStopResponse> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const requestedSession = payload?.sessionUuid;
+      const requestedTenant = payload?.tenantId;
+      const cancellationKey = authorizedStopKey(requestedTenant, requestedSession);
+      if (cancellationKey) {
+        // This tombstone also covers a stop that races ahead of a delayed start RPC.
+        await this.ctx.storage.put(cancellationKey, { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: Date.now() });
+      }
+      const state = this.devenvState;
+      const terminalUsage = state.status === "stopped" || state.status === "errored"
+        ? state.terminalUsage
+        : undefined;
+      const stateMatches = state.status === "starting" || state.status === "running" || state.status === "stopping"
+        ? state.sessionUuid === requestedSession && state.tenantId === requestedTenant
+        : terminalUsage?.sessionId === requestedSession && terminalUsage.tenantId === requestedTenant;
+      if (!stateMatches) return { sessionUuid: requestedSession, status: "not_current" };
+
+      const credentialHandle = await this.credentials.current();
+      const credentialsMatch = credentialHandle
+        ? credentialHandle.sessionUuid === requestedSession && credentialHandle.tenantId === requestedTenant
+        : false;
+      if (credentialHandle && !credentialsMatch) {
+        return { sessionUuid: requestedSession, status: "not_current" };
+      }
+      if ((state.status === "stopped" || state.status === "errored") && !credentialHandle) {
+        return { sessionUuid: requestedSession, status: "already_stopped" };
+      }
+
+      if (state.status === "stopped" || state.status === "errored") {
+        await this.recoverTerminalCredentials();
+        return { sessionUuid: requestedSession, status: "already_stopped" };
+      }
+
+      if (state.status !== "stopping") {
+        await this.transitionState({
+          status: "stopping", createdAt: state.createdAt, startedAt: state.startedAt,
+          sessionUuid: state.sessionUuid, tenantId: state.tenantId, billingSeq: state.billingSeq,
+          generationId: state.generationId, workspaceName: state.workspaceName,
+          profileName: state.profileName, tier: state.tier,
+        });
+      }
+
+      let stopped = false;
+      try {
+        await this.destroy();
+        stopped = true;
+        await this.completeStoppedSession();
+      } catch (error) {
+        if (!stopped) throw new Error("DEVENV_PROVIDER_STOP_FAILED");
+        throw error;
+      } finally {
+        await this.credentials.cleanup(stopped);
+      }
+      return { sessionUuid: requestedSession, status: "stopped" };
     });
   }
 
