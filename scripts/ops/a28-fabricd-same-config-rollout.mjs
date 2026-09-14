@@ -16,11 +16,12 @@ import { spawnSync } from 'node:child_process';
 const DEFAULT_API = 'https://api.cloudflare.com/client/v4';
 const DEFAULT_ATTEMPTS = 30;
 const DEFAULT_POLL_MS = 2_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 function die(message) { throw new Error(message); }
 
 function parseArgs(argv) {
-  const opts = { apiBase: DEFAULT_API, attempts: DEFAULT_ATTEMPTS, pollMs: DEFAULT_POLL_MS, execute: false, ack: false, wranglerCommand: 'npx' };
+  const opts = { apiBase: DEFAULT_API, attempts: DEFAULT_ATTEMPTS, pollMs: DEFAULT_POLL_MS, requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS, execute: false, ack: false, wranglerCommand: 'npx' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--execute') opts.execute = true;
@@ -33,8 +34,9 @@ function parseArgs(argv) {
     else if (arg === '--api-base') opts.apiBase = argv[++i];
     else if (arg === '--attempts') opts.attempts = Number(argv[++i]);
     else if (arg === '--poll-ms') opts.pollMs = Number(argv[++i]);
+    else if (arg === '--request-timeout-ms') opts.requestTimeoutMs = Number(argv[++i]);
     else if (arg === '--help' || arg === '-h') {
-      process.stdout.write('Usage: a28-fabricd-same-config-rollout.mjs --execute --ack-destructive --account-id ID --application-id ID --expected-digest sha256:... [--wrangler-dir DIR]\n');
+      process.stdout.write('Usage: a28-fabricd-same-config-rollout.mjs --execute --ack-destructive --account-id ID --application-id ID --expected-digest sha256:... [--wrangler-dir DIR] [--request-timeout-ms 30000]\n');
       process.exit(0);
     } else die(`unknown or incomplete option: ${arg}`);
   }
@@ -42,6 +44,7 @@ function parseArgs(argv) {
   if (!/^sha256:[0-9a-f]{64}$/.test(opts.expectedDigest)) die('expected digest must be sha256 followed by 64 lowercase hex characters');
   if (!Number.isInteger(opts.attempts) || opts.attempts < 1 || opts.attempts > 300) die('attempts must be an integer from 1 to 300');
   if (!Number.isInteger(opts.pollMs) || opts.pollMs < 0 || opts.pollMs > 60_000) die('poll-ms must be an integer from 0 to 60000');
+  if (!Number.isInteger(opts.requestTimeoutMs) || opts.requestTimeoutMs < 1 || opts.requestTimeoutMs > 120_000) die('request-timeout-ms must be an integer from 1 to 120000');
   if (opts.execute !== opts.ack) die('both --execute and --ack-destructive are required for a provider mutation');
   return opts;
 }
@@ -75,15 +78,25 @@ function apiPath(opts, suffix = '') {
   return `${opts.apiBase.replace(/\/$/, '')}/accounts/${encodeURIComponent(opts.accountId)}/containers/applications/${encodeURIComponent(opts.applicationId)}${suffix}`;
 }
 
-async function api(token, url, init = {}) {
-  const response = await fetch(url, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-  });
-  let body;
-  try { body = await response.json(); } catch { die(`Cloudflare API returned non-JSON HTTP ${response.status}`); }
-  if (!response.ok || body?.success !== true) die(`Cloudflare API request failed with HTTP ${response.status}`);
-  return body.result;
+async function api(token, url, requestTimeoutMs, init = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+      signal: controller.signal,
+    });
+    let body;
+    try { body = await response.json(); } catch { die(`Cloudflare API returned non-JSON HTTP ${response.status}`); }
+    if (!response.ok || body?.success !== true) die(`Cloudflare API request failed with HTTP ${response.status}`);
+    return body.result;
+  } catch (error) {
+    if (controller.signal.aborted) die(`Cloudflare API request timed out after ${requestTimeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function stable(value) {
@@ -107,7 +120,7 @@ async function run(opts) {
   let originalConfiguration;
   let mutationMayHaveStarted = false;
   try {
-    const before = await api(token, apiPath(opts));
+    const before = await api(token, apiPath(opts), opts.requestTimeoutMs);
     assertApplication(before, opts);
     originalConfiguration = before.configuration;
     const baselineVersion = before.version;
@@ -118,13 +131,13 @@ async function run(opts) {
     }
     const payload = { description: 'A2.8 same-configuration Fabricd secret pickup', strategy: 'rolling', kind: 'full_auto', step_percentage: 100, target_configuration: originalConfiguration };
     mutationMayHaveStarted = true; // an HTTP failure can still be ambiguous server-side
-    const rollout = await api(token, apiPath(opts, '/rollouts'), { method: 'POST', body: JSON.stringify(payload) });
+    const rollout = await api(token, apiPath(opts, '/rollouts'), opts.requestTimeoutMs, { method: 'POST', body: JSON.stringify(payload) });
     if (!rollout || typeof rollout !== 'object' || !['pending', 'progressing', 'completed'].includes(rollout.status)) die('rollout creation returned an unsafe status');
     // The public API has no GET-by-rollout-id operation. Polling versions is its
     // status surface: the target version must carry the exact copied config at
     // 100% before this operation is considered complete.
     for (let attempt = 1; attempt <= opts.attempts; attempt += 1) {
-      const versions = await api(token, apiPath(opts, '/versions'));
+      const versions = await api(token, apiPath(opts, '/versions'), opts.requestTimeoutMs);
       if (!Array.isArray(versions)) die('application versions response was invalid');
       const target = versions.find(v => v?.version === rollout.target_version);
       if (target && target.percentage === 100 && JSON.stringify(stable(target.configuration)) === JSON.stringify(stable(originalConfiguration))) {
@@ -140,9 +153,9 @@ async function run(opts) {
     // or bindings. Do not mask the original failure if rollback itself fails.
     try {
       if (!opts.execute || !mutationMayHaveStarted || !originalConfiguration) throw new Error('no rollout was started');
-      const app = await api(token, apiPath(opts));
+      const app = await api(token, apiPath(opts), opts.requestTimeoutMs);
       assertApplication(app, opts);
-      await api(token, apiPath(opts, '/rollouts'), {
+      await api(token, apiPath(opts, '/rollouts'), opts.requestTimeoutMs, {
         method: 'POST',
         body: JSON.stringify({ description: 'A2.8 rollback to authenticated same Fabricd configuration', strategy: 'rolling', kind: 'full_auto', step_percentage: 100, target_configuration: originalConfiguration }),
       });

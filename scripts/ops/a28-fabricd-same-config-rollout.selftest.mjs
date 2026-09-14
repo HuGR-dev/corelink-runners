@@ -42,6 +42,7 @@ async function serverFor(mode) {
     if (req.method === 'GET' && req.url.endsWith(`/applications/${app}`)) return respond({ id: app, account_id: account, version: 1, configuration });
     if (req.method === 'POST' && req.url.endsWith('/rollouts')) return respond({ id: `rollout-${calls.filter(c => c.method === 'POST').length}`, status: 'progressing', target_version: 2 });
     if (req.method === 'GET' && req.url.endsWith('/versions')) {
+      if (mode === 'stalled') return;
       versionPolls += 1;
       return respond(mode === 'success' && versionPolls >= 2
         ? [{ version: 2, percentage: 100, configuration }]
@@ -82,6 +83,14 @@ try {
   const rollbackPosts = failure.calls.filter(c => c.method === 'POST');
   assert.equal(rollbackPosts.length, 2, 'failure must issue a same-config rollback');
   assert.deepEqual(JSON.parse(rollbackPosts[1].body).target_configuration, configuration, 'rollback must restore original GET config');
+
+  const stalled = await serverFor('stalled');
+  const stalledResult = await invoke([...common.slice(0, common.indexOf('--api-base')), '--api-base', stalled.apiBase, '--attempts', '1', '--poll-ms', '0', '--request-timeout-ms', '1000']);
+  stalled.server.close();
+  assert.notEqual(stalledResult.code, 0, 'a stalled API response must fail closed');
+  assert.match(stalledResult.stderr, /request timed out after 1000ms/);
+  assert.ok(stalled.calls.some(c => c.path.endsWith('/versions')), 'stalled versions endpoint must have been reached');
+  assert.equal(stalled.calls.filter(c => c.method === 'POST').length, 2, 'a timed-out poll must still request same-config rollback');
 
   const preflight = await serverFor('success');
   const readOnly = await invoke(['--account-id', account, '--application-id', app, '--expected-digest', digest, '--wrangler-command', fakeWrangler, '--api-base', preflight.apiBase]);
