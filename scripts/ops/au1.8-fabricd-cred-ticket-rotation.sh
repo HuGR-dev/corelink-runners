@@ -312,7 +312,11 @@ fi || {
 }
 run_wrangle() {
   local token
-  token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')" || {
+  if [[ "${AU18_TEST_SHELL_WRANGLER:-0}" == 1 ]]; then
+    token="$(cd "$WRANGLER_DIR" && /bin/bash "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')"
+  else
+    token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')"
+  fi || {
     echo "wrangler OAuth unavailable" >&2
     return 1
   }
