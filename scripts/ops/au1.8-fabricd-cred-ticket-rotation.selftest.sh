@@ -48,7 +48,7 @@ dispatch_case() {
   case_log="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-log.XXXXXX")"
   case_err="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-err.XXXXXX")"
   set +e
-  DISPATCH_LOG="$case_log" AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
+  DISPATCH_LOG="$case_log" AU18_TEST_SHELL_WRANGLER=1 AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
     "$harness" --execute --ack-destructive >/dev/null 2>"$case_err"
   rc=$?
   set -e
@@ -160,7 +160,11 @@ unset_local_regression() {
     mkdir -p "$LOG_DIR"
     scrub_file() { :; }
     log_event() { :; }
-    WRANGLER=("$mock")
+    # Invoke the shell fixture through bash explicitly.  On macOS, executing
+    # a temporary text file directly can block in the local process runner
+    # before the fixture reaches its first command; this keeps the regression
+    # test bounded to the helper under test.
+    WRANGLER=(/bin/bash "$mock")
     run_wrangle() { "${WRANGLER[@]}" "$@"; }
     WORKER_NAME=corelink-fabricd
     CONTAINER_APP_NAME=corelink-fabricd-fabriccontainer
