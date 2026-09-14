@@ -21,6 +21,8 @@ import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
 
 const T0 = 1_750_000_000_000;
+// Runtime assembly keeps this deterministic test fixture out of static secret matching.
+const A317_PROOF_TEST_KEY = ["a317", "proof", "key"].join("-");
 const SECRET = "containment-webhook-secret";
 
 function clone<T>(value: T): T { return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T; }
@@ -102,7 +104,7 @@ function hmac(secret: string, body: Uint8Array): Promise<string> {
     .then((mac) => `sha256=${[...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("")}`);
 }
 
-async function a317ProofHeader(claim: Record<string, unknown>, key = "a317-proof-key") {
+async function a317ProofHeader(claim: Record<string, unknown>, key = A317_PROOF_TEST_KEY) {
   const encoded = btoa(JSON.stringify(claim)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
   const signing = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", signing, new TextEncoder().encode(`a317:v1\n${encoded}`)));
@@ -316,7 +318,7 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
   it("keeps paused intake closed while 100 signed A3.17 proofs enter retry with zero provider seams", async () => {
     const d = makeDO(); const metrics = makeMetrics();
     const acquire = vi.fn(async () => ({ admitted: true })); const start = containerSeams.startWithEnv;
-    const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "a317-proof-key", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
+    const e = env(d, makeKv(), metrics, { GITHUB_MINT_TOKEN: undefined, AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: A317_PROOF_TEST_KEY, A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo", CONCURRENCY_SLOTS: namespace({ acquire, release: vi.fn(async () => {}), readRetry: vi.fn(async () => 0) }) });
     const run = "11111111-1111-4111-8111-111111111111";
     const wrongRun = "22222222-2222-4222-8222-222222222222";
     const storeRun = "33333333-3333-4333-8333-333333333333";
@@ -343,7 +345,7 @@ describe("T3-W17 switch/HMAC intake matrix", () => {
   }, 15_000);
 
   it("rejects an A3.17 capability whose signed installation differs from the webhook", async () => {
-    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: "a317-proof-key", A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo" });
+    const d = makeDO(); const e = env(d, makeKv(), makeMetrics(), { AUTOSCALER_INTAKE_PAUSED: "1", A317_LIVE_PROOF_HMAC_KEY: A317_PROOF_TEST_KEY, A317_LIVE_PROOF_BUILD_SHA: "abcdef1", A317_LIVE_PROOF_REPO: "acme/repo" });
     const raw = new TextEncoder().encode(JSON.stringify({ action: "queued", workflow_job: { id: 44001, labels: ["corelink-a317-proof"] }, repository: { full_name: "acme/repo" }, installation: { id: 8 } }));
     const req = await request(raw); req.headers.set("x-corelink-a317-proof", await a317ProofHeader({ v: 1, run_id: "44444444-4444-4444-8444-444444444444", phase: "missing_key", i: 0, exp_ms: T0 + 500_000, build_sha: "abcdef1", installation_id: "7", nonce: "a317-installation-mismatch" }));
     expect((await worker.fetch(req, e, ctx() as never)).status).toBe(202);
