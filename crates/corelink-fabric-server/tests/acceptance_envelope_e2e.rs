@@ -782,15 +782,16 @@ async fn standalone_acquire_close_is_fast_complete_and_cleans_up() {
         ledger_state(&h.ledger, &lease_id),
         LeaseState::Wire(RunnerState::Released)
     );
-    let meter = h.state.slot_meter.lock().expect("slot meter readable");
-    assert!(
-        meter
-            .journal()
-            .iter()
-            .any(|event| event.lease_id == lease_id && event.kind == SlotEventKind::Released),
-        "winning close emits the Released terminal slot event"
-    );
-    drop(meter);
+    {
+        let meter = h.state.slot_meter.lock().expect("slot meter readable");
+        assert!(
+            meter
+                .journal()
+                .iter()
+                .any(|event| event.lease_id == lease_id && event.kind == SlotEventKind::Released),
+            "winning close emits the Released terminal slot event"
+        );
+    }
 
     let events_path = lease_path(paths::ENVELOPE_EVENTS, &lease_id);
     let resp = h
