@@ -1,6 +1,6 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
-import { NormalIntakeInbox, installationTombstoneKey, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { NormalIntakeInbox, acquireInstallationFenceInTransaction, installationFenceKey, installationTombstoneKey, type A317ProofRecord, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
@@ -906,7 +906,15 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).settle(eventId, bodySha, outcome, Date.now());
   }
 
-  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict"> {
+  async normalIntakeAdmit(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admit(eventId);
+  }
+  async normalIntakeAdmissionFence(eventId: string): Promise<boolean> {
+    return new NormalIntakeInbox(this.ctx.storage).admissionFence(eventId);
+  }
+  async normalIntakeReleaseFence(eventId: string): Promise<void> { return new NormalIntakeInbox(this.ctx.storage).releaseAdmissionFence(eventId); }
+
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string): Promise<"accepted" | "duplicate" | "conflict" | "busy"> {
     return new NormalIntakeInbox(this.ctx.storage).tombstoneInstallation(installationId, eventId, bodySha, Date.now());
   }
 
@@ -1005,7 +1013,14 @@ export class ContainmentDO extends DurableObject<Env> {
   async ownerCommit(input: SpawnOwnerRequest, permitId: string, proofId: string, receipt: ContainmentEffectReceipt): Promise<OwnerResult> { return this.effectLedger().commitEffect(input, permitId, proofId, receipt) as Promise<OwnerResult>; }
   async ownerObserve(pointerKey: string, attemptKey: string): Promise<OwnerResult> { return this.effectLedger().observe(pointerKey, attemptKey); }
   async ownerAbort(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().abort(input); } async ownerFreeze(input: SpawnOwnerRequest): Promise<OwnerResult> { return this.effectLedger().freezeUnknown(input); }
-  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> { return this.tx(s => admitDrainOwnerInTransaction(s, eventId, tuple, now)); }
+  async admitDrainOwner(eventId: string, tuple: Awaited<ReturnType<typeof drainOwnerTuple>>, now = Date.now()): Promise<boolean> {
+    return this.tx(async s => {
+      if (!await admitDrainOwnerInTransaction(s, eventId, tuple, now)) return false;
+      const event = await s.get(containmentEventKey(eventId)) as ContainmentEvent | undefined;
+      return !!event && await acquireInstallationFenceInTransaction(s, event.installation_id, event.effect_id);
+    });
+  }
+  async releaseInstallationFence(installationId: string, effectId: string): Promise<void> { await this.ctx.storage.delete(installationFenceKey(installationId, effectId)); }
   async beginEffect(eventId: string, owner: string, epoch: number, now = Date.now(), permitId?: string): Promise<ContainmentEvent["effect_permit"]> {
     return this.beginContainmentEventEffect(eventId, owner, epoch, now, permitId);
   }
@@ -1131,6 +1146,7 @@ export class ContainmentDO extends DurableObject<Env> {
     path: "redrive" = "redrive",
     effectId?: string,
     now = Date.now(),
+    installationId?: string,
   ): Promise<{ status: "eligible" | "stale" | "ineligible" | "invalid"; permit?: ContainmentRedrivePermit }> {
     const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity || !Number.isSafeInteger(epoch) || epoch < 1 || path !== "redrive") return { status: "invalid" };
@@ -1140,10 +1156,15 @@ export class ContainmentDO extends DurableObject<Env> {
     return this.tx(async (s) => {
       const reservation = (await s.get(containmentReservationKey(repo, jobId))) as ContainmentRedriveReservation | undefined;
       if (!reservation || !reservationTupleMatches(reservation, repo, jobId, owner, token, epoch, path, expectedEffectId)) return { status: "stale" as const };
+      // Eligibility is decided before acquiring the deletion fence. An expired
+      // or already-promoted tuple has no external effect to protect and must
+      // never leave a durable fence behind.
+      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
+      if (installationId && await s.get(installationTombstoneKey(installationId)) !== undefined) return { status: "ineligible" as const };
+      if (installationId && !await acquireInstallationFenceInTransaction(s, installationId, expectedEffectId)) return { status: "ineligible" as const };
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
       // a fresh tuple through reserveRedriveCandidate first.
-      if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
       await s.put(containmentReservationKey(repo, jobId), eligible);
       return { status: "eligible" as const, permit: reservationPermit(eligible) };
@@ -5198,6 +5219,8 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
+        fence: async () => !(await authority.installationTombstoned(event.installation_id)),
+        releaseFence: () => authority.releaseInstallationFence(event.installation_id, event.effect_id),
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
         },
@@ -5286,7 +5309,10 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
       opts: spawnOpts, provider: "cloudflare-container",
       resource_id: `job:${event.repo}/${event.job_id}`, idempotency_key: `containment:v1:${event.event_id}`,
       admit: async () => parseContainmentSwitch(env.AUTOSCALER_INTAKE_PAUSED) === "normal"
-        && (await authority.snapshot()).backlog_count === 0,
+        && (await authority.snapshot()).backlog_count === 0
+        && await authority.normalIntakeAdmit(event.event_id),
+      fence: () => authority.normalIntakeAdmissionFence(event.event_id),
+      releaseFence: () => authority.normalIntakeReleaseFence(event.event_id),
       beforeClaim: async () => { prepared = await prepareSpawn(env, spawnOpts); },
       abandonPreparation: () => abandonPreparedSpawn(env, authority, event.job_id, prepared),
       claim: spawnClaim.claim,
@@ -5645,6 +5671,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
             || await sha256Hex(`installation.deleted:v1\n${installationId}\n${bodySha}`);
           const result = await containmentAuthority(env).tombstoneInstallation(installationId, delivery, bodySha);
           if (result === "conflict") return json({ error: "delivery id conflicts with different body" }, 409);
+          if (result === "busy") return json({ error: "installation deletion waits for admitted effect", retryable: true }, 503);
           return json({ ok: true, installation_deleted: true, duplicate: result === "duplicate", installation_id: installationId }, 202);
         } catch {
           return json({ error: "installation tombstone unavailable", retryable: true }, 503);
@@ -6543,7 +6570,9 @@ export async function redriveOrphanedJobs(
             provider: "cloudflare-container",
             resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
             idempotency_key: effect,
-            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+            admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, reInstallationId)).status === "eligible",
+            fence: async () => !(await ownedAuthority.installationTombstoned(reInstallationId)),
+            releaseFence: () => ownedAuthority.releaseInstallationFence(reInstallationId, effect),
             beforeClaim: async () => {
               if (useInjectedClaim) await release(env.RUNNER_JOB_PATS!, redriveJobId);
               if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);
@@ -6841,7 +6870,9 @@ export async function retryOrphanedSpawns(
         provider: "cloudflare-container",
         resource_id: `job:${ownedReservation.repo}/${ownedReservation.job_id}`,
         idempotency_key: effect,
-        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect)).status === "eligible",
+        admit: async () => (await ownedAuthority.beginReservedEffect(ownedReservation.repo, ownedReservation.job_id, ownedReservation.owner, ownedReservation.token, ownedReservation.epoch, ownedReservation.path, effect, undefined, bumped.installationId)).status === "eligible",
+        fence: async () => !(await ownedAuthority.installationTombstoned(bumped.installationId)),
+        releaseFence: () => ownedAuthority.releaseInstallationFence(bumped.installationId, effect),
         beforeClaim: async () => {
           if (deferredPlacementUnconfirmed) {
             logEvent("error", "placement_unconfirmed", { jobId, ...deferredPlacementUnconfirmed });

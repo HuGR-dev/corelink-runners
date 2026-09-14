@@ -188,7 +188,9 @@ describe("redrive gates and identity/authorization", () => {
     const d = makeDO(); await bootstrap(d, "7"); await bootstrap(d, "7", "other/repo");
     const list = vi.spyOn(d.storage, "list");
     const first = (await d.instance.reserveRedriveCandidate(" Acme/Repo ", "7", T0)).reservation!;
-    expect((await d.instance.beginReservedEffect(first.repo, first.job_id, first.owner, first.token, first.epoch, first.path, first.effect_id, T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("ineligible");
+    expect((await d.instance.beginReservedEffect(first.repo, first.job_id, first.owner, first.token, first.epoch, first.path, first.effect_id, T0 + REDRIVE_RESERVATION_TTL_MS, "42")).status).toBe("ineligible");
+    // An ineligible reservation did not acquire a deletion lease.
+    expect(await d.instance.tombstoneInstallation("42", "expired-reservation-delete", "e".repeat(64))).toBe("accepted");
     const other = await d.instance.reserveRedriveCandidate("other/repo", "7", T0 + REDRIVE_RESERVATION_TTL_MS);
     expect(other.status).toBe("reserved");
     expect((await d.instance.reserveRedriveCandidate("acme/repo", "7", T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("reserved");
