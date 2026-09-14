@@ -105,7 +105,8 @@ CF_IMAGE="$(jq -er '.configuration.image' <<<"${CF_IMAGE_JSON}")" ||
   die "deployed RunnerContainer image does not match CANARY_IMAGE_DIGEST"
 
 # generate-jitconfig creates a repo-scoped, single-use registration. Its body
-# is held only in memory and is passed directly to /v1/spawn.
+# is written only to the owner-only temporary JIT file and passed by path to
+# /v1/spawn; it is never placed in process arguments or logs.
 JIT_JSON="$(gh api --method POST \
   "repos/${GH_REPO}/actions/runners/generate-jitconfig" \
   -f name="${RUNNER_NAME}" -F runner_group_id=1 \
