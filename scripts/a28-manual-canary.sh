@@ -8,8 +8,8 @@
 # repository Administration:write; neither credential is printed or persisted.
 #
 # Required: GH_REPO, GH_TOKEN, SPAWN_WORKER_URL, SPAWN_AUTH_TOKEN,
-# CANARY_IMAGE_DIGEST (the expected full ref@sha256:... digest), CF_API_TOKEN,
-# CF_ACCOUNT_ID, CF_RUNNER_APP_ID. Optional: CANARY_REF (default main),
+# CANARY_IMAGE_DIGEST (the expected full ref@sha256:... digest). Optional:
+# CANARY_REF (default main),
 # CANARY_EXPIRY_MS (default 900000).
 
 set -euo pipefail
@@ -22,9 +22,6 @@ need GH_TOKEN
 need SPAWN_WORKER_URL
 need SPAWN_AUTH_TOKEN
 need CANARY_IMAGE_DIGEST
-need CF_API_TOKEN
-need CF_ACCOUNT_ID
-need CF_RUNNER_APP_ID
 
 [[ "${CANARY_IMAGE_DIGEST}" =~ @sha256:[0-9a-fA-F]{64}$ ]] ||
   die "CANARY_IMAGE_DIGEST must be a full @sha256:-pinned image reference"
@@ -34,6 +31,7 @@ need CF_RUNNER_APP_ID
 command -v gh >/dev/null || die "gh is required"
 command -v jq >/dev/null || die "jq is required"
 command -v uuidgen >/dev/null || die "uuidgen is required"
+command -v npx >/dev/null || die "npx is required"
 
 SPAWN_WORKER_URL="${SPAWN_WORKER_URL%/}"
 LABEL="a28-manual-canary-$(uuidgen | tr '[:upper:]' '[:lower:]')"
@@ -61,13 +59,16 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # image_digest is an assertion at /v1/spawn. Read the authoritative
-# RunnerContainer application configuration first, and refuse to proceed if it
-# does not exactly match the operator's expected target.
-CF_IMAGE_JSON="$(curl --silent --show-error --fail-with-body \
-  -H "Authorization: Bearer ${CF_API_TOKEN}" \
-  "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/containers/applications/${CF_RUNNER_APP_ID}")" ||
-  die "Cloudflare RunnerContainer configuration readback failed"
-CF_IMAGE="$(jq -er '.result.configuration.image' <<<"${CF_IMAGE_JSON}")" ||
+# RunnerContainer application configuration through the sanctioned Wrangler
+# OAuth session first, and refuse to proceed if it does not exactly match the
+# operator's expected target. The UUID is fixed to the deployed RunnerContainer
+# application; callers cannot accidentally read back a different application.
+readonly RUNNER_APP_ID="a03d11a2-7e03-48a4-96bb-4d2c43892cd4"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CF_IMAGE_JSON="$(cd "${REPO_ROOT}/deploy/cloudflare" &&
+  npx wrangler containers info "${RUNNER_APP_ID}" --json)" ||
+  die "Wrangler RunnerContainer configuration readback failed"
+CF_IMAGE="$(jq -er '.configuration.image' <<<"${CF_IMAGE_JSON}")" ||
   die "Cloudflare response missing RunnerContainer configuration.image"
 [[ "${CF_IMAGE}" == "${CANARY_IMAGE_DIGEST}" ]] ||
   die "deployed RunnerContainer image does not match CANARY_IMAGE_DIGEST"
