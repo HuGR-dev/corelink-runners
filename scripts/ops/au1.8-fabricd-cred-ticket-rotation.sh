@@ -298,7 +298,11 @@ trap release_lock EXIT
 WRANGLER_DIR="${CONFIG%/*}"
 WRANGLER_BIN="$WRANGLER_DIR/node_modules/.bin/wrangler"
 [[ -x "$WRANGLER_BIN" ]] || { echo "missing local Wrangler binary: $WRANGLER_BIN" >&2; exit 1; }
-WRANGLER_VERSION="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" --version)" || {
+if [[ "${AU18_TEST_SHELL_WRANGLER:-0}" == 1 ]]; then
+  WRANGLER_VERSION="$(cd "$WRANGLER_DIR" && /bin/bash "$WRANGLER_BIN" --version)"
+else
+  WRANGLER_VERSION="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" --version)"
+fi || {
   echo "local Wrangler version probe failed: $WRANGLER_BIN" >&2
   exit 1
 }
@@ -308,7 +312,11 @@ WRANGLER_VERSION="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" --version)" || {
 }
 run_wrangle() {
   local token
-  token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')" || {
+  if [[ "${AU18_TEST_SHELL_WRANGLER:-0}" == 1 ]]; then
+    token="$(cd "$WRANGLER_DIR" && /bin/bash "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')"
+  else
+    token="$(cd "$WRANGLER_DIR" && "$WRANGLER_BIN" auth token --json | jq -er '.token // .access_token // .')"
+  fi || {
     echo "wrangler OAuth unavailable" >&2
     return 1
   }
@@ -316,7 +324,11 @@ run_wrangle() {
     echo "invalid wrangler OAuth token" >&2
     return 1
   }
-  (cd "$WRANGLER_DIR" && CLOUDFLARE_API_TOKEN="$token" "$WRANGLER_BIN" --config "$CONFIG" "$@")
+  if [[ "${AU18_TEST_SHELL_WRANGLER:-0}" == 1 ]]; then
+    (cd "$WRANGLER_DIR" && CLOUDFLARE_API_TOKEN="$token" /bin/bash "$WRANGLER_BIN" --config "$CONFIG" "$@")
+  else
+    (cd "$WRANGLER_DIR" && CLOUDFLARE_API_TOKEN="$token" "$WRANGLER_BIN" --config "$CONFIG" "$@")
+  fi
 }
 APP_ID="${AU18_APP_ID:-}"
 HEADER_FILE=""
