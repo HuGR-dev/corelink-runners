@@ -39,10 +39,15 @@ const EXEC_RPC_TIMEOUT_MS = 30_000;
 /** Max bytes queued per WS (backpressure: 1 MiB) */
 const MAX_WS_BUFFERED_BYTES = 1 << 20;
 const AUTHORIZED_STOP_KEY_PREFIX = "devenv:authorized-stop:";
+const AUTHORIZED_STOP_INDEX_KEY = "devenv:authorized-stop-index";
+const AUTHORIZED_STOP_TTL_MS = 8 * 3600 * 1000 + 3600 * 1000;
+const MAX_AUTHORIZED_STOP_TOMBSTONES = 64;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function authorizedStopKey(tenantId: unknown, sessionUuid: unknown): string | undefined {
-  if (typeof tenantId !== "string" || typeof sessionUuid !== "string" || !tenantId || !sessionUuid ||
-      tenantId.length > 256 || sessionUuid.length > 256) return undefined;
+  if (typeof tenantId !== "string" || typeof sessionUuid !== "string" ||
+      !UUID.test(tenantId) || !UUID.test(sessionUuid) ||
+      tenantId === "00000000-0000-0000-0000-000000000000" || sessionUuid === "00000000-0000-0000-0000-000000000000") return undefined;
   return `${AUTHORIZED_STOP_KEY_PREFIX}${encodeURIComponent(tenantId)}:${encodeURIComponent(sessionUuid)}`;
 }
 
@@ -226,7 +231,16 @@ export class RunnerDevEnvDO extends Container<any> {
       const cancellationKey = authorizedStopKey(requestedTenant, requestedSession);
       if (cancellationKey) {
         // This tombstone also covers a stop that races ahead of a delayed start RPC.
-        await this.ctx.storage.put(cancellationKey, { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: Date.now() });
+        const now = Date.now();
+        const index = await this.readStopTombstoneIndex(now);
+        const existing = index.find((entry) => entry.key === cancellationKey);
+        if (index.length >= MAX_AUTHORIZED_STOP_TOMBSTONES && !existing) {
+          throw new Error("DEVENV_AUTHORIZED_STOP_CAPACITY");
+        }
+        const entry = { key: cancellationKey, canceledAt: now, expiresAt: now + AUTHORIZED_STOP_TTL_MS };
+        await this.ctx.storage.put(cancellationKey, { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: now, expiresAt: entry.expiresAt });
+        await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, [...index.filter((item) => item.key !== cancellationKey), entry]);
+        await this.schedule(new Date(entry.expiresAt), "expireAuthorizedStop", { tenantId: requestedTenant, sessionUuid: requestedSession, canceledAt: now });
       }
       const state = this.devenvState;
       const terminalUsage = state.status === "stopped" || state.status === "errored"
@@ -275,6 +289,34 @@ export class RunnerDevEnvDO extends Container<any> {
       }
       return { sessionUuid: requestedSession, status: "stopped" };
     });
+  }
+
+  async expireAuthorizedStop(payload: { tenantId: string; sessionUuid: string; canceledAt: number }): Promise<void> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const key = authorizedStopKey(payload?.tenantId, payload?.sessionUuid);
+      if (!key || !Number.isSafeInteger(payload?.canceledAt)) return;
+      const current = await this.ctx.storage.get<{ canceledAt: number }>(key);
+      if (!current || current.canceledAt !== payload.canceledAt) return;
+      await this.ctx.storage.delete(key);
+      const index = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY) ?? [];
+      const next = index.filter((entry) => entry.key !== key);
+      if (next.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, next);
+      else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
+    });
+  }
+
+  private async readStopTombstoneIndex(now: number): Promise<Array<{ key: string; canceledAt: number; expiresAt: number }>> {
+    const raw = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY);
+    const index = Array.isArray(raw) ? raw : [];
+    const live = index.filter((entry) => entry && typeof entry.key === "string" && entry.expiresAt > now);
+    for (const expired of index) {
+      if (!live.includes(expired)) await this.ctx.storage.delete(expired.key);
+    }
+    if (live.length !== index.length) {
+      if (live.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, live);
+      else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
+    }
+    return live;
   }
 
   private recoverTerminalCredentials(): Promise<void> {
