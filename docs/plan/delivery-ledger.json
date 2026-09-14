@@ -1195,7 +1195,7 @@
       "source_provenance": {
         "external_repository": "paired server repository, outside this corelink-runners object database",
         "external_source_commit": "775ea1b2b",
-        "verification": "Paired server integrated tree records source tip 775ea1b2b; Runner integrated source tip is 020c4bebe. The server object database is external to this repository, so no local ancestry claim is made."
+        "verification": "Cited commits are source predecessors. Immutable integrated trees are Runner tree23317f682abe82576f82c3d8e7e39c8e2e787457 and Server treeb0e51dfbde494a7b2e4c45b6ddac9cc20fad310b. Final DCO SHA mapping is captured in external execution evidence; this ledger commit intentionally avoids a self-referential final SHA."
       },
       "review": {
         "status": "approved",
