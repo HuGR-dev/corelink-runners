@@ -172,28 +172,14 @@ describe("normal webhook durable acknowledgement", () => {
     vi.spyOn(Date, "now").mockReturnValue(record.next_attempt_ms);
     f.limiter.mockResolvedValue({ success: true });
 
-    let selected!: () => void;
-    let release!: () => void;
-    const selectedAtAdmission = new Promise<void>(resolve => { selected = resolve; });
-    const deletionCommitted = new Promise<void>(resolve => { release = resolve; });
-    const originalFence = f.d.instance.normalIntakeAdmissionFence.bind(f.d.instance);
-    vi.spyOn(f.d.instance, "normalIntakeAdmissionFence").mockImplementation(async eventId => {
-      selected();
-      await deletionCommitted;
-      return originalFence(eventId);
-    });
-
-    const drain = runNormalIntakeDrain(f.runtime);
-    await selectedAtAdmission;
-    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("accepted");
-    release();
-    await drain;
-
-    // The tombstone won the authority transaction. No auth, claim, mint, JIT,
-    // or container start may follow the selected-but-not-admitted event.
+    // Admission has returned and its durable lease is live. A deletion racing
+    // the interval before the canonical claim cannot commit; it must retry.
+    expect(await f.d.instance.normalIntakeAdmit("delete-race-8250")).toBe(true);
+    expect(await f.d.instance.tombstoneInstallation("42", "deleted-42-race", "d".repeat(64))).toBe("busy");
     expect(f.fetchMock).not.toHaveBeenCalled();
     expectNoSpawnState(f);
-    expect(f.d.storage.map.get("normal-inbox:v1:event:delete-race-8250")).toMatchObject({ state: "complete" });
+    expect(await f.d.instance.installationTombstoned("42")).toBe(false);
+    await f.d.instance.normalIntakeReleaseFence("delete-race-8250");
   });
 
   it.each([

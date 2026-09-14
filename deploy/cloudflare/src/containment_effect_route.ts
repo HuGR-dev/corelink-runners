@@ -55,6 +55,7 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   admit?: () => Promise<boolean>;
   /** Durable admission generation fence, checked before every mutable seam. */
   fence?: () => Promise<boolean>;
+  releaseFence?: () => Promise<void>;
   beforeClaim?: () => Promise<void>;
   /**
    * Undo credentials prepared by this invocation when the provider was never
@@ -349,6 +350,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     if (!effectStarted) await releaseClaim();
     return { status: "unavailable", reason: error instanceof Error ? error.message : "route failure" };
   } finally {
+    if (deps.releaseFence) await deps.releaseFence().catch(() => undefined);
     // Preparation can mint a credential before this route wins the external
     // spawn claim. If the provider was not started, revoke only that exact
     // invocation's credential. Cleanup failures are recorded by its durable

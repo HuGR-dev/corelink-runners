@@ -29,6 +29,7 @@ const COUNT = "normal-inbox:v1:count";
 const INSTALLATION_TOMBSTONE = "normal-inbox:v1:installation-tombstone:";
 const INSTALLATION_GENERATION = "normal-inbox:v1:installation-generation:";
 const ADMISSION = "normal-inbox:v1:admission:";
+const INSTALLATION_FENCE = "normal-inbox:v1:installation-fence:";
 const INSTALLATION_TOMBSTONE_DELIVERY = "normal-inbox:v1:installation-tombstone-delivery:";
 const A317_PROOF = "normal-inbox:v1:a317-proof:";
 const A317_NONCE = "normal-inbox:v1:a317-nonce:";
@@ -47,6 +48,16 @@ const proofSlotKey = (runId: string, phase: A317ProofPhase, index: number) => `$
 const proofRunKey = (runId: string) => `${A317_RUN}${encodeURIComponent(runId)}`;
 export const installationTombstoneKey = (installationId: string) => `${INSTALLATION_TOMBSTONE}${encodeURIComponent(installationId)}`;
 export const installationGenerationKey = (installationId: string) => `${INSTALLATION_GENERATION}${encodeURIComponent(installationId)}`;
+export const installationFenceKey = (installationId: string, effectId: string) => `${INSTALLATION_FENCE}${encodeURIComponent(installationId)}:${encodeURIComponent(effectId)}`;
+export const installationFencePrefix = (installationId: string) => `${INSTALLATION_FENCE}${encodeURIComponent(installationId)}:`;
+export async function acquireInstallationFenceInTransaction(tx: Pick<AuthorityTransaction, "get" | "put">, installationId: string, effectId: string): Promise<boolean> {
+  if (!text(effectId) || (await tx.get(installationTombstoneKey(installationId))) !== undefined) return false;
+  const key = installationFenceKey(installationId, effectId);
+  const prior = await tx.get<{ installation_id?: unknown; effect_id?: unknown }>(key);
+  if (prior !== undefined && (prior.installation_id !== installationId || prior.effect_id !== effectId)) fail("malformed installation fence");
+  if (prior === undefined) await tx.put(key, { installation_id: installationId, effect_id: effectId });
+  return true;
+}
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
 const validCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX;
 
@@ -232,7 +243,7 @@ export class NormalIntakeInbox {
   }
 
   /** Installation deletion is durable authority, not a KV TTL hint. */
-  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string, now = Date.now()): Promise<"accepted" | "duplicate" | "conflict"> {
+  async tombstoneInstallation(installationId: string, eventId: string, bodySha: string, now = Date.now()): Promise<"accepted" | "duplicate" | "conflict" | "busy"> {
     if (canonicalInstallationId(installationId) !== installationId || !text(eventId) || !SHA.test(bodySha)) throw new Error("invalid installation tombstone");
     validateNow(now);
     return this.storage.transaction(async tx => {
@@ -248,6 +259,10 @@ export class NormalIntakeInbox {
         if (prior?.event_id !== eventId || prior?.body_sha256 !== bodySha) return "conflict";
         return "duplicate";
       }
+      // An admission fence is held from the authority decision through the
+      // complete provider call. Deletion must retry rather than commit across
+      // that external-effect interval; a crash deliberately leaves it closed.
+      if ((await tx.list({ prefix: installationFencePrefix(installationId), limit: 1 })).size > 0) return "busy";
       const page = await tx.list<unknown>({ prefix: EVENT, limit: MAX + 1 });
       if (page.size > MAX) fail("event index exceeds capacity");
       let count = await tx.get<unknown>(COUNT);
@@ -264,7 +279,7 @@ export class NormalIntakeInbox {
       }
       await tx.put(COUNT, count);
       const generation = await tx.get<unknown>(installationGenerationKey(installationId));
-      if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) fail("malformed installation generation");
+      if (generation !== undefined && (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)) fail("malformed installation generation");
       await tx.put(installationGenerationKey(installationId), ((generation as number | undefined) ?? 0) + 1);
       const record = { schema_version: 1, installation_id: installationId, event_id: eventId, body_sha256: bodySha, deleted_at_ms: now };
       await tx.put(key, record);
@@ -292,9 +307,9 @@ export class NormalIntakeInbox {
     return this.storage.transaction(async tx => {
       const record = await tx.get<unknown>(eventKey(eventId));
       if (!validRecord(record, eventId) || record.state !== "pending") return false;
-      if ((await tx.get(installationTombstoneKey(record.installation_id))) !== undefined) return false;
+      if (!(await acquireInstallationFenceInTransaction(tx, record.installation_id, eventId))) return false;
       const generation = await tx.get<unknown>(installationGenerationKey(record.installation_id));
-      if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) fail("malformed installation generation");
+      if (generation !== undefined && (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0)) fail("malformed installation generation");
       await tx.put(`${ADMISSION}${encodeURIComponent(eventId)}`, { installation_id: record.installation_id, generation: generation ?? 0 });
       return true;
     });
@@ -304,9 +319,17 @@ export class NormalIntakeInbox {
     return this.storage.transaction(async tx => {
       const record = await tx.get<unknown>(eventKey(eventId));
       const fence = await tx.get<{ installation_id?: unknown; generation?: unknown }>(`${ADMISSION}${encodeURIComponent(eventId)}`);
-      if (!validRecord(record, eventId) || record.state !== "pending" || fence?.installation_id !== record.installation_id || !Number.isSafeInteger(fence.generation) || fence.generation! < 0) return false;
+      if (!validRecord(record, eventId) || record.state !== "pending" || fence?.installation_id !== record.installation_id || typeof fence.generation !== "number" || !Number.isSafeInteger(fence.generation) || fence.generation < 0) return false;
       if ((await tx.get(installationTombstoneKey(record.installation_id))) !== undefined) return false;
       return (await tx.get(installationGenerationKey(record.installation_id)) ?? 0) === fence.generation;
+    });
+  }
+
+  async releaseAdmissionFence(eventId: string): Promise<void> {
+    await this.storage.transaction(async tx => {
+      const record = await tx.get<unknown>(eventKey(eventId));
+      if (!validRecord(record, eventId)) return;
+      await tx.delete(installationFenceKey(record.installation_id, eventId));
     });
   }
 
