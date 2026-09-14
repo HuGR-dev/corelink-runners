@@ -124,12 +124,13 @@ run_cleanup_mock() {
   : >"${case_tmp}/teardown.json"
   : >"${case_tmp}/lifecycle.header"
   set +e
+  # shellcheck disable=SC2016 # The child shell intentionally expands $1.
   out="$(MOCK_TEARDOWN_STATUS="${teardown_status}" MOCK_STATUS_CODE="${status_code}" \
     PATH="${MOCK_BIN}:${PATH}" SPAWN_WORKER_URL=https://example.invalid \
     LIFECYCLE_AUTH_HEADER_FILE="${case_tmp}/lifecycle.header" \
     TEARDOWN_BODY_FILE="${case_tmp}/teardown.json" HANDLE=synthetic-handle \
     RUNNER_ID=runner-id GH_REPO=test/repo TMP_DIR="${case_tmp}" \
-    bash -c 'source "$1"; cleanup' -- "${CLEANUP_FUNCTION_FILE}" 2>&1)"
+    timeout 8 bash -c 'source "$1"; cleanup' -- "${CLEANUP_FUNCTION_FILE}" 2>&1)"
   rc=$?
   set -e
   [[ "${rc}" -eq "${expected_rc}" ]] || {
