@@ -50,6 +50,9 @@
     //   2. Raise this AND `max_instances` (containers block below) TOGETHER.
     // Still owner-gated (do it when real check-host burst volume arrives).
     "FABRIC_NUM_SHARDS": "1",
+    // Explicit selector-capable legacy release; B2 activation changes this
+    // together with the reviewed N=2/max_instances=2 configuration.
+    "FABRIC_DATABASE_URL_SLOT": "legacy",
     // Emergency edge freeze for NEW lease/admission/mint routes. Absent or
     // exact "0" is fail-open; any other value pauses with 503 + Retry-After.
     // Leave unset in the normal posture; set through the reviewed config change
