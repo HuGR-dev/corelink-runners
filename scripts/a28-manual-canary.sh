@@ -48,8 +48,23 @@ LIFECYCLE_AUTH_TOKEN_FILE="${CORELINK_LIFECYCLE_AUTH_TOKEN_FILE}"
 [[ "$(stat -f '%Lp' "${LIFECYCLE_AUTH_TOKEN_FILE}")" == 600 ]] ||
   die "CoreLink lifecycle token file must have mode 600"
 [[ -s "${LIFECYCLE_AUTH_TOKEN_FILE}" ]] || die "CoreLink lifecycle token file is empty"
+validate_token_file() {
+  local token_file="$1"
+  local token_kind="$2"
+  local invalid_bytes
+  invalid_bytes="$(LC_ALL=C tr -d '[:graph:]\n' <"${token_file}" | wc -c | tr -d '[:space:]')"
+  [[ "${invalid_bytes}" == 0 ]] || die "CoreLink ${token_kind} token file contains non-printable bytes"
+}
+validate_token_file "${SPAWN_AUTH_TOKEN_FILE}" spawn
+validate_token_file "${LIFECYCLE_AUTH_TOKEN_FILE}" lifecycle
 SPAWN_AUTH_TOKEN="$(<"${SPAWN_AUTH_TOKEN_FILE}")"
 LIFECYCLE_AUTH_TOKEN="$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")"
+if ! printf '%s' "${SPAWN_AUTH_TOKEN}" | LC_ALL=C grep -Eq '^[[:graph:]]+$'; then
+  die "CoreLink spawn token is not a printable HTTP token"
+fi
+if ! printf '%s' "${LIFECYCLE_AUTH_TOKEN}" | LC_ALL=C grep -Eq '^[[:graph:]]+$'; then
+  die "CoreLink lifecycle token is not a printable HTTP token"
+fi
 if [[ "${SPAWN_AUTH_TOKEN}" == "${LIFECYCLE_AUTH_TOKEN}" ]]; then
   die "CoreLink spawn and lifecycle token files must contain distinct credentials"
 fi

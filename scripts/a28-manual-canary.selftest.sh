@@ -24,6 +24,7 @@ rg -n --fixed-strings 'CORELINK_SPAWN_AUTH_TOKEN_FILE' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'CORELINK_LIFECYCLE_AUTH_TOKEN_FILE' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'SPAWN_AUTH_TOKEN="$(<"${SPAWN_AUTH_TOKEN_FILE}")"' "${SCRIPT}" >/dev/null
 rg -n --fixed-strings 'LIFECYCLE_AUTH_TOKEN="$(<"${LIFECYCLE_AUTH_TOKEN_FILE}")"' "${SCRIPT}" >/dev/null
+rg -n --fixed-strings 'contains non-printable bytes' "${SCRIPT}" >/dev/null
 [[ "$(rg -n --fixed-strings -- '-H "@${SPAWN_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
 [[ "$(rg -n --fixed-strings -- '-H "@${LIFECYCLE_AUTH_HEADER_FILE}"' "${SCRIPT}" | wc -l | tr -d ' ')" == 1 ]]
 rg -n --fixed-strings -- '--data-binary "@${SPAWN_BODY_FILE}"' "${SCRIPT}" >/dev/null
@@ -82,6 +83,22 @@ if CORELINK_LIFECYCLE_AUTH_TOKEN_FILE="${EFFECTIVE_LIFECYCLE_FILE}" \
 fi
 rg -n --fixed-strings 'CoreLink spawn and lifecycle token files must contain distinct credentials' \
   "${VALIDATION_TMP}/effective-output" >/dev/null
+
+# A decoded binary secret must be rejected from the raw file before command
+# substitution can discard NUL bytes or before any provider mutation occurs.
+BINARY_LIFECYCLE_FILE="${VALIDATION_TMP}/binary-lifecycle"
+printf 'printable-prefix\001binary-suffix\n' >"${BINARY_LIFECYCLE_FILE}"
+chmod 600 "${BINARY_LIFECYCLE_FILE}"
+if CORELINK_LIFECYCLE_AUTH_TOKEN_FILE="${BINARY_LIFECYCLE_FILE}" \
+    CORELINK_SPAWN_AUTH_TOKEN_FILE="${EFFECTIVE_SPAWN_FILE}" \
+    GH_REPO=test/repo GH_TOKEN=redacted SPAWN_WORKER_URL=https://example.invalid \
+    CANARY_IMAGE_DIGEST=registry.invalid/runner@sha256:$(printf '%064d' 0) \
+    "${SCRIPT}" >"${VALIDATION_TMP}/binary-output" 2>&1; then
+  echo "binary lifecycle credential unexpectedly passed" >&2
+  exit 1
+fi
+rg -n --fixed-strings 'CoreLink lifecycle token file contains non-printable bytes' \
+  "${VALIDATION_TMP}/binary-output" >/dev/null
 
 # The canary is CoreLink-only; no Hugit secret path or input is permitted.
 if rg -ni 'hugit|\.hugit' "${SCRIPT}"; then
