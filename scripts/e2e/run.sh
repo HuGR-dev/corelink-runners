@@ -12,7 +12,6 @@
 # Every suite writes evidence to docs/validation/evidence/<run-id>/ (G2: behavior + artifact).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-repo="$(cd "$here/../.." && pwd)"
 what="${1:-critic}"
 
 run_critic() {
@@ -23,7 +22,12 @@ run_critic() {
 # Live suites need the real tenant PATs. Source the OOB e2e env if present (never printed).
 load_live_env() {
   local envf="${CORELINK_E2E_ENV_FILE:-$HOME/.corelink/secrets/e2e-prod-env.sh}"
-  if [ -f "$envf" ]; then set +u; . "$envf" >/dev/null 2>&1; set -u; fi
+  if [ -f "$envf" ]; then
+    set +u
+    # shellcheck disable=SC1090 # the operator-selected env file is intentionally dynamic.
+    . "$envf" >/dev/null 2>&1
+    set -u
+  fi
   export E2E_LIVE=1
 }
 
