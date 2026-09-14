@@ -48,7 +48,7 @@ dispatch_case() {
   case_log="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-log.XXXXXX")"
   case_err="$(mktemp "${TMPDIR:-/tmp}/au1.8-wrangler-dispatch-err.XXXXXX")"
   set +e
-  DISPATCH_LOG="$case_log" AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
+  DISPATCH_LOG="$case_log" AU18_TEST_SHELL_WRANGLER=1 AU18_REPO_ROOT="$case_repo" AU18_SOURCE_COMMIT="$sha" \
     "$harness" --execute --ack-destructive >/dev/null 2>"$case_err"
   rc=$?
   set -e

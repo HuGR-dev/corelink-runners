@@ -1,0 +1,20 @@
+{
+  "artifact_id": "b2-au1.8-fixture-hang-v2",
+  "source_sha": "6ab4db54637da6d071590de7b7fa478753647284",
+  "path": "scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+  "fix": "All generated Wrangler shell fixtures now run through /bin/bash in dispatch_case and unset_local_regression. The production harness has a test-only AU18_TEST_SHELL_WRANGLER switch; its default execution path is unchanged.",
+  "tests": [
+    {
+      "command": "bash -n scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+      "status": "PASS"
+    },
+    {
+      "command": "timeout 120 bash scripts/ops/au1.8-fabricd-cred-ticket-rotation.selftest.sh",
+      "status": "NEW_DISTINCT_FAILURE",
+      "detail": "The direct fixture exec hang no longer occurs. The run advances through the mocked cases, then reports existing mock payload/schema failures (jq parse error and top-level container version absent) before timeout under the concurrently loaded local runner.",
+      "provider_writes": false
+    }
+  ],
+  "provider_writes": false,
+  "commit": "pending"
+}
