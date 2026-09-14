@@ -577,7 +577,18 @@ RUN ln -sf /usr/local/node/bin/node      /usr/local/bin/node && \
     node --version && npm --version && pnpm --version
 
 # Install runner dependencies (requires running as root, inside the container).
-RUN /opt/actions-runner/bin/installdependencies.sh
+#
+# Runner 2.335.1's installer probes ICU packages from newest to oldest. Noble
+# ships libicu74, so probing the absent libicu80..libicu75 candidates makes
+# apt repeat a full dependency solve for each miss and can exhaust the build
+# timeout before the valid fallback is reached. Keep the upstream installer
+# and its failure handling, but put Noble's published ICU package first. This
+# remains forward-compatible: the upstream fallbacks still cover other Debian
+# releases and the command still fails closed if any required dependency cannot
+# be installed.
+RUN sed -i 's/libicu80 libicu79 libicu78 libicu77 libicu76 libicu75 libicu74/libicu74 libicu80 libicu79 libicu78 libicu77 libicu76 libicu75/' \
+        /opt/actions-runner/bin/installdependencies.sh && \
+    /opt/actions-runner/bin/installdependencies.sh
 
 # ── Rust toolchain (1.96.0, matching rust-toolchain.toml) ────────────────────
 USER runner
