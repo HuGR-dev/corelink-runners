@@ -3,7 +3,7 @@
   "source_sha": "6ab4db54637da6d071590de7b7fa478753647284",
   "path": "scripts/ops/au1.8-fabricd-cred-ticket-rotation.sh:run_wrangle",
   "fix": "Under AU18_TEST_SHELL_WRANGLER=1, the OAuth auth-token probe now invokes /bin/bash explicitly; default production invocation remains direct.",
-  "commit": "1b71b31",
+  "commit": "474e6ff",
   "tests": {
     "syntax_and_diff_check": "PASS",
     "focused_fixture_regression": "PASS",
