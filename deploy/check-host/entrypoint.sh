@@ -128,6 +128,7 @@ fi
 # Best-effort — if the shell can't set it (unprivileged), continue; the microVM
 # boundary is the hard isolation, this is defense-in-depth.
 # ---------------------------------------------------------------------------
+# shellcheck disable=SC3045 # Linux container shells expose -u for the O7 process cap.
 ulimit -u 4096 2>/dev/null || echo "[check-host] warn: could not set ulimit -u (continuing)" >&2
 
 # ---------------------------------------------------------------------------
