@@ -303,8 +303,14 @@ export class RunnerDevEnvDO extends Container<any> {
       if (!Number.isSafeInteger(payload?.canceledAt)) throw new Error("DEVENV_INVALID_STOP_IDENTITY");
       const current = await this.ctx.storage.get<{ canceledAt: number }>(key);
       if (!current || current.canceledAt !== payload.canceledAt) return;
+      const rawIndex = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY);
+      if (rawIndex !== undefined && !Array.isArray(rawIndex)) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      const index = rawIndex ?? [];
+      this.validateStopTombstoneIndex(index);
+      const indexed = index.find((entry) => entry.key === key && entry.canceledAt === payload.canceledAt);
+      if (!indexed) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      // Validate all durable ownership before mutating either the index or tombstone.
       await this.ctx.storage.delete(key);
-      const index = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY) ?? [];
       const next = index.filter((entry) => entry.key !== key);
       if (next.length) await this.ctx.storage.put(AUTHORIZED_STOP_INDEX_KEY, next);
       else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
@@ -315,18 +321,7 @@ export class RunnerDevEnvDO extends Container<any> {
     const raw = await this.ctx.storage.get<Array<{ key: string; canceledAt: number; expiresAt: number }>>(AUTHORIZED_STOP_INDEX_KEY);
     if (raw !== undefined && !Array.isArray(raw)) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
     const index = raw ?? [];
-    for (const entry of index) {
-      if (!entry || typeof entry.key !== "string" || !entry.key.startsWith(AUTHORIZED_STOP_KEY_PREFIX) ||
-          !Number.isSafeInteger(entry.canceledAt) || !Number.isSafeInteger(entry.expiresAt)) {
-        throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
-      }
-      const suffix = entry.key.slice(AUTHORIZED_STOP_KEY_PREFIX.length).split(":");
-      if (suffix.length !== 2) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
-      let tenantId: string, sessionUuid: string;
-      try { tenantId = decodeURIComponent(suffix[0]); sessionUuid = decodeURIComponent(suffix[1]); }
-      catch { throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT"); }
-      if (authorizedStopKey(tenantId, sessionUuid) !== entry.key) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
-    }
+    this.validateStopTombstoneIndex(index);
     const live = index.filter((entry) => entry && typeof entry.key === "string" && entry.expiresAt > now);
     for (const expired of index) {
       if (!live.includes(expired)) {
@@ -340,6 +335,21 @@ export class RunnerDevEnvDO extends Container<any> {
       else await this.ctx.storage.delete(AUTHORIZED_STOP_INDEX_KEY);
     }
     return live;
+  }
+
+  private validateStopTombstoneIndex(index: Array<{ key: string; canceledAt: number; expiresAt: number }>): void {
+    for (const entry of index) {
+      if (!entry || typeof entry.key !== "string" || !entry.key.startsWith(AUTHORIZED_STOP_KEY_PREFIX) ||
+          !Number.isSafeInteger(entry.canceledAt) || !Number.isSafeInteger(entry.expiresAt)) {
+        throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      }
+      const suffix = entry.key.slice(AUTHORIZED_STOP_KEY_PREFIX.length).split(":");
+      if (suffix.length !== 2) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+      let tenantId: string, sessionUuid: string;
+      try { tenantId = decodeURIComponent(suffix[0]); sessionUuid = decodeURIComponent(suffix[1]); }
+      catch { throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT"); }
+      if (authorizedStopKey(tenantId, sessionUuid) !== entry.key) throw new Error("DEVENV_AUTHORIZED_STOP_INDEX_CORRUPT");
+    }
   }
 
   private recoverTerminalCredentials(): Promise<void> {
