@@ -224,7 +224,8 @@
       // @sha256:063d80b42d9a2a0e4e1f0c61a7ee506964280bd8862fd9d156822ed733b286ab.
       // 2026-09-14 B2/A2.8 immutable runner refresh. The registry ref was
       // rebuilt locally from source commit 8f9a3176342d65a4339b6eae9be18ba7bb3a635f
-      // (tree 23317, linux/amd64) and pushed through Wrangler's managed-registry
+      // (Git tree 624dbde5, deploy/runner context OID 52dbf6ec, linux/amd64) and
+      // pushed through Wrangler's managed-registry
       // path. This records registry provenance only; deployment and live runner
       // qualification remain separate gates.
       // build-sha: 8f9a3176342d65a4339b6eae9be18ba7bb3a635f

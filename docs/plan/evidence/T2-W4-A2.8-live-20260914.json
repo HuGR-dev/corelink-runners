@@ -11,6 +11,8 @@
   },
   "claims": ["T2-W4:image-push", "T2-W4:worker-pin", "T2-W4:worker-roll"],
   "evidence": {
+    "source_git_tree": "624dbde5d7b6b4f5bef21b1ee2065e72aa8eef7f",
+    "deploy_runner_context_oid": "52dbf6ec4c3289d9f8696cc6a6051c48265d057d",
     "fleet_idle": {"busy": 0, "unverifiable": 0, "checked": 0, "runners": 0},
     "application_id": "a03d11a2-7e03-48a4-96bb-4d2c43892cd4",
     "application_version": 27,

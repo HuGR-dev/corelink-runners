@@ -13,7 +13,8 @@
   "version": {"id": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f"},
   "evidence": {
     "source_revision": "8f9a3176342d65a4339b6eae9be18ba7bb3a635f",
-    "tree": "23317",
+    "source_git_tree": "624dbde5d7b6b4f5bef21b1ee2065e72aa8eef7f",
+    "deploy_runner_context_oid": "52dbf6ec4c3289d9f8696cc6a6051c48265d057d",
     "platform": "linux/amd64",
     "local_image_id": "sha256:458a8397af1d68a864aaaea49ed3cfbc9540af0df9b07ac3f8a3f3a708f1d330",
     "registry_tag": "registry.cloudflare.com/6a1fc1c626fc2628823e60b9db01f5cd/corelink-spawn-worker-runnercontainer:8f9a317",
