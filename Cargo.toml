@@ -62,7 +62,7 @@ postgres-protocol = "=0.6.12"
 # set — already in the lock via ureq) + `tokio-postgres-rustls` (the deadpool/
 # tokio-postgres <-> rustls bridge). Default-OFF: the connection stays `NoTls`
 # unless `FABRIC_PG_TLS=require` is set. Public-CA verify-full only.
-rustls = { version = "=0.23.40", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "=1.0.7"
 tokio-postgres-rustls = "=0.13.0"
 # Lease-id minting — exact-pinned (WP-FIX-LEASE-ID-UUID). UUID v4 gives a
