@@ -10,12 +10,17 @@ const containerSeams = vi.hoisted(() => {
   const instance = { start, startWithEnv, isAlive, teardown, destroy, cutEgress };
   return { getContainer: vi.fn(() => instance), instance, start, startWithEnv, isAlive, teardown, destroy, cutEgress };
 });
+const githubAppSeams = vi.hoisted(() => ({
+  installationToken: vi.fn(async (_env: unknown, installationId: string) => ({ token: `installation-token-${installationId}`, expires_at: "2030-01-01T00:00:00.000Z" })),
+}));
+vi.mock("../src/github_app", () => ({ installationToken: githubAppSeams.installationToken }));
 vi.mock("@cloudflare/containers", () => ({
   Container: class {},
   getContainer: containerSeams.getContainer,
 }));
 
-import worker, { ContainmentDO, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, type ContainmentEvent } from "../src/index";
+import worker, { ContainmentDO, DRAIN_LEASE_TTL_MS, MetricsDO, parseContainmentSwitch, retryOrphanedSpawns, runContainmentDrain, type ContainmentEvent } from "../src/index";
+import { containmentEventKey, containmentJobIndexKey, containmentJobIndexMarkerKey, containmentPauseKey } from "../src/containment_authority_helpers";
 import { COUNTER_NAMES } from "../src/metrics";
 import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
@@ -33,6 +38,7 @@ class TxnStorage {
   async list<T>(opts: { prefix?: string } = {}): Promise<Map<string, T>> {
     return new Map([...this.map].filter(([key]) => key.startsWith(opts.prefix ?? "")).map(([key, value]) => [key, clone(value) as T]));
   }
+  async transaction<T>(fn: (storage: TxnStorage) => Promise<T>): Promise<T> { return fn(this); }
 }
 
 class FakeStorage {
@@ -146,6 +152,7 @@ function ctx() {
 async function settle(c: ReturnType<typeof ctx>) { for (let n = 0; n < 8 && c.tasks.length; n++) await Promise.all(c.tasks.splice(0)); }
 
 function env(d: ReturnType<typeof makeDO>, kv = makeKv(), metrics = makeMetrics(), extra: Record<string, unknown> = {}) {
+  Object.assign((d.instance as unknown as { env: Record<string, unknown> }).env, { RUNNER_JOB_PATS: kv });
   return {
     GITHUB_WEBHOOK_SECRET: SECRET, GITHUB_MINT_TOKEN: "mint", RUNNER_JOB_PATS: kv, CONTAINMENT: d.binding, METRICS: metrics.binding,
     RUNNER_CONTAINER: {}, CHECK_HOST_CONTAINER: {},
@@ -448,6 +455,278 @@ describe("durable intake authority and delivery identity", () => {
     const d = makeDO(); const kv = makeKv(); const c = ctx();
     const response = await worker.fetch(await request(body(77)), env(d, kv, makeMetrics(), { INSTALLATION_ALLOWLIST: "99" }), c as never);
     expect(response.status).toBe(202); expect(await response.json()).toMatchObject({ ignored: "installation not allowlisted" }); expect(kv.put).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal poison-head recovery", () => {
+  async function appendPaused(d: ReturnType<typeof makeDO>, n: number, overrides: Partial<ContainmentEvent> = {}) {
+    const queued = event(n, overrides);
+    await d.instance.bootstrapContainedEventIndex(queued.repo, queued.job_id);
+    await d.instance.append(queued);
+    return queued;
+  }
+
+  function terminalObserver(fn: (env: unknown, repo: string, jobId: string, installationId: string) => Promise<unknown>): Record<string, unknown> {
+    // The production drain will expose this narrow observer seam. Casting keeps
+    // this test-only contract red while the baseline drain has no such option.
+    return { observeTerminalJob: fn };
+  }
+
+  it("acknowledges a completed head without spawn effects and advances the cursor", async () => {
+    const d = makeDO();
+    const rawPayload = '{"private":"payload-secret"}';
+    const queued = await appendPaused(d, 41, { event_id: "terminal-41", raw_payload: rawPayload });
+    const kv = makeKv(); const observation = vi.fn(async (_repo: string, _jobId: string, _installationId: string) => ({ httpStatus: 200, job: { status: "completed" } }));
+    const effects = externalSeams();
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchSpy);
+    const limit = vi.fn(async () => ({ success: true }));
+    const e = env(d, kv, makeMetrics(), { RUNNER_JOB_PATS: undefined, CONCURRENCY_SLOTS: effects.slots, CRED_STASH: effects.stash, WEBHOOK_LIMITER: { limit } });
+    const claim = vi.fn(async () => true); const drive = vi.fn(async () => {});
+    await runContainmentDrain(e, { ...terminalObserver(async (_env, repo, jobId, installationId) => observation(repo, jobId, installationId)), claimSpawn: claim, driveSpawn: drive } as never);
+    expect(observation).toHaveBeenCalledWith(queued.repo, queued.job_id, queued.installation_id);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
+    expect(kv.put).not.toHaveBeenCalled(); expect(effects.acquire).not.toHaveBeenCalled(); expect(effects.release).not.toHaveBeenCalled(); expect(effects.wipe).not.toHaveBeenCalled();
+    expect(limit).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled(); expect(containerSeams.getContainer).not.toHaveBeenCalled(); expect(containerSeams.start).not.toHaveBeenCalled(); expect(containerSeams.startWithEnv).not.toHaveBeenCalled();
+    expect(containerSeams.teardown).not.toHaveBeenCalled(); expect(containerSeams.destroy).not.toHaveBeenCalled(); expect(containerSeams.cutEgress).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled(); expect(githubAppSeams.installationToken).not.toHaveBeenCalled();
+  });
+
+  async function claimedHead(d: ReturnType<typeof makeDO>, n = 71) {
+    const queued = await appendPaused(d, n);
+    const lease = await d.instance.acquireLease("drain-owner", T0);
+    expect(lease).not.toBeNull();
+    expect(await d.instance.claimNext("drain-owner", lease!.epoch, T0)).not.toBeNull();
+    return { queued, lease: lease! };
+  }
+
+  function acknowledgeTerminal(
+    d: ReturnType<typeof makeDO>, eventId: string, owner: string, epoch: number, now = T0,
+  ): Promise<boolean> {
+    return (d.instance as unknown as { acknowledgeTerminal(id: string, claimOwner: string, leaseEpoch: number, at: number): Promise<boolean> })
+      .acknowledgeTerminal(eventId, owner, epoch, now);
+  }
+
+  it.each([
+    ["wrong owner", "other-owner", "current", T0],
+    ["wrong epoch", "drain-owner", "wrong", T0],
+    ["expired lease", "drain-owner", "current", T0 + DRAIN_LEASE_TTL_MS],
+  ])("terminal acknowledgement rejects %s and preserves every queue authority record", async (_case, owner, epochCase, now) => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d);
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    const epoch = epochCase === "current" ? lease.epoch : lease.epoch + 1;
+    expect(await acknowledgeTerminal(d, queued.event_id, owner, epoch, now)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
+  });
+
+  it("terminal acknowledgement rejects a non-current head", async () => {
+    const d = makeDO(); await appendPaused(d, 71); const second = await appendPaused(d, 72);
+    const lease = await d.instance.acquireLease("drain-owner", T0); await d.instance.claimNext("drain-owner", lease!.epoch, T0);
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    expect(await acknowledgeTerminal(d, second.event_id, "drain-owner", lease!.epoch)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 2 });
+  });
+
+  it("terminal acknowledgement is atomic when its storage transaction fails", async () => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d);
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    vi.spyOn(d.storage, "transaction").mockImplementationOnce(async (fn) => {
+      const staged = new Map([...d.storage.map].map(([key, value]) => [key, clone(value)]));
+      await fn(new TxnStorage(staged));
+      throw new Error("transaction-secret");
+    });
+    await expect(acknowledgeTerminal(d, queued.event_id, "drain-owner", lease.epoch)).rejects.toThrow("transaction-secret");
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
+  });
+
+  it("terminal acknowledgement mutates authority only inside one transaction", async () => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d);
+    const tx = vi.spyOn(d.storage, "transaction"); const directPut = vi.spyOn(d.storage, "put"); const directDelete = vi.spyOn(d.storage, "delete");
+    expect(await acknowledgeTerminal(d, queued.event_id, "drain-owner", lease.epoch)).toBe(true);
+    expect(tx).toHaveBeenCalledTimes(1);
+    expect(directPut).not.toHaveBeenCalled(); expect(directDelete).not.toHaveBeenCalled();
+    expect(await d.instance.getEvent(queued.event_id)).toBeNull();
+    expect(d.storage.map.has(containmentEventKey(queued.event_id))).toBe(false); expect(d.storage.map.has(containmentPauseKey(1))).toBe(false);
+    expect(d.storage.map.has(containmentJobIndexKey(queued.repo, queued.job_id))).toBe(false);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
+  });
+
+  it("terminal acknowledgement rejects a current lease whose head was never claimed", async () => {
+    const d = makeDO(); const queued = await appendPaused(d, 73);
+    const lease = await d.instance.acquireLease("drain-owner", T0); const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    expect(await acknowledgeTerminal(d, queued.event_id, "drain-owner", lease!.epoch)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+  });
+
+  it.each([["stale-owner", 1], ["drain-owner", 999]])("terminal acknowledgement rejects a stale event claim under a current lease", async (claimOwner, claimEpoch) => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d, 74);
+    const entry = [...d.storage.map.entries()].find(([, value]) => (value as { event_id?: string })?.event_id === queued.event_id);
+    expect(entry).toBeDefined(); d.storage.map.set(entry![0], { ...(entry![1] as object), claim: { owner: claimOwner, lease_epoch: claimEpoch } });
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    expect(await acknowledgeTerminal(d, queued.event_id, "drain-owner", lease.epoch)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+  });
+
+  it("terminal acknowledgement rejects a mismatched current pause pointer", async () => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d, 75);
+    d.storage.map.set(containmentPauseKey(1), { schema_version: 1, pause_seq: 1, event_id: "different-event" });
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    expect(await acknowledgeTerminal(d, queued.event_id, "drain-owner", lease.epoch)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+  });
+
+  it("terminal acknowledgement rejects a mismatched repo/job index", async () => {
+    const d = makeDO(); const { queued, lease } = await claimedHead(d, 76);
+    d.storage.map.set(containmentJobIndexKey(queued.repo, queued.job_id), { schema_version: 1, repo: queued.repo, job_id: queued.job_id, active_event_ids: ["different-event"], active_count: 1, updated_at_ms: T0 });
+    const before = JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    expect(await acknowledgeTerminal(d, queued.event_id, "drain-owner", lease.epoch)).toBe(false);
+    expect(JSON.stringify([...d.storage.map.entries()].sort(([a], [b]) => a.localeCompare(b)))).toBe(before);
+  });
+
+  it("terminal acknowledgement preserves a later active event for the same repo/job", async () => {
+    const d = makeDO();
+    const first = await appendPaused(d, 77, { event_id: "same-job-first", job_id: "77", effect_id: "containment:v1:same-job-first" });
+    const second = await appendPaused(d, 78, { event_id: "same-job-second", job_id: "77", effect_id: "containment:v1:same-job-second" });
+    const lease = await d.instance.acquireLease("drain-owner", T0); await d.instance.claimNext("drain-owner", lease!.epoch, T0);
+    expect(await acknowledgeTerminal(d, first.event_id, "drain-owner", lease!.epoch)).toBe(true);
+    expect(d.storage.map.get(containmentJobIndexKey(first.repo, first.job_id))).toMatchObject({ active_event_ids: [second.event_id], active_count: 1 });
+    expect(d.storage.map.has(containmentJobIndexMarkerKey(first.repo, first.job_id))).toBe(true);
+    expect(await d.instance.getEvent(second.event_id)).toMatchObject({ event_id: second.event_id, job_id: second.job_id });
+    expect((await d.instance.claimNext("drain-owner", lease!.epoch, T0))?.event.event_id).toBe(second.event_id);
+  });
+
+  it("removes a terminal head then drains the following queued event in the same call", async () => {
+    const d = makeDO();
+    await appendPaused(d, 41, { event_id: "terminal-41" });
+    const live = await appendPaused(d, 42, { event_id: "live-42" });
+    const kv = makeKv(); const observed: Array<[string, string, string]> = [];
+    const observe = vi.fn(async (_env: unknown, repo: string, jobId: string, installationId: string) => {
+      observed.push([repo, jobId, installationId]);
+      return { httpStatus: 200, job: { status: jobId === "41" ? "completed" : "queued" } };
+    });
+    const claim = vi.fn(async (store: typeof kv, jobId: string) => { await store.put(`spawn:${jobId}`, String(T0)); return true; });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => ({ resource_id: `job:${opts.repo}/${opts.jobId}`, receipt_id: `receipt-${opts.jobId}`, provider_signature: "test-signature" }));
+    const terminalAck = vi.spyOn(d.instance as unknown as { acknowledgeTerminal(id: string, owner: string, epoch: number, now?: number): Promise<boolean> }, "acknowledgeTerminal");
+    await runContainmentDrain(env(d, kv), {
+      ...terminalObserver(observe), claimSpawn: claim, bindContainmentSpawnClaim: async () => {}, driveSpawn: drive,
+    } as never);
+    expect(observed).toEqual([["acme/repo", "41", "7"], [live.repo, live.job_id, live.installation_id]]);
+    expect(terminalAck).toHaveBeenCalledTimes(1); expect(observe.mock.invocationCallOrder[0]).toBeLessThan(terminalAck.mock.invocationCallOrder[0]!);
+    expect(terminalAck.mock.invocationCallOrder[0]).toBeLessThan(observe.mock.invocationCallOrder[1]!);
+    expect(observe.mock.invocationCallOrder[1]).toBeLessThan(claim.mock.invocationCallOrder[0]!);
+    expect(drive).toHaveBeenCalledTimes(1); expect(drive.mock.calls[0]?.[1]).toMatchObject({ jobId: "42", repo: "acme/repo" });
+    // The injected provider does not manufacture the five immutable production
+    // evidence records, so finalization correctly stays fenced after the drive.
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 1 });
+  });
+
+  it("stops fail-closed when terminal acknowledgement loses its authority race", async () => {
+    const d = makeDO(); const queued = await appendPaused(d, 43, { event_id: "terminal-race-43" }); const next = await appendPaused(d, 44, { event_id: "live-after-race-44" }); const kv = makeKv();
+    const effects = externalSeams(); const limit = vi.fn(async () => ({ success: true }));
+    const claim = vi.fn(async () => true); const bind = vi.fn(async () => {}); const drive = vi.fn(async () => {});
+    const terminalAck = vi.spyOn(d.instance as unknown as { acknowledgeTerminal(id: string, owner: string, epoch: number, now?: number): Promise<boolean> }, "acknowledgeTerminal").mockResolvedValue(false);
+    await runContainmentDrain(env(d, kv, makeMetrics(), { CONCURRENCY_SLOTS: effects.slots, CRED_STASH: effects.stash, WEBHOOK_LIMITER: { limit } }), {
+      ...terminalObserver(async () => ({ httpStatus: 200, job: { status: "completed" } })), claimSpawn: claim, bindContainmentSpawnClaim: bind, driveSpawn: drive,
+    } as never);
+    expect(terminalAck).toHaveBeenCalledTimes(1); expect(await d.instance.getEvent(queued.event_id)).not.toBeNull(); expect(await d.instance.getEvent(next.event_id)).not.toBeNull();
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 2 });
+    expect(limit).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+    expect(effects.acquire).not.toHaveBeenCalled(); expect(effects.release).not.toHaveBeenCalled(); expect(effects.wipe).not.toHaveBeenCalled();
+    expect(containerSeams.getContainer).not.toHaveBeenCalled(); expect(containerSeams.start).not.toHaveBeenCalled(); expect(containerSeams.startWithEnv).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["transport error", "throw"], ["401", 401], ["403", 403], ["404", 404], ["410", 410], ["429", 429], ["500", 500], ["503", 503],
+    ["HTTP 201 completed body", "201-completed"], ["HTTP 201 queued body", "201-queued"], ["HTTP 202 completed body", "202-completed"],
+    ["invalid JSON", "invalid-json"], ["invalid body", "invalid-body"],
+    ["unknown status", "unknown"], ["in progress", "in_progress"], ["waiting", "waiting"], ["pending", "pending"], ["requested", "requested"],
+  ])("leaves the head and every provider seam untouched on %s through the production observer", async (_label, result) => {
+    const d = makeDO(); const queued = await appendPaused(d, 51, { event_id: "unverified-51", raw_payload: '{"private":"payload-secret"}' });
+    const kv = makeKv(); const claim = vi.fn(async () => true); const bind = vi.fn(async () => {}); const drive = vi.fn(async () => {}); const limit = vi.fn(async () => ({ success: true }));
+    const effects = externalSeams();
+    const fetchSpy = vi.fn(async () => {
+      if (result === "throw") throw new Error("transport failure with private-token");
+      if (result === "invalid-json") return new Response("{private-token", { status: 200 });
+      if (result === "invalid-body") return new Response(JSON.stringify({ conclusion: "private-token" }), { status: 200 });
+      if (result === "unknown") return new Response(JSON.stringify({ status: "unrecognized", private: "private-token" }), { status: 200 });
+      if (result === "201-completed") return new Response(JSON.stringify({ status: "completed", private: "private-token" }), { status: 201 });
+      if (result === "201-queued") return new Response(JSON.stringify({ status: "queued", private: "private-token" }), { status: 201 });
+      if (result === "202-completed") return new Response(JSON.stringify({ status: "completed", private: "private-token" }), { status: 202 });
+      if (["in_progress", "waiting", "pending", "requested"].includes(String(result))) return new Response(JSON.stringify({ status: result, private: "private-token" }), { status: 200 });
+      return new Response(null, { status: Number(result) });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const logs = [vi.spyOn(console, "log"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")];
+    try {
+      await runContainmentDrain(env(d, kv, makeMetrics(), { GITHUB_APP_ID: "app-1", GITHUB_APP_PRIVATE_KEY: "private-key-secret", CONCURRENCY_SLOTS: effects.slots, CRED_STASH: effects.stash, WEBHOOK_LIMITER: { limit } }), {
+        claimSpawn: claim, bindContainmentSpawnClaim: bind, driveSpawn: drive,
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
+      expect(await d.instance.getEvent(queued.event_id)).toMatchObject({ event_id: queued.event_id, repo: queued.repo, job_id: queued.job_id, raw_payload: queued.raw_payload, effect_id: queued.effect_id });
+      expect(claim).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+      expect(kv.get).not.toHaveBeenCalled(); expect(kv.put).not.toHaveBeenCalled(); expect(kv.delete).not.toHaveBeenCalled(); expect(kv.list).not.toHaveBeenCalled();
+      expect(effects.acquire).not.toHaveBeenCalled(); expect(effects.release).not.toHaveBeenCalled(); expect(effects.wipe).not.toHaveBeenCalled();
+      expect(limit).not.toHaveBeenCalled();
+      expect(containerSeams.getContainer).not.toHaveBeenCalled(); expect(containerSeams.start).not.toHaveBeenCalled(); expect(containerSeams.startWithEnv).not.toHaveBeenCalled();
+      expect(containerSeams.teardown).not.toHaveBeenCalled(); expect(containerSeams.destroy).not.toHaveBeenCalled(); expect(containerSeams.cutEgress).not.toHaveBeenCalled();
+      const logged = JSON.stringify(logs.flatMap((spy) => spy.mock.calls));
+      for (const secret of ["private-token", "payload-secret", "private-key-secret", "installation-token-7"]) expect(logged).not.toContain(secret);
+    } finally {
+      for (const spy of logs) spy.mockRestore();
+    }
+  });
+
+  it("sends a verified queued observation through the existing spawn path", async () => {
+    const d = makeDO(); await appendPaused(d, 52, { event_id: "queued-52" }); const kv = makeKv();
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ status: "queued" }), { status: 200 })); vi.stubGlobal("fetch", fetchSpy);
+    const claim = vi.fn(async (_store: typeof kv, jobId: string) => { await kv.put(`spawn:${jobId}`, String(T0)); return true; }); const bind = vi.fn(async () => {}); const limit = vi.fn(async () => ({ success: true }));
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => ({ resource_id: `job:${opts.repo}/${opts.jobId}`, receipt_id: `receipt-${opts.jobId}`, provider_signature: "test-signature" }));
+    const terminalAck = vi.spyOn(d.instance as unknown as { acknowledgeTerminal(id: string, owner: string, epoch: number, now?: number): Promise<boolean> }, "acknowledgeTerminal");
+    await runContainmentDrain(env(d, kv, makeMetrics(), { GITHUB_APP_ID: "app-1", GITHUB_APP_PRIVATE_KEY: "private-key-secret", WEBHOOK_LIMITER: { limit } }), {
+      claimSpawn: claim, bindContainmentSpawnClaim: bind, driveSpawn: drive as never,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1); expect(claim).toHaveBeenCalledTimes(1); expect(bind).toHaveBeenCalledTimes(1); expect(drive).toHaveBeenCalledTimes(1);
+    expect(terminalAck).not.toHaveBeenCalled();
+    for (const effectOrder of [limit, claim, bind, drive]) expect(fetchSpy.mock.invocationCallOrder[0]).toBeLessThan(effectOrder.mock.invocationCallOrder[0]!);
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 0, backlog_count: 1 });
+  });
+
+  it("reads the exact repository/job with the installation token and keeps secrets out of logs", async () => {
+    const d = makeDO();
+    const queued = await appendPaused(d, 61, { event_id: "terminal-61", raw_payload: '{"private":"payload-secret"}' });
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ status: "completed" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const logSpies = [vi.spyOn(console, "log"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")];
+    const kv = makeKv(); const effects = externalSeams(); const claim = vi.fn(async () => true); const bind = vi.fn(async () => {}); const drive = vi.fn(async () => {}); const limit = vi.fn(async () => ({ success: true }));
+    const genericAck = vi.spyOn(d.instance, "acknowledge");
+    const terminalAck = vi.spyOn(d.instance as unknown as { acknowledgeTerminal(id: string, owner: string, epoch: number, now?: number): Promise<boolean> }, "acknowledgeTerminal");
+    const e = env(d, kv, makeMetrics(), { GITHUB_APP_ID: "app-1", GITHUB_APP_PRIVATE_KEY: "private-key-secret", CONCURRENCY_SLOTS: effects.slots, CRED_STASH: effects.stash, WEBHOOK_LIMITER: { limit } });
+    try {
+      await runContainmentDrain(e, { claimSpawn: claim, bindContainmentSpawnClaim: bind, driveSpawn: drive });
+      expect(githubAppSeams.installationToken).toHaveBeenCalledWith(e, queued.installation_id, T0);
+      expect(fetchSpy).toHaveBeenCalledWith(`https://api.github.com/repos/${queued.repo}/actions/jobs/${queued.job_id}`, expect.objectContaining({ method: "GET", headers: expect.objectContaining({ authorization: `Bearer installation-token-${queued.installation_id}` }) }));
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(terminalAck).toHaveBeenCalledTimes(1);
+      expect(githubAppSeams.installationToken.mock.invocationCallOrder[0]).toBeLessThan(fetchSpy.mock.invocationCallOrder[0]!);
+      expect(fetchSpy.mock.invocationCallOrder[0]).toBeLessThan(terminalAck.mock.invocationCallOrder[0]!);
+      expect(terminalAck.mock.calls[0]?.[0]).toBe(queued.event_id); expect(terminalAck.mock.calls[0]?.[1]).toEqual(expect.any(String)); expect(terminalAck.mock.calls[0]?.[2]).toBe(1);
+      expect(genericAck).not.toHaveBeenCalled();
+      expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
+      expect(claim).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+      expect(kv.get).not.toHaveBeenCalled(); expect(kv.put).not.toHaveBeenCalled(); expect(kv.delete).not.toHaveBeenCalled(); expect(kv.list).not.toHaveBeenCalled();
+      expect(effects.acquire).not.toHaveBeenCalled(); expect(effects.release).not.toHaveBeenCalled(); expect(effects.wipe).not.toHaveBeenCalled();
+      expect(limit).not.toHaveBeenCalled();
+      expect(containerSeams.getContainer).not.toHaveBeenCalled(); expect(containerSeams.start).not.toHaveBeenCalled(); expect(containerSeams.startWithEnv).not.toHaveBeenCalled();
+      expect(containerSeams.teardown).not.toHaveBeenCalled(); expect(containerSeams.destroy).not.toHaveBeenCalled(); expect(containerSeams.cutEgress).not.toHaveBeenCalled();
+      const logged = JSON.stringify(logSpies.flatMap((spy) => spy.mock.calls));
+      expect(logged).not.toContain("payload-secret"); expect(logged).not.toContain("private-key-secret"); expect(logged).not.toContain(`installation-token-${queued.installation_id}`);
+    } finally {
+      for (const spy of logSpies) spy.mockRestore();
+    }
   });
 });
 
