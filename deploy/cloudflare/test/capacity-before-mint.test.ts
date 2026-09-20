@@ -22,6 +22,7 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
   const slots = new ConcurrencySlotsDO({ storage: slotsStorage } as never, {} as never);
   const store = d.runtimeEnv.RUNNER_JOB_PATS as ReturnType<typeof kv>;
   const issuedOperations = new Map<string, string>();
+  const observeTerminalJob = vi.fn(async () => ({ httpStatus: 200, job: { status: "queued" } }));
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/internal/v1/runner/authorize")) {
@@ -56,13 +57,16 @@ function setup(opts: { mint?: unknown; authorize?: unknown; mintStatus?: number;
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
     CONCURRENCY_SLOTS: ns(slots),
   });
-  return { d, store, slotsStorage, slots, runtime, fetchMock, issuedOperations };
+  return { d, store, slotsStorage, slots, runtime, fetchMock, issuedOperations, observeTerminalJob };
 }
 
 async function queueAndDrain(fixture: ReturnType<typeof setup>, jobId: string) {
   await bootstrap(fixture.d, jobId);
   await fixture.d.instance.append(event(Number(jobId), { job_id: jobId }));
-  await runContainmentDrain(fixture.runtime as never, { bindContainmentSpawnClaim: async () => {} });
+  await runContainmentDrain(fixture.runtime as never, {
+    bindContainmentSpawnClaim: async () => {},
+    observeTerminalJob: fixture.observeTerminalJob as never,
+  });
 }
 
 afterEach(() => {
@@ -77,6 +81,9 @@ describe("capacity admission precedes required mint", () => {
     await queueAndDrain(f, "1001");
 
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(1);
+    expect(f.observeTerminalJob).toHaveBeenCalledTimes(1);
+    const authorizeCallIndex = f.fetchMock.mock.calls.findIndex(([url]) => String(url).endsWith("/runner/authorize"));
+    expect(f.observeTerminalJob.mock.invocationCallOrder[0]).toBeLessThan(f.fetchMock.mock.invocationCallOrder[authorizeCallIndex]);
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(0);
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).includes("generate-jitconfig"))).toHaveLength(0);
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/revoke"))).toHaveLength(0);
