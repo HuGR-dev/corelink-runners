@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import { ConcurrencySlotsDO, runNormalIntakeDrain } from "../src/index";
+import { containmentSpawnActiveKey, intakeOwnerTuple } from "../src/containment_effect_route";
 import { FakeStorage, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const BODY_SHA = "a".repeat(64);
@@ -108,5 +109,31 @@ describe("normal intake effect recovery", () => {
     expect(committedEffect).toBe(true);
     expect(record.state).toBe("complete");
     expect(activeCount).toBe(0);
+  });
+
+  it("quarantines corrupt persisted owner evidence without repeating preparation", async () => {
+    const f = fixture();
+    await enqueue(f, "corrupt-owner-delivery", "8603");
+    const tuple = await intakeOwnerTuple("acme/repo", "8603", "containment:v1:corrupt-owner-delivery", "corrupt-owner-delivery");
+    f.d.storage.map.set(containmentSpawnActiveKey(tuple), { schema_version: 1, state: "DRIVING" });
+
+    await runNormalIntakeDrain(f.runtime);
+    const afterFirstDrain = f.d.storage.map.get("normal-inbox:v1:event:corrupt-owner-delivery") as { state: string; next_attempt_ms: number };
+    const firstAuthorizationCalls = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize")).length;
+    const firstMintCalls = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint")).length;
+
+    expect.soft(afterFirstDrain.state).toBe("uncertain");
+    expect.soft(firstAuthorizationCalls).toBe(0);
+    expect.soft(firstMintCalls).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(Math.max(0, afterFirstDrain.next_attempt_ms - Date.now()));
+    await runNormalIntakeDrain(f.runtime);
+
+    const afterSecondDrain = f.d.storage.map.get("normal-inbox:v1:event:corrupt-owner-delivery") as { state: string };
+    const authorizationCalls = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize")).length;
+    const mintCalls = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint")).length;
+    expect.soft(afterSecondDrain.state).toBe("uncertain");
+    expect.soft(authorizationCalls).toBe(firstAuthorizationCalls);
+    expect.soft(mintCalls).toBe(firstMintCalls);
   });
 });
