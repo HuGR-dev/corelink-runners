@@ -98,6 +98,22 @@ async function read(f: ReturnType<typeof fixture>, query: string, auth = ADMIN) 
   return worker.fetch(readRequest(query, auth), f.runtime, ctx() as never);
 }
 
+function countReadbackDoWrites(f: ReturnType<typeof fixture>) {
+  let writes = 0;
+  const transaction = f.d.storage.transaction.bind(f.d.storage);
+  f.d.storage.transaction = ((fn: (storage: unknown) => Promise<unknown>) => transaction(storage => fn(new Proxy(storage, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property === "put" || property === "delete") return async (...args: unknown[]) => {
+        writes++;
+        return value.apply(target, args);
+      };
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  })))) as typeof f.d.storage.transaction;
+  return () => writes;
+}
+
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe("GET /internal/v1/normal-intake", () => {
@@ -287,7 +303,7 @@ describe("GET /internal/v1/normal-intake", () => {
     expect((await read(f, `?event_id=${encodeURIComponent(eventId)}`)).status).toBe(503);
   });
 
-  it("fails closed when an acquired owner has no durable confirmation and its mirror is absent", async () => {
+  it("reads and regenerates an acquired owner mirror lost before durable confirmation", async () => {
     const f = fixture();
     const eventId = "unconfirmed-mirror-absent";
     await f.d.instance.normalIntakeEnqueue(intake(eventId));
@@ -298,6 +314,149 @@ describe("GET /internal/v1/normal-intake", () => {
     const mirror = await f.d.instance.ownerMirror(request, "acquired");
     expect(mirror.kind).toBe("exact");
     f.store.map.delete(mirror.key);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ effect: { kind: "owned", state: "CLAIM_ACQUIRED" } });
+    const regenerated = await f.d.instance.ownerMirror(request, "acquired");
+    expect(regenerated.kind).toBe("exact");
+    expect(f.store.map.get(mirror.key)).toBe(regenerated.payload);
+  });
+
+  it("keeps legacy CLAIM_ACQUIRED owners fail-closed when their mirror is absent", async () => {
+    const f = fixture();
+    const eventId = "legacy-claim-acquired-mirror-absent";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+    expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+    const attemptKey = containmentSpawnAttemptKey(tuple);
+    const activeKey = containmentSpawnActiveKey(tuple);
+    const attempt = f.d.storage.map.get(attemptKey) as Record<string, unknown>;
+    const pointer = f.d.storage.map.get(activeKey) as Record<string, unknown>;
+    delete attempt.sidecar_version;
+    delete pointer.sidecar_version;
+    f.d.storage.map.set(attemptKey, attempt);
+    f.d.storage.map.set(activeKey, pointer);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
+  it("reads V2 CLAIM_ACQUIRED without a mirror and lets the canonical mirror/confirm path resume", async () => {
+    const f = fixture();
+    const eventId = "v2-claim-acquired-before-mirror";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+    expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const doWrites = countReadbackDoWrites(f);
+    const kvPutCalls = f.store.put.mock.calls.length;
+    const kvDeleteCalls = f.store.delete.mock.calls.length;
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ effect: { kind: "owned", state: "CLAIM_ACQUIRED" } });
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(doWrites()).toBe(0);
+    expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
+    expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
+
+    const mirror = await f.d.instance.ownerMirror(request, "acquired");
+    expect(mirror.kind).toBe("exact");
+    const confirmed = await f.d.instance.ownerConfirm(
+      { ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest },
+      mirror.payload_digest!, mirror.payload_digest!,
+    );
+    expect(confirmed.kind).toBe("permit_issued");
+  });
+
+  it.each(["malformed", "noncanonical"] as const)("rejects a present %s V2 mirror before permit issuance", async corruption => {
+    const f = fixture();
+    const eventId = `v2-claim-acquired-${corruption}-mirror`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+    expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+    const mirror = await f.d.instance.ownerMirror(request, "acquired");
+    expect(mirror.kind).toBe("exact");
+    if (corruption === "malformed") f.store.map.set(mirror.key, "not-json");
+    else {
+      const payload = JSON.parse(mirror.payload!) as { written_at_ms: number };
+      payload.written_at_ms += 1;
+      f.store.map.set(mirror.key, JSON.stringify(payload));
+    }
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
+  it.each(["BOUND", "DRIVING", "COMMITTED"] as const)("reads a V2 %s owner without its previously validated binding projection", async state => {
+    const f = fixture();
+    const eventId = `v2-${state.toLowerCase()}-binding-projection-missing`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    if (state === "BOUND") {
+      const { confirmed } = await seedConfirmedIntakeOwner(f, eventId);
+      const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+      expect(started.proof).not.toBeNull();
+      const bindingBase = {
+        schema_version: 1 as const, provider: "cloudflare-container", resource_id: "job:acme/repo/8201", idempotency_key: tuple.effect_id,
+      };
+      const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+      expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    } else if (state === "DRIVING") {
+      await seedDrivingEffect(f, eventId);
+    } else {
+      await runNormalIntakeDrain(f.runtime);
+    }
+    const bindingSidecar = `containment:v1:effect-binding:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    expect(f.store.map.has(bindingSidecar)).toBe(true);
+    f.store.map.delete(bindingSidecar);
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const doWrites = countReadbackDoWrites(f);
+    const kvPutCalls = f.store.put.mock.calls.length;
+    const kvDeleteCalls = f.store.delete.mock.calls.length;
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ effect: state === "COMMITTED"
+      ? { kind: "committed", state }
+      : { kind: "owned", state } });
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(doWrites()).toBe(0);
+    expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
+    expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
+  });
+
+  it.each(["mismatch", "unavailable"] as const)("keeps V2 DRIVING binding projection %s fail-closed", async failure => {
+    const f = fixture();
+    const eventId = `v2-driving-binding-${failure}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    await seedDrivingEffect(f, eventId);
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const bindingSidecar = `containment:v1:effect-binding:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    if (failure === "mismatch") f.store.map.set(bindingSidecar, "not-the-canonical-binding");
+    else f.store.get.mockImplementation(async key => {
+      if (key === bindingSidecar) throw new Error("binding KV unavailable");
+      return f.store.map.get(key) ?? null;
+    });
 
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 

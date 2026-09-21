@@ -292,13 +292,23 @@ async function ownerMirrorEvidenceValid(kv: KvLike | undefined, t: OwnerTuple, r
     } catch { return false; }
   }
   if (raw === undefined) return false;
-  if (raw === null && v2) return record.state === "PREPARED" || record.state === "ABORTED_PRE_EFFECT";
-  const missingAllowed = record.state === "PREPARED" || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT";
+  if (raw === null && v2) return record.state === "PREPARED"
+    || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT";
+  const missingAllowed = record.state === "PREPARED" || record.state === "ABORTED_PRE_EFFECT"
+    || (v2 && record.state === "CLAIM_ACQUIRED");
   if (raw === null) return missingAllowed;
   if (record.state === "PREPARED") return false;
   try {
     const parsed = JSON.parse(raw) as SpawnMirrorPayloadV1;
-    return parsed.result === "acquired" && parsed.permit_id === null && await mirrorValid(parsed, t);
+    if (parsed.result !== "acquired" || parsed.permit_id !== null || !(await mirrorValid(parsed, t))) return false;
+    if (v2 && record.state === "CLAIM_ACQUIRED") {
+      const canonical = JSON.stringify({ schema_version: 1, tuple: t, tuple_digest: await ownerTupleDigest(t),
+        caller_nonce: t.caller_nonce, result: "acquired", owner: t.owner, token: t.token,
+        lease_epoch: t.lease_epoch, permit_id: null, attempt_key: attemptKey(t),
+        active_pointer_key: activeKey(t), written_at_ms: record.created_ms });
+      return raw === canonical;
+    }
+    return true;
   } catch { return false; }
 }
 function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding | null): boolean {
@@ -504,8 +514,9 @@ export class ContainmentEffectLedger {
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
       catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
-      const repairableV2Bound = record.sidecar_version === 2 && record.state === "BOUND" && raw === null;
-      if (!repairableV2Bound && (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding,
+      const readableV2PostBind = record.sidecar_version === 2
+        && ["BOUND", "DRIVING", "COMMITTED"].includes(record.state) && raw === null;
+      if (!readableV2PostBind && (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding,
         record.sidecar_version === 2 ? record.effect_start_proof_id ?? undefined : undefined))) {
         throw new Error("normal intake effect corruption: divergent binding evidence");
       }
