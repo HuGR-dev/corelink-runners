@@ -3,11 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import worker, { runNormalIntakeDrain } from "../src/index";
+import { ContainmentEffectLedger } from "../src/containment_effect_ledger";
 import { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey, intakeOwnerTuple } from "../src/containment_effect_route";
 import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const ADMIN = "normal-intake-readback-admin";
 const BODY_SHA = "b".repeat(64);
+const symbolExtraEffectDto = { kind: "missing", state: null, [Symbol("secret")]: "SENTINEL_secret_token" };
+const customPrototypeEffectDto = Object.assign(Object.create({ token: "SENTINEL_secret_token" }), { kind: "missing", state: null });
 
 function intake(event_id: string) {
   return {
@@ -544,7 +547,9 @@ describe("GET /internal/v1/normal-intake", () => {
     ["mirror_invalid", "mirror payload invalid"],
     ["receipt", "receipt signature invalid"],
     ["delivery_readback_unavailable", "delivery storage unavailable"],
-    ["unexpected", "unexpected internal exception"],
+    ["tuple_unavailable", "owner tuple construction failure"],
+    ["ledger_unexpected", "unexpected ledger exception"],
+    ["effect_rpc_unavailable", "effect inspection RPC failure"],
   ] as const)("returns only the closed %s failure reason for %s", async (reason, failure) => {
     const f = fixture();
     const eventId = `reason-${reason}`;
@@ -613,6 +618,10 @@ describe("GET /internal/v1/normal-intake", () => {
       f.d.storage.map.set(attemptKey, attempt);
     } else if (failure === "delivery storage unavailable") {
       vi.spyOn(f.d.instance, "normalIntakeInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
+    } else if (failure === "owner tuple construction failure") {
+      vi.spyOn(crypto.subtle, "digest").mockRejectedValueOnce(new Error("SENTINEL_secret_token"));
+    } else if (failure === "unexpected ledger exception") {
+      vi.spyOn(ContainmentEffectLedger.prototype, "inspectIntakeOwner").mockRejectedValue(new Error("SENTINEL_secret_token"));
     } else {
       vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
     }
@@ -651,5 +660,37 @@ describe("GET /internal/v1/normal-intake", () => {
     const body = await response.text();
     expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
     expect(body).not.toContain("SENTINEL_secret_token");
+  });
+
+  it.each([
+    ["unknown kind", { kind: "SENTINEL_secret_token", state: null }],
+    ["malformed owned state", { kind: "owned", state: "SENTINEL_secret_token" }],
+    ["owned committed state", { kind: "owned", state: "COMMITTED" }],
+    ["extra success field", { kind: "missing", state: null, token: "SENTINEL_secret_token" }],
+    ["symbol extra field", symbolExtraEffectDto],
+    ["custom prototype", customPrototypeEffectDto],
+    ["extra unavailable field", { kind: "unavailable", reason: "owner_evidence", token: "SENTINEL_secret_token" }],
+  ] as const)("rejects malformed readback DTO: %s", async (_caseName, dto) => {
+    const f = fixture();
+    const eventId = `malformed-dto-${_caseName.replaceAll(" ", "-")}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue(dto as never);
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const doWrites = countReadbackDoWrites(f);
+    const kvPutCalls = f.store.put.mock.calls.length;
+    const kvDeleteCalls = f.store.delete.mock.calls.length;
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
+    expect(body).not.toContain("SENTINEL_secret_token");
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(doWrites()).toBe(0);
+    expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
+    expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
   });
 });
