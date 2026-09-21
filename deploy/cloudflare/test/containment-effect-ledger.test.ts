@@ -95,6 +95,38 @@ describe("T3-W17-R14 owner ledger", () => {
     await ledger.acquire(request); expect((await ledger.mirror(request)).kind).toBe("exact");
   });
 
+  it("prevents a stale mirror writer from replacing a newer nonce's canonical mirror", async () => {
+    const { ledger, kv, map } = make(); const firstTuple = tuple(nonce);
+    const firstRequest = { schema_version: 1 as const, tuple: firstTuple, caller_nonce: nonce };
+    expect((await ledger.prepare(firstRequest)).kind).toBe("prepared");
+    expect((await ledger.acquire(firstRequest)).kind).toBe("acquired");
+    let entered!: () => void; let release!: () => void;
+    const putEntered = new Promise<void>(resolve => { entered = resolve; });
+    const putGate = new Promise<void>(resolve => { release = resolve; });
+    const originalPut = kv.put.getMockImplementation()!;
+    kv.put.mockImplementation(async (key, value) => {
+      const payload = JSON.parse(value) as { caller_nonce: string };
+      if (payload.caller_nonce === nonce) { entered(); await putGate; }
+      await originalPut(key, value);
+    });
+
+    const staleWrite = ledger.mirror(firstRequest, "acquired");
+    await putEntered;
+    expect((await ledger.abort(firstRequest)).kind).toBe("aborted");
+    const nextTuple = tuple(nonce2);
+    const nextRequest = { schema_version: 1 as const, tuple: nextTuple, caller_nonce: nonce2 };
+    expect((await ledger.prepare(nextRequest)).kind).toBe("prepared");
+    expect((await ledger.acquire(nextRequest)).kind).toBe("acquired");
+    const currentMirror = await ledger.mirror(nextRequest, "acquired");
+    expect(currentMirror.kind).toBe("exact");
+    release();
+    expect((await staleWrite).kind).toBe("exact");
+
+    const persisted = await kv.get(currentMirror.key);
+    expect(persisted).not.toBeNull();
+    expect(JSON.parse(persisted!).caller_nonce).toBe(nonce2);
+  });
+
   it("rejects a caller nonce mismatch and preserves a crash-retry nonce", async () => {
     const { ledger } = make(); const t = tuple();
     const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
@@ -127,6 +159,33 @@ describe("T3-W17-R14 owner ledger", () => {
     const started = await ledger.beginEffect(request, permit.permit_id); const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "f".repeat(64) };
     let reads = 0; kv.get.mockImplementation(async key => { const raw = map.get(key) ?? null; reads++; if (reads === 2 && raw) { const x = JSON.parse(raw); x.binding.resource_id = "replacement"; return JSON.stringify(x); } return raw; });
     expect((await ledger.bind(request, permit.permit_id, started.proof!.proof_id, binding)).kind).toBe("unknown");
+  });
+
+  it("does not overwrite a conflicting binding sidecar that predates the canonical intent", async () => {
+    const { ledger, map } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t);
+    const started = await ledger.beginEffect(request, confirmed.permit!.permit_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "a".repeat(64) };
+    const key = `containment:v1:effect-binding:${t.repo}/${t.job_id}/${t.path}/${encodeURIComponent(t.effect_id)}`;
+    const preexisting = "foreign-sidecar-must-not-be-replaced";
+    map.set(key, preexisting);
+
+    const result = await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding);
+
+    expect(result.kind).not.toBe("bound");
+    expect(map.get(key)).toBe(preexisting);
+  });
+
+  it("does not replace a durable binding intent on a conflicting retry", async () => {
+    const { ledger, map } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t);
+    const started = await ledger.beginEffect(request, confirmed.permit!.permit_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "b".repeat(64) };
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    const key = `containment:v1:effect-binding:${t.repo}/${t.job_id}/${t.path}/${encodeURIComponent(t.effect_id)}`;
+    const original = map.get(key);
+    const conflict = { ...binding, resource_id: "replacement-resource", binding_sha256: "c".repeat(64) };
+
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, conflict)).kind).not.toBe("bound");
+    expect(map.get(key)).toBe(original);
   });
 
   it("returns the existing proof on retries and never authorizes a second drive", async () => {

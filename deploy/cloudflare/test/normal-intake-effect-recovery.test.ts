@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
-import { ConcurrencySlotsDO, runNormalIntakeDrain } from "../src/index";
+import worker, { ConcurrencySlotsDO, runNormalIntakeDrain } from "../src/index";
 import { containmentSpawnActiveKey, containmentSpawnAttemptKey, intakeOwnerTuple } from "../src/containment_effect_route";
-import { FakeStorage, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
+import { ctx, FakeStorage, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const BODY_SHA = "a".repeat(64);
+const READBACK_ADMIN = "normal-intake-recovery-admin";
 
 function fixture() {
   const d = makeDO();
@@ -43,6 +44,67 @@ function fixture() {
   return { d, store, slotsStorage, runtime, fetchMock, startWithEnv, teardown };
 }
 
+async function stageConfirmedIntakeOwner(f: ReturnType<typeof fixture>, eventId: string, jobId: string) {
+  const tuple = await intakeOwnerTuple("acme/repo", jobId, `containment:v1:${eventId}`, eventId);
+  const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+  expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+  expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+  const mirror = await f.d.instance.ownerMirror(request, "acquired");
+  expect(mirror.kind).toBe("exact");
+  const confirmed = await f.d.instance.ownerConfirm(
+    { ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest },
+    mirror.payload_digest!, mirror.payload_digest!,
+  );
+  expect(confirmed.kind).toBe("permit_issued");
+  return { tuple, request, mirror, confirmed };
+}
+
+function failBoundTransactionOnce(f: ReturnType<typeof fixture>) {
+  const storage = f.d.storage as unknown as { transaction: (fn: (tx: any) => Promise<unknown>) => Promise<unknown> };
+  const original = storage.transaction.bind(f.d.storage);
+  let failed = false;
+  storage.transaction = fn => original(async tx => {
+    const put = tx.put.bind(tx);
+    tx.put = async (key: string, value: unknown) => {
+      if (!failed && key.startsWith("containment:v1:spawn-attempt:")
+        && (value as { state?: string } | null)?.state === "BOUND") {
+        failed = true;
+        throw new Error("simulated crash after binding sidecar write");
+      }
+      return put(key, value);
+    };
+    return fn(tx);
+  });
+  return () => { storage.transaction = original; };
+}
+
+function loseBoundResponseOnce(f: ReturnType<typeof fixture>) {
+  const storage = f.d.storage as unknown as { transaction: (fn: (tx: any) => Promise<unknown>) => Promise<unknown> };
+  const original = storage.transaction.bind(f.d.storage);
+  let committedBound = false;
+  let lost = false;
+  storage.transaction = fn => original(async tx => {
+    const put = tx.put.bind(tx);
+    tx.put = async (key: string, value: unknown) => {
+      if (key.startsWith("containment:v1:spawn-attempt:")
+        && (value as { state?: string } | null)?.state === "BOUND") committedBound = true;
+      return put(key, value);
+    };
+    return fn(tx);
+  }).then(result => {
+    if (committedBound && !lost) { lost = true; throw new Error("simulated lost BOUND response after durable commit"); }
+    return result;
+  });
+  return () => { storage.transaction = original; };
+}
+
+async function readIntake(f: ReturnType<typeof fixture>, eventId: string) {
+  const runtime = env(f.d, f.store, { ...f.runtime, CONTAINMENT_ADMIN_KEY: READBACK_ADMIN });
+  return worker.fetch(new Request(`https://worker/internal/v1/normal-intake?event_id=${encodeURIComponent(eventId)}`, {
+    headers: { "x-corelink-internal-auth": READBACK_ADMIN },
+  }), runtime, ctx() as never);
+}
+
 async function enqueue(f: ReturnType<typeof fixture>, eventId: string, jobId: string) {
   const result = await f.d.instance.normalIntakeEnqueue({
     schema_version: 1,
@@ -61,6 +123,139 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_750_000_000_000); vi.c
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe("normal intake effect recovery", () => {
+  it.each(["absent", "unavailable"] as const)("recovers confirmed intake when the mirror KV is later %s", async failure => {
+    const f = fixture(); const eventId = `recover-confirmed-mirror-${failure}`; const jobId = "8606";
+    await enqueue(f, eventId, jobId);
+    const { tuple, mirror } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    if (failure === "absent") f.store.map.delete(mirror.key);
+    else f.store.get.mockImplementation(async key => {
+      if (key === mirror.key) throw new Error("mirror KV unavailable after durable confirmation");
+      return f.store.map.get(key) ?? null;
+    });
+
+    await runNormalIntakeDrain(f.runtime);
+
+    const record = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    expect(record.state).toBe("complete");
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(1);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
+    expect(tuple.effect_id).toBe(`containment:v1:${eventId}`);
+  });
+
+  it("persists canonical binding intent before KV and retries a pre-sidecar failure once", async () => {
+    const f = fixture(); const eventId = "binding-intent-before-kv"; const jobId = "8607";
+    await enqueue(f, eventId, jobId);
+    const { tuple, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const bindingBase = { schema_version: 1 as const, provider: "cloudflare-container", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const bindingDigest = await digest(JSON.stringify(bindingBase));
+    const attemptKey = containmentSpawnAttemptKey(tuple);
+    const originalPut = f.store.put.getMockImplementation()!;
+    let intentVisibleBeforeKv = false;
+    let failedBeforeKv = false;
+    f.store.put.mockImplementation(async (key, value) => {
+      if (key.startsWith("containment:v1:effect-binding:")) {
+        const attempt = f.d.storage.map.get(attemptKey) as Record<string, unknown>;
+        const durable = JSON.stringify(attempt);
+        intentVisibleBeforeKv = durable.includes(bindingDigest) && durable.includes(bindingBase.provider)
+          && durable.includes(bindingBase.resource_id) && durable.includes(bindingBase.idempotency_key)
+          && durable.includes(JSON.stringify(tuple)) && durable.includes(confirmed.permit!.permit_id)
+          && typeof attempt.effect_start_proof_id === "string";
+        if (!failedBeforeKv) { failedBeforeKv = true; throw new Error("simulated KV outage before binding sidecar write"); }
+      }
+      return originalPut(key, value);
+    });
+
+    await runNormalIntakeDrain(f.runtime);
+
+    expect(intentVisibleBeforeKv).toBe(true);
+    expect(f.store.map.has(`containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`)).toBe(false);
+    const firstRecord = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string; next_attempt_ms: number };
+    expect(firstRecord.state).toBe("pending");
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    const readback = await readIntake(f, eventId);
+    expect(readback.status).toBe(200);
+    expect(await readback.json()).toMatchObject({ state: "pending", effect: { kind: "owned", state: "PERMIT_ISSUED" } });
+
+    f.store.put.mockImplementation(originalPut);
+    await vi.advanceTimersByTimeAsync(Math.max(0, firstRecord.next_attempt_ms - Date.now()));
+    await runNormalIntakeDrain(f.runtime);
+
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a durable binding intent after KV write and before the final owner transaction", async () => {
+    const f = fixture(); const eventId = "binding-intent-after-kv"; const jobId = "8608";
+    await enqueue(f, eventId, jobId);
+    const { tuple } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const restoreStorage = failBoundTransactionOnce(f);
+
+    await runNormalIntakeDrain(f.runtime);
+
+    const bindingKey = `containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`;
+    expect(f.store.map.has(bindingKey)).toBe(true);
+    const firstRecord = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string; next_attempt_ms: number };
+    expect(firstRecord.state).toBe("pending");
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    const readback = await readIntake(f, eventId);
+    expect(readback.status).toBe(200);
+    expect(await readback.json()).toMatchObject({ state: "pending", effect: { kind: "owned", state: "PERMIT_ISSUED" } });
+
+    restoreStorage();
+    await vi.advanceTimersByTimeAsync(Math.max(0, firstRecord.next_attempt_ms - Date.now()));
+    await runNormalIntakeDrain(f.runtime);
+
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers after the BOUND transaction commits but its response is lost", async () => {
+    const f = fixture(); const eventId = "binding-intent-lost-bound-response"; const jobId = "8610";
+    await enqueue(f, eventId, jobId);
+    const { tuple } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const loseResponse = loseBoundResponseOnce(f);
+
+    await runNormalIntakeDrain(f.runtime);
+
+    const firstRecord = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string; next_attempt_ms: number };
+    expect(firstRecord.state).toBe("pending");
+    const attempt = f.d.storage.map.get(containmentSpawnAttemptKey(tuple)) as { state: string };
+    expect(attempt.state).toBe("BOUND");
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    const readback = await readIntake(f, eventId);
+    expect(readback.status).toBe(200);
+    expect(await readback.json()).toMatchObject({ state: "pending", effect: { kind: "owned", state: "BOUND" } });
+
+    loseResponse();
+    await vi.advanceTimersByTimeAsync(Math.max(0, firstRecord.next_attempt_ms - Date.now()));
+    await runNormalIntakeDrain(f.runtime);
+
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on a binding sidecar that disagrees with its durable intent before any provider call", async () => {
+    const f = fixture(); const eventId = "binding-intent-mismatch"; const jobId = "8609";
+    await enqueue(f, eventId, jobId);
+    const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+    const bindingBase = { schema_version: 1 as const, provider: "cloudflare-container", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+    expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    const replacementBase = { ...bindingBase, resource_id: `job:acme/repo/${jobId}-replacement` };
+    const replacement = { ...replacementBase, binding_sha256: await digest(JSON.stringify(replacementBase)) };
+    const bindingKey = `containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`;
+    f.store.map.set(bindingKey, JSON.stringify({ schema_version: 1, tuple, permit_id: confirmed.permit!.permit_id, binding: replacement }));
+
+    const readback = await readIntake(f, eventId);
+    expect(readback.status).toBe(503);
+    await runNormalIntakeDrain(f.runtime);
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("uncertain");
+  });
+
   it("keeps a fully abandoned post-DRIVING start failure recoverable", async () => {
     const f = fixture();
     await enqueue(f, "failed-start-delivery", "8601");
@@ -109,6 +304,7 @@ describe("normal intake effect recovery", () => {
     expect(committedEffect).toBe(true);
     expect(record.state).toBe("complete");
     expect(activeCount).toBe(0);
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
   });
 
   it("upgrades expired-drive uncertainty when the original live drive commits", async () => {
