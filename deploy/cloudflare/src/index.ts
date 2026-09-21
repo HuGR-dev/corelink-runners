@@ -4959,6 +4959,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       const unavailable = (reason: NormalIntakeReadbackUnavailableReason) => json({ error: "normal intake readback unavailable", reason }, 503);
       const allowedReasons = new Set<NormalIntakeReadbackUnavailableReason>([
         "owner_storage_unavailable", "orphan_sidecar", "owner_evidence", "permit", "proof",
+        "owner_kv_binding_unavailable", "owner_do_storage_unavailable", "owner_sidecar_storage_unavailable",
         "binding_unavailable", "binding_divergent", "binding_invalid",
         "mirror_unavailable", "mirror_invalid", "receipt",
         "tuple_unavailable", "ledger_unexpected", "effect_rpc_unavailable",

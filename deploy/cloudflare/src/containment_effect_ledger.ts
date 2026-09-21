@@ -232,7 +232,8 @@ export type ContainmentEffectReadback =
   | { kind: "committed"; state: "COMMITTED" }
   | { kind: "unavailable"; reason: ContainmentEffectReadbackFailure };
 export type ContainmentEffectReadbackFailure =
-  | "owner_storage_unavailable" | "orphan_sidecar" | "owner_evidence" | "permit" | "proof"
+  | "owner_storage_unavailable" | "owner_kv_binding_unavailable" | "owner_do_storage_unavailable"
+  | "owner_sidecar_storage_unavailable" | "orphan_sidecar" | "owner_evidence" | "permit" | "proof"
   | "binding_unavailable" | "binding_divergent" | "binding_invalid"
   | "mirror_unavailable" | "mirror_invalid" | "receipt" | "tuple_unavailable" | "ledger_unexpected" | "unexpected";
 
@@ -484,7 +485,7 @@ export class ContainmentEffectLedger {
   async inspectIntakeOwner(tuple: OwnerTuple): Promise<ContainmentEffectReadback> {
     const t = normalizeTuple(tuple);
     if (!t || t.path !== "intake") failReadback("owner_evidence");
-    if (!this.kv) failReadback("owner_storage_unavailable");
+    if (!this.kv) failReadback("owner_kv_binding_unavailable");
     let snapshot: { pointer: unknown; attempt: unknown; proof: unknown };
     try {
       snapshot = await this.storage.transaction(async s => ({
@@ -492,7 +493,7 @@ export class ContainmentEffectLedger {
         attempt: await s.get<unknown>(attemptKey(t)),
         proof: await s.get<unknown>(startKey(t)),
       }));
-    } catch { failReadback("owner_storage_unavailable"); }
+    } catch { failReadback("owner_do_storage_unavailable"); }
     const { pointer, attempt, proof } = snapshot;
     if (pointer === undefined && attempt === undefined) {
       if (proof !== undefined) failReadback("orphan_sidecar");
@@ -501,7 +502,7 @@ export class ContainmentEffectLedger {
         sidecars = await Promise.all([
           this.kv.get(bindingKey(t)), this.kv.get(mirrorKey(t)), this.kv.get(versionedMirrorKey(t)),
         ]);
-      } catch { failReadback("owner_storage_unavailable"); }
+      } catch { failReadback("owner_sidecar_storage_unavailable"); }
       if (sidecars.some(value => value !== null)) failReadback("orphan_sidecar");
       return { kind: "missing", state: null };
     }

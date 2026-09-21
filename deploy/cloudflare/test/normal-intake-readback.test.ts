@@ -537,7 +537,10 @@ describe("GET /internal/v1/normal-intake", () => {
   });
 
   it.each([
-    ["owner_storage_unavailable", "sidecar read failure"],
+    ["owner_storage_unavailable", "legacy storage failure reason"],
+    ["owner_kv_binding_unavailable", "missing KV binding"],
+    ["owner_do_storage_unavailable", "owner Durable Object storage failure"],
+    ["owner_sidecar_storage_unavailable", "sidecar read failure"],
     ["orphan_sidecar", "orphan sidecar secret"],
     ["owner_evidence", "missing owner pointer"],
     ["permit", "permit projection mismatch"],
@@ -557,7 +560,15 @@ describe("GET /internal/v1/normal-intake", () => {
     const eventId = `reason-${reason}`;
     await f.d.instance.normalIntakeEnqueue(intake(eventId));
 
-    if (failure === "sidecar read failure") {
+    if (failure === "legacy storage failure reason") {
+      vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({
+        kind: "unavailable", reason: "owner_storage_unavailable",
+      });
+    } else if (failure === "missing KV binding") {
+      f.d.runtimeEnv.RUNNER_JOB_PATS = undefined;
+    } else if (failure === "owner Durable Object storage failure") {
+      f.d.storage.transaction = vi.fn(async () => { throw new Error("SENTINEL_secret_token"); }) as never;
+    } else if (failure === "sidecar read failure") {
       f.store.get.mockRejectedValue(new Error("SENTINEL_secret_token"));
     } else if (failure === "orphan sidecar secret") {
       const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
