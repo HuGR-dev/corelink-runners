@@ -76,7 +76,8 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
 
 export type CanonicalEffectRouteResult =
   | { status: "committed"; receipt: ContainmentEffectReceipt; finalized: boolean }
-  | { status: "busy" | "unauthorized" | "mirror_tampered" | "claim_refused" | "before_drive_refused" | "provider_refused" | "unknown_terminal" | "unavailable"; reason?: string };
+  | { status: "busy" | "unauthorized" | "mirror_tampered" | "claim_refused" | "before_drive_refused" | "provider_refused" | "unavailable"; reason?: string }
+  | { status: "unknown_terminal"; retryable?: true; reason?: string };
 
 const hex = /^[0-9a-f]{64}$/;
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0;
@@ -100,13 +101,21 @@ function receiptFrom(record: OwnerResult["record"]): ContainmentEffectReceipt | 
   return value && value.trusted === true ? value : null;
 }
 
+function retryableUnknownTerminal(reason?: string): CanonicalEffectRouteResult {
+  return { status: "unknown_terminal", retryable: true, ...(reason ? { reason } : {}) };
+}
+
 function terminal(result: OwnerResult): CanonicalEffectRouteResult | null {
+  if (result.kind === "missing") return null;
   if (result.kind === "committed" && result.record) {
     const receipt = receiptFrom(result.record);
     if (receipt) return { status: "committed", receipt, finalized: false };
   }
   if (result.kind === "unknown" || result.kind === "legacy_unknown") return { status: "unknown_terminal" };
-  if (result.kind === "owned" && result.state === "DRIVING") return { status: "unknown_terminal" };
+  if (result.state === "DRIVING" && result.record?.state === "DRIVING"
+    && (result.kind === "owned" || result.kind === "busy" || result.kind === "already_started" || result.kind === "driving")) {
+    return retryableUnknownTerminal();
+  }
   if (result.kind === "busy" || result.kind === "already_started" || result.kind === "driving") return { status: "unknown_terminal" };
   return null;
 }
@@ -139,8 +148,10 @@ export async function runCanonicalEffect<TOpts extends object>(
     // admission. A committed pointer is already an idempotency record; asking
     // the provider or competing for the external claim again is forbidden.
     const existing = await deps.ledger.ownerObserve(containmentSpawnActiveKey(tuple), containmentSpawnAttemptKey(tuple));
-    const recovered = existing.kind === "committed" || (existing.kind === "owned" && existing.state === "DRIVING")
-      ? terminal(existing) : null;
+    // An empty unknown response cannot identify an owner tuple and is treated
+    // as a missing pair; partial or malformed ledger evidence carries both keys.
+    const recovered = existing.kind === "unknown" && !existing.attempt_key && !existing.active_pointer_key
+      ? null : terminal(existing);
     if (recovered) {
       if (recovered.status === "committed" && deps.finalize) recovered.finalized = await deps.finalize(recovered.receipt);
       return recovered;
@@ -277,7 +288,7 @@ export async function runCanonicalEffect<TOpts extends object>(
     // A concurrent retry that observes an already-started transition is
     // terminal uncertainty, never permission to invoke the provider again.
     if (driving.kind === "already_started") {
-      await releaseClaim(); return { status: "unknown_terminal", reason: "effect already driving" };
+      await releaseClaim(); return terminal(driving) ?? { status: "unknown_terminal" };
     }
     if (driving.kind !== "driving") {
       await releaseClaim();
@@ -295,14 +306,14 @@ export async function runCanonicalEffect<TOpts extends object>(
         effect_binding: boundBinding,
       });
     } catch (error) {
-      return { status: "unknown_terminal", reason: error instanceof Error ? error.message : "provider failed" };
+      return retryableUnknownTerminal(error instanceof Error ? error.message : "provider failed");
     }
     if (!provider) {
-      return { status: "unknown_terminal", reason: "provider returned no trusted receipt" };
+      return retryableUnknownTerminal("provider returned no trusted receipt");
     }
-    if ("status" in provider) return { status: "unknown_terminal", reason: provider.reason ?? "provider refused after DRIVING" };
-    if (!text(provider.resource_id) || !text(provider.receipt_id) || !text(provider.provider_signature)) return { status: "unknown_terminal", reason: "provider returned no trusted receipt" };
-    if (provider.resource_id !== boundBinding.resource_id) return { status: "unknown_terminal", reason: "provider resource mismatch" };
+    if ("status" in provider) return retryableUnknownTerminal(provider.reason ?? "provider refused after DRIVING");
+    if (!text(provider.resource_id) || !text(provider.receipt_id) || !text(provider.provider_signature)) return retryableUnknownTerminal("provider returned no trusted receipt");
+    if (provider.resource_id !== boundBinding.resource_id) return retryableUnknownTerminal("provider resource mismatch");
     const receiptBase = {
       schema_version: 1 as const,
       trusted: true as const,
@@ -326,12 +337,13 @@ export async function runCanonicalEffect<TOpts extends object>(
       receipt_sha256: await sha256(JSON.stringify(receiptBase)),
     };
     const committed = await deps.ledger.ownerCommit(req, permit.permit_id, proof.proof_id, receipt);
-    if (committed.kind !== "committed") return terminal(committed) ?? { status: "unknown_terminal" };
+    if (committed.kind !== "committed") return retryableUnknownTerminal();
     const finalized = deps.finalize ? await deps.finalize(receipt) : true;
     return { status: "committed", receipt, finalized };
   } catch (error) {
     if (!effectStarted) await releaseClaim();
-    return { status: "unavailable", reason: error instanceof Error ? error.message : "route failure" };
+    const reason = error instanceof Error ? error.message : "route failure";
+    return effectStarted ? retryableUnknownTerminal(reason) : { status: "unavailable", reason };
   } finally {
     // Preparation can mint a credential before this route wins the external
     // spawn claim. If the provider was not started, revoke only that exact

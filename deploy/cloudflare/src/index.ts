@@ -4703,7 +4703,8 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
     });
     await authority.normalIntakeSettle(event.event_id, event.body_sha256,
       result.status === "committed" ? "complete"
-        : result.status === "mirror_tampered" ? "uncertain" : "retry");
+        : result.status === "mirror_tampered"
+          || (result.status === "unknown_terminal" && result.retryable !== true) ? "uncertain" : "retry");
     if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
     else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
   }

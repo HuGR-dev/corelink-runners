@@ -188,7 +188,7 @@ export interface OwnerResult {
   schema_version: 1;
   kind: "prepared" | "acquired" | "owned" | "busy" | "legacy_unknown"
     | "permit_issued" | "already_started" | "bound" | "driving"
-    | "committed" | "aborted" | "rejected" | "unknown" | "unavailable";
+    | "committed" | "aborted" | "rejected" | "unknown" | "missing" | "unavailable";
   tuple_digest: string;
   attempt_key: string;
   active_pointer_key: string;
@@ -308,6 +308,11 @@ export class ContainmentEffectLedger {
   async observe(pointer: string, attempt: string): Promise<OwnerResult> {
     const p = await this.storage.get<OwnerRecordV1>(pointer);
     const a = await this.storage.get<OwnerRecordV1>(attempt);
+    if (p === undefined && a === undefined) {
+      return { schema_version: 1, kind: "missing", tuple_digest: "",
+        attempt_key: attempt, active_pointer_key: pointer, permit: null,
+        proof: null, state: null };
+    }
     const t = a ? normalizeTuple(a.tuple) : null;
     const permitOk = !!a && !!t && (a.permit_id === null || (permitValid((a as any).permit, t) && await sha256(t.token) === (a as any).permit.owner_token_digest));
     if (!t || pointer !== activeKey(t) || attempt !== attemptKey(t)
@@ -332,6 +337,11 @@ export class ContainmentEffectLedger {
     const record = attempt as OwnerRecordV1;
     if (record.attempt_key !== attemptKey(t) || record.nonce !== t.caller_nonce
       || !pointerValid(pointer, t, record)) throw new Error("normal intake effect corruption: invalid owner evidence");
+
+    if ((record.permit_id === null) !== (record.permit === undefined)
+      || (record.permit_id !== null && record.permit?.permit_id !== record.permit_id)) {
+      throw new Error("normal intake effect corruption: divergent permit evidence");
+    }
 
     if (record.permit_id !== null && (await sha256(t.token)) !== record.permit?.owner_token_digest) {
       throw new Error("normal intake effect corruption: invalid permit evidence");
