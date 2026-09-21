@@ -18,7 +18,6 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
-use uuid::Uuid;
 
 use crate::compute_grant::{GrantError, GrantVerifier, VerifiedGrant};
 
@@ -192,9 +191,7 @@ async fn baseline(State(state): State<Arc<ApiState>>, headers: HeaderMap, body: 
         Ok(value) => value,
         Err(_) => return bad_request("invalid baseline request"),
     };
-    if Uuid::parse_str(&body.tenant_id)
-        .map(|tenant| tenant.is_nil())
-        .unwrap_or(true)
+    if !corelink_fabric::compute_grant::is_canonical_tenant_id(&body.tenant_id)
         || !valid_period(body.period_key)
         || decimal_i64(&body.external_vcpu_ms).is_none()
         || !hex_digest(&body.evidence_digest)

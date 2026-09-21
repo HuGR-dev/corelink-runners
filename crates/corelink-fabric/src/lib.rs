@@ -46,6 +46,7 @@ pub mod billing_sink;
 pub mod billing_target;
 pub mod caps;
 pub mod compute_budget;
+pub mod compute_grant;
 pub mod compute_meter;
 // M1 WAVE-2 — grace-to-expiry tier-downgrade admission policy (WP-DOWNGRADE-GRACE).
 pub mod downgrade_grace;
