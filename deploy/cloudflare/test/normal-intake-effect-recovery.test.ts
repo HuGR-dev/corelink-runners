@@ -237,7 +237,7 @@ describe("normal intake effect recovery", () => {
     expect(f.startWithEnv).toHaveBeenCalledTimes(1);
   });
 
-  it("stops before provider start when a BOUND sidecar cannot be read for validation", async () => {
+  it.each(["persistent", "preflight"] as const)("stops before credential preparation when BOUND sidecar KV is unavailable (%s)", async failureMode => {
     const f = fixture(); const eventId = "bound-sidecar-kv-outage"; const jobId = "8612";
     await enqueue(f, eventId, jobId);
     const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
@@ -246,13 +246,22 @@ describe("normal intake effect recovery", () => {
     const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
     expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
     const bindingKey = `containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`;
+    let bindingReads = 0;
     f.store.get.mockImplementation(async key => {
-      if (key === bindingKey) throw new Error("binding KV unavailable");
+      if (key === bindingKey) {
+        bindingReads++;
+        if (failureMode === "persistent" || bindingReads === 2) {
+          throw new Error(`binding KV unavailable during BOUND ${failureMode}`);
+        }
+      }
       return f.store.map.get(key) ?? null;
     });
 
     await runNormalIntakeDrain(f.runtime);
 
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(0);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(0);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).includes("generate-jitconfig"))).toHaveLength(0);
     expect(f.startWithEnv).not.toHaveBeenCalled();
     expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("pending");
   });
@@ -282,8 +291,8 @@ describe("normal intake effect recovery", () => {
     expect(f.startWithEnv).toHaveBeenCalledTimes(1);
   });
 
-  it("fails closed on a binding sidecar that disagrees with its durable intent before any provider call", async () => {
-    const f = fixture(); const eventId = "binding-intent-mismatch"; const jobId = "8609";
+  it("fails closed on a binding sidecar that disagrees with its durable binding", async () => {
+    const f = fixture(); const eventId = "binding-sidecar-mismatch"; const jobId = "8613";
     await enqueue(f, eventId, jobId);
     const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
     const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
@@ -298,6 +307,25 @@ describe("normal intake effect recovery", () => {
     const readback = await readIntake(f, eventId);
     expect(readback.status).toBe(503);
     await runNormalIntakeDrain(f.runtime);
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("uncertain");
+  });
+
+  it("rejects a persisted BOUND binding that does not match the requested drive before credential preparation", async () => {
+    const f = fixture(); const eventId = "binding-intent-mismatch"; const jobId = "8609";
+    await enqueue(f, eventId, jobId);
+    const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+    // This is internally consistent BOUND evidence from an earlier invocation,
+    // but it does not match the binding this route is about to drive.
+    const bindingBase = { schema_version: 1 as const, provider: "previous-provider", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+    expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+
+    await runNormalIntakeDrain(f.runtime);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(0);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(0);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).includes("generate-jitconfig"))).toHaveLength(0);
     expect(f.startWithEnv).not.toHaveBeenCalled();
     expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("uncertain");
   });
