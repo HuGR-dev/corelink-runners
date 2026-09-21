@@ -132,7 +132,7 @@ describe("GET /internal/v1/normal-intake", () => {
     expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
     expect([...f.store.map.entries()]).toEqual(beforeMirror);
     expect(response.status).toBe(503);
-    expect(await response.text()).not.toContain("not-a-digest");
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
   });
 
   it.each([
