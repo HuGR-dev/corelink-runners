@@ -153,6 +153,7 @@ import {
   type ContainmentEffectReadback,
   type ContainmentEffectReadbackFailure,
   type ContainmentEffectResult,
+  type ContainmentEffectState,
   type ContainmentEffectTransition,
   type OwnerResult,
   type SpawnOwnerRequest,
@@ -4880,6 +4881,46 @@ export default {
 // added — only the outer catch is new.
 type NormalIntakeReadbackUnavailableReason = ContainmentEffectReadbackFailure
   | "delivery_readback_unavailable" | "effect_rpc_unavailable";
+type NormalIntakeEffectReadbackSuccess = Exclude<ContainmentEffectReadback, { kind: "unavailable" }>;
+const NORMAL_INTAKE_EFFECT_STATES: ReadonlySet<ContainmentEffectState> = new Set([
+  "PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "ABORTED_PRE_EFFECT", "UNKNOWN",
+]);
+
+function isReadbackRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactReadbackKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Reflect.ownKeys(value);
+  return actual.length === expected.length && expected.every(key => actual.includes(key));
+}
+
+function parseNormalIntakeEffectReadback(
+  value: unknown,
+  allowedReasons: ReadonlySet<NormalIntakeReadbackUnavailableReason>,
+): { kind: "success"; effect: NormalIntakeEffectReadbackSuccess }
+  | { kind: "unavailable"; reason: NormalIntakeReadbackUnavailableReason } {
+  const unavailable = (reason: NormalIntakeReadbackUnavailableReason) => ({ kind: "unavailable" as const, reason });
+  if (!isReadbackRecord(value) || typeof value.kind !== "string") return unavailable("unexpected");
+  if (value.kind === "unavailable") {
+    if (!hasExactReadbackKeys(value, ["kind", "reason"]) || typeof value.reason !== "string"
+      || !allowedReasons.has(value.reason as NormalIntakeReadbackUnavailableReason)) return unavailable("unexpected");
+    return unavailable(value.reason as NormalIntakeReadbackUnavailableReason);
+  }
+  if (value.kind === "missing" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === null) {
+    return { kind: "success", effect: { kind: "missing", state: null } };
+  }
+  if (value.kind === "owned" && hasExactReadbackKeys(value, ["kind", "state"])
+    && typeof value.state === "string" && NORMAL_INTAKE_EFFECT_STATES.has(value.state as ContainmentEffectState)) {
+    return { kind: "success", effect: { kind: "owned", state: value.state as ContainmentEffectState } };
+  }
+  if (value.kind === "committed" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === "COMMITTED") {
+    return { kind: "success", effect: { kind: "committed", state: "COMMITTED" } };
+  }
+  return unavailable("unexpected");
+}
 
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
@@ -4913,15 +4954,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         return unavailable("delivery_readback_unavailable");
       }
       if (!record) return json({ error: "not found" }, 404);
-      let effect: ContainmentEffectReadback;
+      let effect: unknown;
       try { effect = await authority.normalIntakeEffectInspect(record.repo, record.job_id, record.event_id); }
       catch { return unavailable("effect_rpc_unavailable"); }
       try {
-        if (effect.kind === "unavailable") {
-          const reason = allowedReasons.has(effect.reason as NormalIntakeReadbackUnavailableReason)
-            ? effect.reason as NormalIntakeReadbackUnavailableReason : "unexpected";
-          return unavailable(reason);
-        }
+        const parsedEffect = parseNormalIntakeEffectReadback(effect, allowedReasons);
+        if (parsedEffect.kind === "unavailable") return unavailable(parsedEffect.reason);
         return json({
           schema_version: record.schema_version,
           event_id: record.event_id,
@@ -4931,7 +4969,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           state: record.state,
           received_at_ms: record.received_at_ms,
           next_attempt_ms: record.next_attempt_ms,
-          effect,
+          effect: parsedEffect.effect,
         }, 200);
       } catch { return unavailable("unexpected"); }
     }

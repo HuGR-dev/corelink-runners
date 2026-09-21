@@ -659,4 +659,33 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
     expect(body).not.toContain("SENTINEL_secret_token");
   });
+
+  it.each([
+    ["unknown kind", { kind: "SENTINEL_secret_token", state: null }],
+    ["malformed owned state", { kind: "owned", state: "SENTINEL_secret_token" }],
+    ["extra success field", { kind: "missing", state: null, token: "SENTINEL_secret_token" }],
+    ["extra unavailable field", { kind: "unavailable", reason: "owner_evidence", token: "SENTINEL_secret_token" }],
+  ] as const)("rejects malformed readback DTO: %s", async (_caseName, dto) => {
+    const f = fixture();
+    const eventId = `malformed-dto-${_caseName.replaceAll(" ", "-")}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue(dto as never);
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const doWrites = countReadbackDoWrites(f);
+    const kvPutCalls = f.store.put.mock.calls.length;
+    const kvDeleteCalls = f.store.delete.mock.calls.length;
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
+    expect(body).not.toContain("SENTINEL_secret_token");
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(doWrites()).toBe(0);
+    expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
+    expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
+  });
 });
