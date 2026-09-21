@@ -4642,6 +4642,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         provider: "cloudflare-container",
         resource_id: `job:${event.repo}/${event.job_id}`,
         idempotency_key: event.effect_id,
+        allowFencedDrainPredecessor: true,
         admit: () => authority.admitDrainOwner(event.event_id, tuple),
         beforeClaim: async () => {
           if (drive === driveSpawn) prepared = await prepareSpawn(env, spawnOpts);

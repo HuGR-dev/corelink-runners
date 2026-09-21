@@ -188,7 +188,7 @@ export interface OwnerResult {
   schema_version: 1;
   kind: "prepared" | "acquired" | "owned" | "busy" | "legacy_unknown"
     | "permit_issued" | "already_started" | "bound" | "driving"
-    | "committed" | "aborted" | "rejected" | "unknown" | "missing" | "unavailable";
+    | "committed" | "aborted" | "rejected" | "unknown" | "missing" | "reaped_predecessor" | "unavailable";
   tuple_digest: string;
   attempt_key: string;
   active_pointer_key: string;
@@ -306,31 +306,117 @@ export class ContainmentEffectLedger {
   }
   private async out(t: OwnerTuple, kind: OwnerResult["kind"], state: ContainmentEffectState | null, record?: OwnerRecordV1): Promise<OwnerResult> { return { schema_version: 1, kind, tuple_digest: await ownerTupleDigest(t), attempt_key: attemptKey(t), active_pointer_key: activeKey(t), permit: null, proof: null, state, record }; }
   async observe(pointer: string, attempt: string): Promise<OwnerResult> {
-    const p = await this.storage.get<OwnerRecordV1>(pointer);
-    const a = await this.storage.get<OwnerRecordV1>(attempt);
+    const activePrefix = `${PREFIX}spawn-active:`;
+    const suffix = pointer.startsWith(activePrefix) ? pointer.slice(activePrefix.length) : null;
+    const attemptPrefix = suffix === null ? "" : `${PREFIX}spawn-attempt:${suffix}/`;
+    const nonce = attempt.startsWith(attemptPrefix) ? attempt.slice(attemptPrefix.length) : "";
+    const startSidecarKey = suffix === null ? "" : `${PREFIX}effect-start:${suffix}`;
+    const bindingSidecarKey = suffix === null ? "" : `${PREFIX}effect-binding:${suffix}`;
+    const mirrorSidecarKey = suffix === null ? "" : `${PREFIX}spawn-mirror:${suffix}`;
+    const snapshot = await this.storage.transaction(async s => ({
+      p: await s.get<OwnerPointerV1>(pointer),
+      a: await s.get<OwnerRecordV1>(attempt),
+      start: startSidecarKey ? await s.get<unknown>(startSidecarKey) : undefined,
+    }));
+    const { p, a } = snapshot;
+    const unknown = (): OwnerResult => ({ schema_version: 1, kind: "unknown", tuple_digest: "",
+      attempt_key: attempt, active_pointer_key: pointer, permit: null, proof: null, state: "UNKNOWN" });
+    if (!this.kv) return unknown();
+    const mirrorEvidence = async (): Promise<string | null | undefined> => {
+      if (!mirrorSidecarKey || !this.kv) return null;
+      try { return await this.kv.get(mirrorSidecarKey); } catch { return undefined; }
+    };
+    const bindingEvidence = async (): Promise<string | null | undefined> => {
+      if (!bindingSidecarKey || !this.kv) return null;
+      try { return await this.kv.get(bindingSidecarKey); } catch { return undefined; }
+    };
     if (p === undefined && a === undefined) {
+      if (suffix === null || !/^[0-9a-f]{32}$/.test(nonce) || snapshot.start !== undefined || !this.kv) return unknown();
+      const [binding, mirror] = await Promise.all([bindingEvidence(), mirrorEvidence()]);
+      if (binding !== null || mirror !== null) return unknown();
       return { schema_version: 1, kind: "missing", tuple_digest: "",
         attempt_key: attempt, active_pointer_key: pointer, permit: null,
         proof: null, state: null };
     }
+    // A validated pre-effect tombstone is a fenced predecessor, not an
+    // unresolved owner. Treat it as vacant for the next nonce so prepare()
+    // can atomically replace it. Every other pointer-without-this-attempt
+    // shape remains unknown and must fail closed before claim/preparation.
+    if (p !== undefined && a === undefined) {
+      const predecessor = p && typeof p === "object" ? normalizeTuple(p.tuple) : null;
+      const previousAttemptKey = predecessor && attemptKey(predecessor);
+      const noncePrefix = previousAttemptKey ? `${previousAttemptKey.slice(0, previousAttemptKey.lastIndexOf("/") + 1)}` : "";
+      const nextNonce = noncePrefix && attempt.startsWith(noncePrefix) ? attempt.slice(noncePrefix.length) : "";
+      const previous = predecessor && previousAttemptKey
+        ? await this.storage.get<OwnerRecordV1>(previousAttemptKey) : undefined;
+      let predecessorMirrorSafe = false;
+      const predecessorMirror = await mirrorEvidence();
+      if (predecessorMirror === null) predecessorMirrorSafe = true;
+      else if (predecessor && typeof predecessorMirror === "string") {
+        try {
+          const parsed = JSON.parse(predecessorMirror) as SpawnMirrorPayloadV1;
+          predecessorMirrorSafe = parsed.result === "acquired" && parsed.permit_id === null
+            && await mirrorValid(parsed, predecessor);
+        } catch { /* malformed predecessor sidecar remains fenced */ }
+      }
+      if (predecessor && activeKey(predecessor) === pointer && nextNonce !== predecessor.caller_nonce
+        && /^[0-9a-f]{32}$/.test(nextNonce) && p.state === "ABORTED_PRE_EFFECT" && p.tombstone === true
+        && previous && recordValid(previous, predecessor) && previous.state === "ABORTED_PRE_EFFECT"
+        && previous.tombstone === true && pointerMatchesAttempt(p, previous, predecessor)
+        && !!this.kv && snapshot.start === undefined
+        && await bindingEvidence() === null && predecessorMirrorSafe) {
+        return { schema_version: 1, kind: "reaped_predecessor", tuple_digest: "",
+          attempt_key: attempt, active_pointer_key: pointer, permit: null,
+          proof: null, state: "ABORTED_PRE_EFFECT" };
+      }
+      return unknown();
+    }
     const t = a ? normalizeTuple(a.tuple) : null;
-    const permitOk = !!a && !!t && (a.permit_id === null || (permitValid((a as any).permit, t) && await sha256(t.token) === (a as any).permit.owner_token_digest));
+    const permitOk = !!a && !!t && (a.permit_id === null
+      ? a.permit === undefined
+      : permitValid(a.permit, t) && a.permit?.permit_id === a.permit_id
+        && await sha256(t.token) === a.permit.owner_token_digest);
     if (!t || pointer !== activeKey(t) || attempt !== attemptKey(t)
-      || !p || !a || !permitOk || !pointerMatchesAttempt(p, a, t) || p.attempt_key !== attempt || p.nonce !== a.nonce) {
-      return { schema_version: 1, kind: "unknown", tuple_digest: "",
-        attempt_key: attempt, active_pointer_key: pointer, permit: null,
-        proof: null, state: "UNKNOWN" };
+      || !p || !a || !permitOk || !recordValid(a, t) || !pointerMatchesAttempt(p, a, t) || p.attempt_key !== attempt || p.nonce !== a.nonce) {
+      return unknown();
+    }
+    if (a.effect_start_proof_id !== null) {
+      if (!proofValid(snapshot.start, t, a.permit_id ?? "") || snapshot.start.proof_id !== a.effect_start_proof_id) return unknown();
+    } else if (snapshot.start !== undefined) return unknown();
+    const bindingSidecar = await bindingEvidence();
+    if (a.binding_id !== null) {
+      if (!a.permit_id || !a.binding || !this.kv || typeof bindingSidecar !== "string"
+        || !bindingPayloadValid(bindingSidecar, t, a.permit_id, a.binding)) return unknown();
+    } else if (bindingSidecar !== null) return unknown();
+    const mirror = await mirrorEvidence();
+    if (mirror === undefined) return unknown();
+    if (mirror !== null) {
+      try {
+        const parsed = JSON.parse(mirror);
+        if (!(await mirrorValid(parsed, t))
+          || (a.permit_id !== null && (parsed.result !== "acquired" || parsed.permit_id !== null))) return unknown();
+      } catch { return unknown(); }
     }
     return this.out(a.tuple, a.state === "COMMITTED" ? "committed" : "owned", a.state, a);
   }
   async inspectIntakeOwner(tuple: OwnerTuple): Promise<ContainmentEffectReadback> {
     const t = normalizeTuple(tuple);
     if (!t || t.path !== "intake") throw new Error("invalid normal intake effect identity");
-    const [pointer, attempt] = await Promise.all([
-      this.storage.get<unknown>(activeKey(t)),
-      this.storage.get<unknown>(attemptKey(t)),
-    ]);
-    if (pointer === undefined && attempt === undefined) return { kind: "missing", state: null };
+    if (!this.kv) throw new Error("normal intake readback sidecar evidence unavailable");
+    const snapshot = await this.storage.transaction(async s => ({
+      pointer: await s.get<unknown>(activeKey(t)),
+      attempt: await s.get<unknown>(attemptKey(t)),
+      proof: await s.get<unknown>(startKey(t)),
+    }));
+    const { pointer, attempt, proof } = snapshot;
+    if (pointer === undefined && attempt === undefined) {
+      if (proof !== undefined) throw new Error("normal intake readback has unresolved sidecar evidence");
+      try {
+        const [binding, mirror] = await Promise.all([this.kv.get(bindingKey(t)), this.kv.get(mirrorKey(t))]);
+        if (binding !== null || mirror !== null) throw new Error("normal intake readback has unresolved sidecar evidence");
+      } catch { throw new Error("normal intake readback sidecar evidence unavailable"); }
+      return { kind: "missing", state: null };
+    }
     if (pointer === undefined || attempt === undefined || !recordValid(attempt, t)
       || !pointerMatchesAttempt(pointer, attempt, t)) throw new Error("normal intake effect corruption: owner evidence mismatch");
 
@@ -346,7 +432,6 @@ export class ContainmentEffectLedger {
     if (record.permit_id !== null && (await sha256(t.token)) !== record.permit?.owner_token_digest) {
       throw new Error("normal intake effect corruption: invalid permit evidence");
     }
-    const proof = await this.storage.get<unknown>(startKey(t));
     if (record.effect_start_proof_id !== null) {
       if (!proofValid(proof, t, record.permit_id ?? "") || proof.proof_id !== record.effect_start_proof_id) {
         throw new Error("normal intake effect corruption: invalid start proof");

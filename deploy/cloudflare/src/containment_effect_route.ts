@@ -53,6 +53,8 @@ export interface CanonicalEffectRouteDeps<TOpts extends object> {
   release?: () => Promise<void>;
   /** Authority-only admission fence; runs before every mutable external seam. */
   admit?: () => Promise<boolean>;
+  /** Only the drain path may replace a validated predecessor after strict admission. */
+  allowFencedDrainPredecessor?: boolean;
   beforeClaim?: () => Promise<void>;
   /**
    * Undo credentials prepared by this invocation when the provider was never
@@ -107,6 +109,8 @@ function retryableUnknownTerminal(reason?: string): CanonicalEffectRouteResult {
 
 function terminal(result: OwnerResult): CanonicalEffectRouteResult | null {
   if (result.kind === "missing") return null;
+  if (result.kind === "reaped_predecessor") return { status: "unknown_terminal" };
+  if (result.state === "UNKNOWN") return { status: "unknown_terminal" };
   if (result.kind === "committed" && result.record) {
     const receipt = receiptFrom(result.record);
     if (receipt) return { status: "committed", receipt, finalized: false };
@@ -143,14 +147,19 @@ export async function runCanonicalEffect<TOpts extends object>(
   };
 
   try {
-    if (deps.admit && !(await deps.admit())) return { status: "busy" };
+    const admitted = deps.admit ? await deps.admit() : false;
+    if (deps.admit && !admitted) return { status: "busy" };
     // Finalization retries must observe the exact owner tuple before claim
     // admission. A committed pointer is already an idempotency record; asking
     // the provider or competing for the external claim again is forbidden.
     const existing = await deps.ledger.ownerObserve(containmentSpawnActiveKey(tuple), containmentSpawnAttemptKey(tuple));
+    const fencedDrainPredecessor = existing.kind === "reaped_predecessor"
+      && tuple.path === "drain" && deps.allowFencedDrainPredecessor === true && admitted;
+    if (existing.kind === "reaped_predecessor" && !fencedDrainPredecessor) return terminal(existing)!;
     // An empty unknown response cannot identify an owner tuple and is treated
     // as a missing pair; partial or malformed ledger evidence carries both keys.
-    const recovered = existing.kind === "unknown" && !existing.attempt_key && !existing.active_pointer_key
+    const recovered = fencedDrainPredecessor ? null
+      : existing.kind === "unknown" && !existing.attempt_key && !existing.active_pointer_key
       ? null : terminal(existing);
     if (recovered) {
       if (recovered.status === "committed" && deps.finalize) recovered.finalized = await deps.finalize(recovered.receipt);

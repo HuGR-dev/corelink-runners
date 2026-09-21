@@ -120,6 +120,22 @@ describe("GET /internal/v1/normal-intake", () => {
     expect((await read(f, "?event_id=absent-delivery")).status).toBe(404);
   });
 
+  it.each(["start proof", "binding", "mirror"] as const)("fails closed when an intake %s sidecar survives without owner records", async sidecar => {
+    const f = fixture(); const eventId = `orphan-${sidecar.replaceAll(" ", "-")}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const activeKey = `containment:v1:spawn-active:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    const suffix = activeKey.slice("containment:v1:spawn-active:".length);
+    if (sidecar === "start proof") f.d.storage.map.set(`containment:v1:effect-start:${suffix}`, { stale: true });
+    else if (sidecar === "binding") f.store.map.set(`containment:v1:effect-binding:${suffix}`, "stale");
+    else f.store.map.set(`containment:v1:spawn-mirror:${suffix}`, "stale");
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
   it("fails closed when the stored delivery record is malformed", async () => {
     const f = fixture();
     f.d.storage.map.set("normal-inbox:v1:event:corrupt-delivery", { schema_version: 1, event_id: "corrupt-delivery", body_sha256: "not-a-digest" });

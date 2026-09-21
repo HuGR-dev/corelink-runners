@@ -37,10 +37,89 @@ function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
 }
 
 describe("canonical containment effect route", () => {
+  it.each(["start proof", "binding", "mirror"] as const)("fails closed without owners when a %s sidecar survives", async sidecar => {
+    const { ledger, storage, values } = make(); const t = tuple();
+    const activeKey = containmentSpawnActiveKey(t);
+    const suffix = activeKey.slice("containment:v1:spawn-active:".length);
+    if (sidecar === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { stale: true });
+    else if (sidecar === "binding") values.set(`containment:v1:effect-binding:${suffix}`, "stale");
+    else values.set(`containment:v1:spawn-mirror:${suffix}`, "stale");
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => true); const drive = vi.fn(async () => ({ resource_id: "resource", receipt_id: "r", provider_signature: "s" }));
+
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive });
+
+    expect(result).toMatchObject({ status: "unknown_terminal" });
+    expect(result).not.toHaveProperty("retryable");
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+  });
+
+  it.each(["permit", "start proof", "binding", "mirror"] as const)("does not retry malformed complete DRIVING %s evidence", async kind => {
+    const { ledger, storage, values } = make(); const t = tuple();
+    const failedProvider = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => { throw new Error("provider response lost"); } });
+    expect(failedProvider).toMatchObject({ status: "unknown_terminal", retryable: true });
+    const attemptKey = containmentSpawnAttemptKey(t);
+    if (kind === "permit") {
+      const attempt = storage.map.get(attemptKey) as any;
+      attempt.permit.permit_id = `${attempt.permit_id}-mismatch`;
+      storage.map.set(attemptKey, attempt);
+    } else {
+      const activeKey = containmentSpawnActiveKey(t);
+      const suffix = activeKey.slice("containment:v1:spawn-active:".length);
+      if (kind === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { corrupted: true });
+      else if (kind === "binding") values.set(`containment:v1:effect-binding:${suffix}`, "corrupted");
+      else values.set(`containment:v1:spawn-mirror:${suffix}`, "corrupted");
+    }
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => { throw new Error("must not reacquire malformed DRIVING owner"); });
+    const retry = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive: async () => undefined });
+
+    expect(retry).toMatchObject({ status: "unknown_terminal" });
+    expect(retry).not.toHaveProperty("retryable");
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
+  });
+
+  it.each(["PERMIT_ISSUED", "BOUND"] as const)("rejects a nested/top permit mismatch in %s before retry preparation", async state => {
+    const { ledger, storage } = make(); const t = tuple();
+    const base = deps(ledger, t);
+    const first = state === "PERMIT_ISSUED"
+      ? await runCanonicalEffect({ ...base, beforeBegin: async () => false })
+      : await runCanonicalEffect({ ...base, ledger: { ...base.ledger, ownerMarkDriving: async () => { throw new Error("crash after bind"); } } });
+    expect(first.status).toBe(state === "PERMIT_ISSUED" ? "before_drive_refused" : "unavailable");
+    const attemptKey = containmentSpawnAttemptKey(t);
+    const attempt = storage.map.get(attemptKey) as any;
+    expect(attempt.state).toBe(state);
+    attempt.permit.permit_id = `${attempt.permit_id}-mismatch`;
+    storage.map.set(attemptKey, attempt);
+
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => true);
+    const retry = await runCanonicalEffect({ ...base, beforeClaim, claim });
+
+    expect(retry).toMatchObject({ status: "unknown_terminal" });
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
+  });
+
+  it.each(["intake", "redrive", "drain without strict admission"] as const)("does not replace a reaped predecessor on %s", async path => {
+    const { ledger } = make(); const base = tuple();
+    const t = path === "intake" ? base : path === "redrive"
+      ? { ...base, path: "redrive" as const, reservation_epoch: 3, drain_owner: base.owner, drain_lease_epoch: base.lease_epoch }
+      : drainTuple(base);
+    const common = deps(ledger, t);
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => true);
+    const result = await runCanonicalEffect({
+      ...common,
+      ledger: { ...common.ledger, ownerObserve: async () => ({ kind: "reaped_predecessor", schema_version: 1, tuple_digest: "", attempt_key: "a", active_pointer_key: "p", permit: null, proof: null, state: "ABORTED_PRE_EFFECT" }) as any },
+      allowFencedDrainPredecessor: true,
+      ...(path === "drain without strict admission" ? {} : { admit: async () => true }),
+      beforeClaim, claim,
+    });
+
+    expect(result).toMatchObject({ status: "unknown_terminal" });
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
+  });
+
   it("refuses an unauthorized mirror and never drives", async () => {
     const { ledger, kv, values } = make(); const t = tuple(); let drives = 0; let reads = 0;
     let legacyPermits = 0;
-    kv.get.mockImplementation(async key => { const raw = values.get(key) ?? null; reads++; return raw && reads === 1 ? `${raw}tampered` : raw; });
+    kv.get.mockImplementation(async key => { const raw = values.get(key) ?? null; reads++; return key.includes("spawn-mirror:") && raw && reads >= 3 ? `${raw}tampered` : raw; });
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeConfirm: async () => { legacyPermits++; return null; }, drive: async () => { drives++; return undefined; } });
     expect(["unauthorized", "mirror_tampered"]).toContain(result.status); expect(drives).toBe(0); expect(legacyPermits).toBe(0);
   });
@@ -237,8 +316,11 @@ describe("canonical containment effect route", () => {
     expect(attempt.permit_id).toBeNull(); expect(attempt.binding_id).toBeNull(); expect(attempt.effect_start_proof_id).toBeNull(); expect(attempt.effect_started).toBe(false);
     expect(active.permit_id).toBeNull(); expect(active.binding_id).toBeNull(); expect(active.effect_start_proof_id).toBeNull();
     const next = { ...t, owner: "drain:other", token: "drain-other", lease_epoch: 3, caller_nonce: "1234567890abcdef1234567890abcdef" };
-    const second = await runCanonicalEffect({ ...deps(ledger, next), beforeConfirm: async () => { throw new Error("must not be reached"); }, drive: async () => { drives++; return undefined; } });
-    expect(second.status).toBe("unknown_terminal"); expect(drives).toBe(0); expect(firstRelease).toBe(0);
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => { throw new Error("must not claim frozen owner"); });
+    const second = await runCanonicalEffect({ ...deps(ledger, next), beforeClaim, claim, beforeConfirm: async () => { throw new Error("must not be reached"); }, drive: async () => { drives++; return undefined; } });
+    expect(second.status).toBe("unknown_terminal"); expect(second).not.toHaveProperty("retryable");
+    expect(drives).toBe(0); expect(firstRelease).toBe(0);
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled();
   });
 
   it("does not claim an unverified freeze and retains the current claim", async () => {

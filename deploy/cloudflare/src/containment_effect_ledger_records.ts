@@ -112,7 +112,7 @@ export function recordValid(v: unknown, t: OwnerTuple): v is OwnerRecordV1 {
     || r.effect_id !== t.effect_id || r.owner !== t.owner || r.token !== t.token || r.lease_epoch !== t.lease_epoch
     || r.drain_owner !== t.drain_owner || r.drain_lease_epoch !== t.drain_lease_epoch || r.caller_nonce !== t.caller_nonce
     || JSON.stringify(r.tuple) !== JSON.stringify(t) || !states.includes(r.state as string)
-    || (r.permit_id !== null && !permitValid(r.permit, t))
+    || (r.permit_id !== null && (!permitValid(r.permit, t) || r.permit?.permit_id !== r.permit_id))
     || (r.permit_id === null && r.permit !== undefined)
     || (r.binding_id !== null && !bindingValid(r.binding, r.binding_id ?? null))
     || (r.binding_id === null && r.binding !== undefined)
