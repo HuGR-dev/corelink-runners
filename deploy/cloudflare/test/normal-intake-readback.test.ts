@@ -644,7 +644,7 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
   });
 
-  it("does not expose a reason for missing authentication and maps an unknown DO reason to unexpected", async () => {
+  it("does not expose a reason for missing authentication and attributes canonical DO unexpected", async () => {
     const f = fixture();
     const eventId = "reason-auth-and-fallback";
     await f.d.instance.normalIntakeEnqueue(intake(eventId));
@@ -653,12 +653,29 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(await missingAuth.json()).toEqual({ error: "unauthorized" });
 
     vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({
-      kind: "unavailable", reason: "SENTINEL_secret_token",
+      kind: "unavailable", reason: "unexpected",
     } as never);
     const response = await read(f, `?event_id=${eventId}`);
     expect(response.status).toBe(503);
     const body = await response.text();
-    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "effect_do_unexpected" });
+    expect(body).not.toContain("SENTINEL_secret_token");
+  });
+
+  it("maps an exception after effect RPC in the response boundary without exposing it", async () => {
+    const f = fixture();
+    const eventId = "readback-response-boundary-failure";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const record = await f.d.instance.normalIntakeInspect(eventId);
+    expect(record).not.toBeNull();
+    Object.defineProperty(record!, "state", { get() { throw new Error("SENTINEL_secret_token"); } });
+
+    vi.spyOn(f.d.instance, "normalIntakeInspect").mockResolvedValue(record);
+    const response = await read(f, `?event_id=${eventId}`);
+
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "readback_response_unavailable" });
     expect(body).not.toContain("SENTINEL_secret_token");
   });
 
@@ -670,6 +687,7 @@ describe("GET /internal/v1/normal-intake", () => {
     ["symbol extra field", symbolExtraEffectDto],
     ["custom prototype", customPrototypeEffectDto],
     ["extra unavailable field", { kind: "unavailable", reason: "owner_evidence", token: "SENTINEL_secret_token" }],
+    ["unknown unavailable reason", { kind: "unavailable", reason: "SENTINEL_secret_token" }],
   ] as const)("rejects malformed readback DTO: %s", async (_caseName, dto) => {
     const f = fixture();
     const eventId = `malformed-dto-${_caseName.replaceAll(" ", "-")}`;
@@ -685,7 +703,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const body = await response.text();
 
     expect(response.status).toBe(503);
-    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "effect_dto_invalid" });
     expect(body).not.toContain("SENTINEL_secret_token");
     expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
     expect([...f.store.map.entries()]).toEqual(beforeKv);

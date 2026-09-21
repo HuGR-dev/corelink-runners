@@ -4879,8 +4879,9 @@ export default {
 // The actual route table, factored out of `fetch` so the top-level guard above
 // can wrap it uniformly. Behavior is byte-identical to before the guard was
 // added — only the outer catch is new.
-type NormalIntakeReadbackUnavailableReason = ContainmentEffectReadbackFailure
-  | "delivery_readback_unavailable" | "effect_rpc_unavailable";
+type NormalIntakeReadbackUnavailableReason = Exclude<ContainmentEffectReadbackFailure, "unexpected">
+  | "delivery_readback_unavailable" | "effect_rpc_unavailable" | "effect_do_unexpected"
+  | "effect_dto_invalid" | "readback_response_unavailable";
 type NormalIntakeEffectReadbackSuccess = Exclude<ContainmentEffectReadback, { kind: "unavailable" }>;
 type NormalIntakeOwnedEffectState = Exclude<ContainmentEffectState, "COMMITTED">;
 const NORMAL_INTAKE_OWNED_EFFECT_STATES: ReadonlySet<NormalIntakeOwnedEffectState> = new Set([
@@ -4904,10 +4905,13 @@ function parseNormalIntakeEffectReadback(
 ): { kind: "success"; effect: NormalIntakeEffectReadbackSuccess }
   | { kind: "unavailable"; reason: NormalIntakeReadbackUnavailableReason } {
   const unavailable = (reason: NormalIntakeReadbackUnavailableReason) => ({ kind: "unavailable" as const, reason });
-  if (!isReadbackRecord(value) || typeof value.kind !== "string") return unavailable("unexpected");
+  if (!isReadbackRecord(value) || typeof value.kind !== "string") return unavailable("effect_dto_invalid");
   if (value.kind === "unavailable") {
-    if (!hasExactReadbackKeys(value, ["kind", "reason"]) || typeof value.reason !== "string"
-      || !allowedReasons.has(value.reason as NormalIntakeReadbackUnavailableReason)) return unavailable("unexpected");
+    if (!hasExactReadbackKeys(value, ["kind", "reason"]) || typeof value.reason !== "string") {
+      return unavailable("effect_dto_invalid");
+    }
+    if (value.reason === "unexpected") return unavailable("effect_do_unexpected");
+    if (!allowedReasons.has(value.reason as NormalIntakeReadbackUnavailableReason)) return unavailable("effect_dto_invalid");
     return unavailable(value.reason as NormalIntakeReadbackUnavailableReason);
   }
   if (value.kind === "missing" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === null) {
@@ -4920,7 +4924,7 @@ function parseNormalIntakeEffectReadback(
   if (value.kind === "committed" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === "COMMITTED") {
     return { kind: "success", effect: { kind: "committed", state: "COMMITTED" } };
   }
-  return unavailable("unexpected");
+  return unavailable("effect_dto_invalid");
 }
 
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -4944,7 +4948,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         "binding_unavailable", "binding_divergent", "binding_invalid",
         "mirror_unavailable", "mirror_invalid", "receipt",
         "tuple_unavailable", "ledger_unexpected", "effect_rpc_unavailable",
-        "delivery_readback_unavailable", "unexpected",
+        "delivery_readback_unavailable",
       ]);
       let authority: ReturnType<typeof containmentAuthority>;
       let record: NormalIntakeRecord | null;
@@ -4972,7 +4976,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           next_attempt_ms: record.next_attempt_ms,
           effect: parsedEffect.effect,
         }, 200);
-      } catch { return unavailable("unexpected"); }
+      } catch { return unavailable("readback_response_unavailable"); }
     }
 
     // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────
