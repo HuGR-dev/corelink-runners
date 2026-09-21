@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import worker, { runNormalIntakeDrain } from "../src/index";
-import { ctx, env, FakeStorage, kv, makeDO, ns } from "./containment-redrive-test-helpers";
+import { intakeOwnerTuple } from "../src/containment_effect_route";
+import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const ADMIN = "normal-intake-readback-admin";
 const BODY_SHA = "b".repeat(64);
@@ -15,7 +16,7 @@ function intake(event_id: string) {
   };
 }
 
-function fixture(options: { providerThrows?: boolean } = {}) {
+function fixture() {
   const d = makeDO();
   const store = kv();
   const runtime = env(d, store, {
@@ -42,10 +43,34 @@ function fixture(options: { providerThrows?: boolean } = {}) {
   });
   vi.stubGlobal("fetch", fetchMock);
   vi.mocked(getContainer).mockReturnValue({
-    startWithEnv: vi.fn(async () => { if (options.providerThrows) throw new Error("provider response lost"); }),
+    startWithEnv: vi.fn(async () => {}),
     teardown: vi.fn(async () => {}),
   } as never);
   return { d, store, runtime, fetchMock };
+}
+
+async function seedDrivingEffect(f: ReturnType<typeof fixture>, eventId: string) {
+  const effectId = `containment:v1:${eventId}`;
+  const tuple = await intakeOwnerTuple("acme/repo", "8201", effectId, eventId);
+  const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+  expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+  expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+  const mirror = await f.d.instance.ownerMirror(request, "acquired");
+  expect(mirror.kind).toBe("exact");
+  const confirmed = await f.d.instance.ownerConfirm(
+    { ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest },
+    mirror.payload_digest!, mirror.payload_digest!,
+  );
+  expect(confirmed.kind).toBe("permit_issued");
+  const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+  expect(started.proof).not.toBeNull();
+  const bindingBase = {
+    schema_version: 1 as const, provider: "cloudflare-container", resource_id: "job:acme/repo/8201", idempotency_key: effectId,
+  };
+  const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+  const bound = await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding);
+  expect(bound.kind).toBe("bound");
+  expect((await f.d.instance.ownerMarkDriving(request, confirmed.permit!.permit_id, started.proof!.proof_id)).kind).toBe("driving");
 }
 
 function readRequest(query = "", auth?: string): Request {
@@ -67,6 +92,11 @@ describe("GET /internal/v1/normal-intake", () => {
     expect((await read(f, "?event_id=delivery-1", "wrong")).status).toBe(401);
   });
 
+  it("returns 401 when the key is configured but the header is missing", async () => {
+    const f = fixture();
+    expect((await worker.fetch(readRequest("?event_id=delivery-1"), f.runtime, ctx() as never)).status).toBe(401);
+  });
+
   it.each([
     ["missing event_id", ""],
     ["empty event_id", "?event_id="],
@@ -75,7 +105,14 @@ describe("GET /internal/v1/normal-intake", () => {
     ["a control character", "?event_id=%00"],
   ])("rejects %s with 400", async (_label, query) => {
     const f = fixture();
-    expect((await read(f, query)).status).toBe(400);
+    await f.d.instance.normalIntakeEnqueue(intake("unchanged-delivery"));
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeMirror = structuredClone([...f.store.map.entries()]);
+    const response = await read(f, query);
+
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeMirror);
+    expect(response.status).toBe(400);
   });
 
   it("returns 404 for a well-formed lookup with no durable delivery", async () => {
@@ -86,24 +123,33 @@ describe("GET /internal/v1/normal-intake", () => {
   it("fails closed when the stored delivery record is malformed", async () => {
     const f = fixture();
     f.d.storage.map.set("normal-inbox:v1:event:corrupt-delivery", { schema_version: 1, event_id: "corrupt-delivery", body_sha256: "not-a-digest" });
+    f.store.map.set("spawn:readback-snapshot", "unchanged");
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeMirror = structuredClone([...f.store.map.entries()]);
 
     const response = await read(f, "?event_id=corrupt-delivery");
 
-    expect(response.status).not.toBe(200);
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeMirror);
+    expect(response.status).toBe(503);
     expect(await response.text()).not.toContain("not-a-digest");
   });
 
   it.each([
-    ["pending", false, "pending"],
-    ["uncertain", true, "uncertain"],
-    ["complete", false, "complete"],
-  ] as const)("returns a sanitized read-only %s record and canonical effect state", async (label, providerThrows, expectedState) => {
-    const f = fixture({ providerThrows });
+    ["pending", "pending"],
+    ["uncertain", "uncertain"],
+    ["complete", "complete"],
+  ] as const)("returns a sanitized read-only %s record and canonical effect state", async (label, expectedState) => {
+    const f = fixture();
     const eventId = `readback-${label}`;
     await f.d.instance.normalIntakeEnqueue(intake(eventId));
-    if (label !== "pending") await runNormalIntakeDrain(f.runtime);
+    if (label === "uncertain") {
+      await seedDrivingEffect(f, eventId);
+      await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "uncertain");
+    }
+    if (label === "complete") await runNormalIntakeDrain(f.runtime);
 
-    const stored = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
+    const stored = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string; received_at_ms: number; next_attempt_ms: number };
     expect(stored.state).toBe(expectedState);
     const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
     const beforeMirror = structuredClone([...f.store.map.entries()]);
@@ -117,12 +163,15 @@ describe("GET /internal/v1/normal-intake", () => {
     ]);
     expect(body).toMatchObject({
       schema_version: 1, event_id: eventId, job_id: "8201", repo: "acme/repo", installation_id: "42", state: expectedState,
+      received_at_ms: stored.received_at_ms, next_attempt_ms: stored.next_attempt_ms,
     });
     expect(Object.keys(body.effect).sort()).toEqual(["kind", "state"]);
-    expect(typeof body.effect.kind).toBe("string");
-    expect(typeof body.effect.state).toBe("string");
-    if (label === "uncertain") expect(body.effect.state).toBe("DRIVING");
-    if (label === "complete") expect(body.effect.state).toBe("COMMITTED");
+    const expectedEffect = label === "pending"
+      ? { kind: "missing", state: null }
+      : label === "uncertain"
+        ? { kind: "owned", state: "DRIVING" }
+        : { kind: "committed", state: "COMMITTED" };
+    expect(body.effect).toEqual(expectedEffect);
     expect(JSON.stringify(body)).not.toContain(BODY_SHA);
     expect(JSON.stringify(body)).not.toContain("private-label");
     expect(JSON.stringify(body)).not.toContain("secret-");
