@@ -135,6 +135,40 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
   });
 
+  it("fails closed when canonical attempt permit evidence disagrees with its projection", async () => {
+    const f = fixture();
+    const eventId = "permit-evidence-mismatch";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    await seedDrivingEffect(f, eventId);
+    await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "uncertain");
+
+    const attemptEntry = [...f.d.storage.map.entries()].find(([key]) =>
+      key.startsWith("containment:v1:spawn-attempt:acme/repo/8201/intake/"));
+    expect(attemptEntry).toBeDefined();
+    const [attemptKey, rawAttempt] = attemptEntry!;
+    const attempt = structuredClone(rawAttempt) as {
+      permit_id: string; permit: { permit_id: string }; caller_nonce: string; tuple: { token: string };
+    };
+    expect(attempt.permit.permit_id).toBe(attempt.permit_id);
+    const mismatchedPermitId = "nested-permit-id-mismatch-secret";
+    attempt.permit.permit_id = mismatchedPermitId;
+    f.d.storage.map.set(attemptKey, attempt);
+
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeMirror = structuredClone([...f.store.map.entries()]);
+    const response = await read(f, `?event_id=${eventId}`);
+
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeMirror);
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable" });
+    expect(body).not.toContain(attempt.permit_id);
+    expect(body).not.toContain(mismatchedPermitId);
+    expect(body).not.toContain(attempt.caller_nonce);
+    expect(body).not.toContain(attempt.tuple.token);
+  });
+
   it.each([
     ["pending", "pending"],
     ["uncertain", "uncertain"],
