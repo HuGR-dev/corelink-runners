@@ -141,6 +141,7 @@ import {
 import { confirmInstallationRepositories } from "./reconciler_membership";
 import {
   ContainmentEffectLedger,
+  containmentEffectReadbackFailure,
   containmentEffectPointerKey,
   type ContainmentEffectAttempt,
   type ContainmentEffectBinding,
@@ -630,7 +631,8 @@ export class ContainmentDO extends DurableObject<Env> {
   async normalIntakeEffectInspect(repo: string, jobId: string, eventId: string): Promise<ContainmentEffectReadback> {
     const effectId = `containment:v1:${eventId}`;
     const tuple = await intakeOwnerTuple(repo, jobId, effectId, eventId);
-    return this.effectLedger().inspectIntakeOwner(tuple);
+    try { return await this.effectLedger().inspectIntakeOwner(tuple); }
+    catch (error) { return { kind: "unavailable", reason: containmentEffectReadbackFailure(error) }; }
   }
 
   async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
@@ -4885,11 +4887,28 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       if (params.length !== 1 || params[0][0] !== "event_id" || !isNormalIntakeEventId(params[0][1])) {
         return json({ error: "invalid normal intake query" }, 400);
       }
+      const unavailable = (reason: string) => json({ error: "normal intake readback unavailable", reason }, 503);
+      const allowedReasons = new Set([
+        "owner_storage_unavailable", "orphan_sidecar", "owner_evidence", "permit", "proof",
+        "binding_unavailable", "binding_divergent", "binding_invalid",
+        "mirror_unavailable", "mirror_invalid", "receipt",
+        "delivery_readback_unavailable", "unexpected",
+      ]);
+      let authority: ReturnType<typeof containmentAuthority>;
+      let record: NormalIntakeRecord | null;
       try {
-        const authority = containmentAuthority(env);
-        const record = await authority.normalIntakeInspect(params[0][1]);
-        if (!record) return json({ error: "not found" }, 404);
+        authority = containmentAuthority(env);
+        record = await authority.normalIntakeInspect(params[0][1]);
+      } catch {
+        return unavailable("delivery_readback_unavailable");
+      }
+      if (!record) return json({ error: "not found" }, 404);
+      try {
         const effect = await authority.normalIntakeEffectInspect(record.repo, record.job_id, record.event_id);
+        if (effect.kind === "unavailable") {
+          const reason = allowedReasons.has(effect.reason) ? effect.reason : "unexpected";
+          return unavailable(reason);
+        }
         return json({
           schema_version: record.schema_version,
           event_id: record.event_id,
@@ -4901,9 +4920,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
           next_attempt_ms: record.next_attempt_ms,
           effect,
         }, 200);
-      } catch {
-        return json({ error: "normal intake readback unavailable" }, 503);
-      }
+      } catch { return unavailable("unexpected"); }
     }
 
     // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────

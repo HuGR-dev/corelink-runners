@@ -164,7 +164,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "orphan_sidecar" });
   });
 
   it("fails closed when the stored delivery record is malformed", async () => {
@@ -179,7 +179,7 @@ describe("GET /internal/v1/normal-intake", () => {
     expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
     expect([...f.store.map.entries()]).toEqual(beforeMirror);
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "delivery_readback_unavailable" });
   });
 
   it("fails closed when canonical attempt permit evidence disagrees with its projection", async () => {
@@ -209,7 +209,7 @@ describe("GET /internal/v1/normal-intake", () => {
     expect([...f.store.map.entries()]).toEqual(beforeMirror);
     expect(response.status).toBe(503);
     const body = await response.text();
-    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable" });
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "permit" });
     expect(body).not.toContain(attempt.permit_id);
     expect(body).not.toContain(mismatchedPermitId);
     expect(body).not.toContain(attempt.caller_nonce);
@@ -255,7 +255,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "mirror_invalid" });
   });
 
   it("keeps legacy confirmed owners dependent on their live canonical mirror when no digest was recorded", async () => {
@@ -279,7 +279,7 @@ describe("GET /internal/v1/normal-intake", () => {
     f.store.map.delete(legacyMirrorKey);
     const missingMirror = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
     expect(missingMirror.status).toBe(503);
-    expect(await missingMirror.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await missingMirror.json()).toEqual({ error: "normal intake readback unavailable", reason: "mirror_invalid" });
   });
 
   it("reads a pre-v2 owner from its legacy mirror key without inventing a durable digest", async () => {
@@ -344,7 +344,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "mirror_invalid" });
   });
 
   it("reads V2 CLAIM_ACQUIRED without a mirror and lets the canonical mirror/confirm path resume", async () => {
@@ -400,7 +400,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "mirror_invalid" });
   });
 
   it.each(["BOUND", "DRIVING", "COMMITTED"] as const)("reads a V2 %s owner without its previously validated binding projection", async state => {
@@ -461,7 +461,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: failure === "mismatch" ? "binding_divergent" : "binding_unavailable" });
   });
 
   it.each(["malformed", "tuple", "permit"] as const)("fails closed when an existing intake owner mirror is %s", async corruption => {
@@ -484,7 +484,7 @@ describe("GET /internal/v1/normal-intake", () => {
     const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
 
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable", reason: "mirror_invalid" });
   });
 
   it.each([
@@ -529,5 +529,127 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(JSON.stringify(body)).not.toContain("secret-");
     expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
     expect([...f.store.map.entries()]).toEqual(beforeMirror);
+  });
+
+  it.each([
+    ["owner_storage_unavailable", "sidecar read failure"],
+    ["orphan_sidecar", "orphan sidecar secret"],
+    ["owner_evidence", "missing owner pointer"],
+    ["permit", "permit projection mismatch"],
+    ["proof", "start proof mismatch"],
+    ["binding_invalid", "binding payload invalid"],
+    ["binding_unavailable", "binding KV unavailable"],
+    ["binding_divergent", "binding projection divergent"],
+    ["mirror_unavailable", "mirror KV unavailable"],
+    ["mirror_invalid", "mirror payload invalid"],
+    ["receipt", "receipt signature invalid"],
+    ["delivery_readback_unavailable", "delivery storage unavailable"],
+    ["unexpected", "unexpected internal exception"],
+  ] as const)("returns only the closed %s failure reason for %s", async (reason, failure) => {
+    const f = fixture();
+    const eventId = `reason-${reason}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+
+    if (failure === "sidecar read failure") {
+      f.store.get.mockRejectedValue(new Error("SENTINEL_secret_token"));
+    } else if (failure === "orphan sidecar secret") {
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const suffix = containmentSpawnActiveKey(tuple).slice("containment:v1:spawn-active:".length);
+      f.store.map.set(`containment:v1:spawn-mirror:${suffix}/${encodeURIComponent(tuple.caller_nonce)}`, "SENTINEL_secret_token");
+    } else if (failure === "missing owner pointer") {
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+      await f.d.instance.ownerPrepare(request);
+      f.d.storage.map.delete(containmentSpawnActiveKey(tuple));
+    } else if (failure === "permit projection mismatch") {
+      const { tuple } = await seedConfirmedIntakeOwner(f, eventId);
+      const attemptKey = containmentSpawnAttemptKey(tuple);
+      const attempt = structuredClone(f.d.storage.map.get(attemptKey)) as { permit: { permit_id: string } };
+      attempt.permit.permit_id = "SENTINEL_secret_token";
+      f.d.storage.map.set(attemptKey, attempt);
+    } else if (failure === "start proof mismatch") {
+      await seedDrivingEffect(f, eventId);
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const suffix = containmentSpawnActiveKey(tuple).slice("containment:v1:spawn-active:".length);
+      f.d.storage.map.set(`containment:v1:effect-start:${suffix}`, { proof_id: "SENTINEL_secret_token" });
+    } else if (failure === "binding payload invalid") {
+      await seedDrivingEffect(f, eventId);
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const attemptKey = containmentSpawnAttemptKey(tuple);
+      const attempt = structuredClone(f.d.storage.map.get(attemptKey)) as { binding: unknown };
+      attempt.binding = null;
+      f.d.storage.map.set(attemptKey, attempt);
+    } else if (failure === "binding KV unavailable" || failure === "binding projection divergent") {
+      await seedDrivingEffect(f, eventId);
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const suffix = containmentSpawnActiveKey(tuple).slice("containment:v1:spawn-active:".length);
+      const key = `containment:v1:effect-binding:${suffix}`;
+      if (failure === "binding KV unavailable") f.store.get.mockImplementation(async requested => {
+        if (requested === key) throw new Error("SENTINEL_secret_token");
+        return f.store.map.get(requested) ?? null;
+      });
+      else f.store.map.set(key, "SENTINEL_secret_token");
+    } else if (failure === "mirror KV unavailable" || failure === "mirror payload invalid") {
+      if (failure === "mirror KV unavailable") {
+        const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+        const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+        await f.d.instance.ownerPrepare(request);
+        await f.d.instance.ownerAcquire(request);
+        const mirrorKey = containmentSpawnMirrorKey(tuple);
+        f.store.get.mockImplementation(async key => {
+          if (key === mirrorKey) throw new Error("SENTINEL_secret_token");
+          return f.store.map.get(key) ?? null;
+        });
+      } else {
+        const { mirror } = await seedConfirmedIntakeOwner(f, eventId);
+        f.store.map.set(mirror.key, "SENTINEL_secret_token");
+      }
+    } else if (failure === "receipt signature invalid") {
+      await runNormalIntakeDrain(f.runtime);
+      const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+      const attemptKey = containmentSpawnAttemptKey(tuple);
+      const attempt = structuredClone(f.d.storage.map.get(attemptKey)) as { effect_observation: { provider_signature: string } };
+      attempt.effect_observation.provider_signature = "";
+      f.d.storage.map.set(attemptKey, attempt);
+    } else if (failure === "delivery storage unavailable") {
+      vi.spyOn(f.d.instance, "normalIntakeInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
+    } else {
+      vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
+    }
+
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const doWrites = countReadbackDoWrites(f);
+    const kvPutCalls = f.store.put.mock.calls.length;
+    const kvDeleteCalls = f.store.delete.mock.calls.length;
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason });
+    expect(body).not.toContain("SENTINEL_secret_token");
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(doWrites()).toBe(0);
+    expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
+    expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
+  });
+
+  it("does not expose a reason for missing authentication and maps an unknown DO reason to unexpected", async () => {
+    const f = fixture();
+    const eventId = "reason-auth-and-fallback";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const missingAuth = await worker.fetch(readRequest(`?event_id=${eventId}`), f.runtime, ctx() as never);
+    expect(missingAuth.status).toBe(401);
+    expect(await missingAuth.json()).toEqual({ error: "unauthorized" });
+
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({
+      kind: "unavailable", reason: "SENTINEL_secret_token",
+    } as never);
+    const response = await read(f, `?event_id=${eventId}`);
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "unexpected" });
+    expect(body).not.toContain("SENTINEL_secret_token");
   });
 });

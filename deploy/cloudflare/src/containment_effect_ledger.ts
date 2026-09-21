@@ -229,7 +229,20 @@ export type ContainmentEffectResult = { status: "prepared" | "active" | "committ
 export type ContainmentEffectReadback =
   | { kind: "missing"; state: null }
   | { kind: "owned"; state: ContainmentEffectState }
-  | { kind: "committed"; state: "COMMITTED" };
+  | { kind: "committed"; state: "COMMITTED" }
+  | { kind: "unavailable"; reason: ContainmentEffectReadbackFailure };
+export type ContainmentEffectReadbackFailure =
+  | "owner_storage_unavailable" | "orphan_sidecar" | "owner_evidence" | "permit" | "proof"
+  | "binding_unavailable" | "binding_divergent" | "binding_invalid"
+  | "mirror_unavailable" | "mirror_invalid" | "receipt" | "unexpected";
+
+class ReadbackFailure extends Error {
+  constructor(readonly reason: ContainmentEffectReadbackFailure) { super(reason); }
+}
+function failReadback(reason: ContainmentEffectReadbackFailure): never { throw new ReadbackFailure(reason); }
+export function containmentEffectReadbackFailure(error: unknown): ContainmentEffectReadbackFailure {
+  return error instanceof ReadbackFailure ? error.reason : "unexpected";
+}
 export interface ContainmentEffectAttempt extends OwnerRecordV1 { repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; created_at_ms: number; updated_at_ms: number; permit: ContainmentEffectPermit | null; binding: ContainmentEffectBinding | null; provider_receipt: ContainmentEffectReceipt | null }
 export interface ContainmentEffectMirror { schema_version: 1; repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; state: Exclude<ContainmentEffectState, "ABORTED_PRE_EFFECT">; permit_id: string | null; binding_sha256: string | null }
 
@@ -272,44 +285,48 @@ async function mirrorValid(v: unknown, t: OwnerTuple): Promise<boolean> {
   if (!mirrorShapeValid(v, t)) return false;
   return (v as SpawnMirrorPayloadV1).tuple_digest === await ownerTupleDigest(t);
 }
-async function ownerMirrorEvidenceValid(kv: KvLike | undefined, t: OwnerTuple, record: OwnerRecordV1): Promise<boolean> {
-  if (!kv) return false;
+type OwnerMirrorEvidence = "valid" | "unavailable" | "invalid";
+async function ownerMirrorEvidence(kv: KvLike | undefined, t: OwnerTuple, record: OwnerRecordV1): Promise<OwnerMirrorEvidence> {
+  if (!kv) return "unavailable";
   const v2 = record.sidecar_version === 2;
+  const confirmedMirrorRecovery = v2 && record.mirror_digest !== undefined
+    && ["PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "UNKNOWN"].includes(record.state);
   let raw: string | null | undefined;
-  try { raw = await kv.get(v2 ? versionedMirrorKey(t) : mirrorKey(t)); } catch { raw = undefined; }
+  try { raw = await kv.get(v2 ? versionedMirrorKey(t) : mirrorKey(t)); }
+  catch { return confirmedMirrorRecovery ? "valid" : "unavailable"; }
+  if (raw === undefined) return confirmedMirrorRecovery ? "valid" : "unavailable";
   if (v2 && record.mirror_digest !== undefined) {
     // Once the exact mirror bytes have been durably anchored with the permit,
     // later mirror loss is recoverable. A present mirror remains immutable
     // evidence and must match both its original digest and canonical payload.
     if (raw === null || raw === undefined) {
-      return ["PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "UNKNOWN"].includes(record.state);
+      return confirmedMirrorRecovery ? "valid" : "invalid";
     }
     try {
       const parsed = JSON.parse(raw) as SpawnMirrorPayloadV1;
       return raw === JSON.stringify(parsed) && (await mirrorValid(parsed, t))
         && parsed.result === "acquired" && parsed.permit_id === null
-        && await sha256(raw) === record.mirror_digest;
-    } catch { return false; }
+        && await sha256(raw) === record.mirror_digest ? "valid" : "invalid";
+    } catch { return "invalid"; }
   }
-  if (raw === undefined) return false;
   if (raw === null && v2) return record.state === "PREPARED"
-    || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT";
+    || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT" ? "valid" : "invalid";
   const missingAllowed = record.state === "PREPARED" || record.state === "ABORTED_PRE_EFFECT"
     || (v2 && record.state === "CLAIM_ACQUIRED");
-  if (raw === null) return missingAllowed;
-  if (record.state === "PREPARED") return false;
+  if (raw === null) return missingAllowed ? "valid" : "invalid";
+  if (record.state === "PREPARED") return "invalid";
   try {
     const parsed = JSON.parse(raw) as SpawnMirrorPayloadV1;
-    if (parsed.result !== "acquired" || parsed.permit_id !== null || !(await mirrorValid(parsed, t))) return false;
+    if (parsed.result !== "acquired" || parsed.permit_id !== null || !(await mirrorValid(parsed, t))) return "invalid";
     if (v2 && record.state === "CLAIM_ACQUIRED") {
       const canonical = JSON.stringify({ schema_version: 1, tuple: t, tuple_digest: await ownerTupleDigest(t),
         caller_nonce: t.caller_nonce, result: "acquired", owner: t.owner, token: t.token,
         lease_epoch: t.lease_epoch, permit_id: null, attempt_key: attemptKey(t),
         active_pointer_key: activeKey(t), written_at_ms: record.created_ms });
-      return raw === canonical;
+      return raw === canonical ? "valid" : "invalid";
     }
-    return true;
-  } catch { return false; }
+    return "valid";
+  } catch { return "invalid"; }
 }
 function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding | null): boolean {
   return r.schema_version === 1 && r.trusted === true && !!binding && r.repo === t.repo
@@ -423,7 +440,7 @@ export class ContainmentEffectLedger {
       const previous = predecessor && previousAttemptKey
         ? await this.storage.get<OwnerRecordV1>(previousAttemptKey) : undefined;
       const predecessorMirrorSafe = !!predecessor && !!previous
-        && await ownerMirrorEvidenceValid(this.kv, predecessor, previous);
+        && await ownerMirrorEvidence(this.kv, predecessor, previous) === "valid";
       if (predecessor && activeKey(predecessor) === pointer && nextNonce !== predecessor.caller_nonce
         && /^[0-9a-f]{32}$/.test(nextNonce) && p.state === "ABORTED_PRE_EFFECT" && p.tombstone === true
         && previous && recordValid(previous, predecessor) && previous.state === "ABORTED_PRE_EFFECT"
@@ -461,87 +478,97 @@ export class ContainmentEffectLedger {
       if (!expected || (bindingSidecar !== null && bindingSidecar !== undefined && bindingSidecar !== expected)) return unknown();
     } else if (bindingSidecar !== null
       && !(bindingSidecar === undefined && a.sidecar_version === 2 && a.state === "PERMIT_ISSUED")) return unknown();
-    if (!await ownerMirrorEvidenceValid(this.kv, t, a)) return unknown();
+    if (await ownerMirrorEvidence(this.kv, t, a) !== "valid") return unknown();
     return this.out(a.tuple, a.state === "COMMITTED" ? "committed" : "owned", a.state, a);
   }
   async inspectIntakeOwner(tuple: OwnerTuple): Promise<ContainmentEffectReadback> {
     const t = normalizeTuple(tuple);
-    if (!t || t.path !== "intake") throw new Error("invalid normal intake effect identity");
-    if (!this.kv) throw new Error("normal intake readback sidecar evidence unavailable");
-    const snapshot = await this.storage.transaction(async s => ({
-      pointer: await s.get<unknown>(activeKey(t)),
-      attempt: await s.get<unknown>(attemptKey(t)),
-      proof: await s.get<unknown>(startKey(t)),
-    }));
+    if (!t || t.path !== "intake") failReadback("owner_evidence");
+    if (!this.kv) failReadback("owner_storage_unavailable");
+    let snapshot: { pointer: unknown; attempt: unknown; proof: unknown };
+    try {
+      snapshot = await this.storage.transaction(async s => ({
+        pointer: await s.get<unknown>(activeKey(t)),
+        attempt: await s.get<unknown>(attemptKey(t)),
+        proof: await s.get<unknown>(startKey(t)),
+      }));
+    } catch { failReadback("owner_storage_unavailable"); }
     const { pointer, attempt, proof } = snapshot;
     if (pointer === undefined && attempt === undefined) {
-      if (proof !== undefined) throw new Error("normal intake readback has unresolved sidecar evidence");
+      if (proof !== undefined) failReadback("orphan_sidecar");
+      let sidecars: [string | null, string | null, string | null];
       try {
-        const [binding, mirror, versionedMirror] = await Promise.all([
+        sidecars = await Promise.all([
           this.kv.get(bindingKey(t)), this.kv.get(mirrorKey(t)), this.kv.get(versionedMirrorKey(t)),
         ]);
-        if (binding !== null || mirror !== null || versionedMirror !== null) throw new Error("normal intake readback has unresolved sidecar evidence");
-      } catch { throw new Error("normal intake readback sidecar evidence unavailable"); }
+      } catch { failReadback("owner_storage_unavailable"); }
+      if (sidecars.some(value => value !== null)) failReadback("orphan_sidecar");
       return { kind: "missing", state: null };
     }
-    if (pointer === undefined || attempt === undefined || !recordValid(attempt, t)
-      || !pointerMatchesAttempt(pointer, attempt, t)) throw new Error("normal intake effect corruption: owner evidence mismatch");
-
+    if (pointer === undefined || attempt === undefined || !attempt || typeof attempt !== "object") failReadback("owner_evidence");
     const record = attempt as OwnerRecordV1;
-    if (record.attempt_key !== attemptKey(t) || record.nonce !== t.caller_nonce
-      || !pointerValid(pointer, t, record)) throw new Error("normal intake effect corruption: invalid owner evidence");
 
     if ((record.permit_id === null) !== (record.permit === undefined)
       || (record.permit_id !== null && record.permit?.permit_id !== record.permit_id)) {
-      throw new Error("normal intake effect corruption: divergent permit evidence");
+      failReadback("permit");
     }
+    if (record.permit_id !== null && (!permitValid(record.permit, t)
+      || (await sha256(t.token)) !== record.permit.owner_token_digest)) {
+      failReadback("permit");
+    }
+    if ((record.binding_id !== null && (!record.binding || !bindingValid(record.binding, record.binding_id)))
+      || (record.binding_id === null && record.binding !== undefined)) {
+      failReadback("binding_invalid");
+    }
+    if (record.state === "COMMITTED" && (!record.permit_id || !record.binding || !record.effect_observation
+      || !trustedReceipt(record.effect_observation as ContainmentEffectReceipt, t, record.permit_id, record.binding))) {
+      failReadback("receipt");
+    }
+    if (!recordValid(record, t)) failReadback("owner_evidence");
+    if (record.attempt_key !== attemptKey(t) || record.nonce !== t.caller_nonce
+      || !pointerMatchesAttempt(pointer, record, t) || !pointerValid(pointer, t, record)) failReadback("owner_evidence");
 
-    if (record.permit_id !== null && (await sha256(t.token)) !== record.permit?.owner_token_digest) {
-      throw new Error("normal intake effect corruption: invalid permit evidence");
-    }
     if (record.effect_start_proof_id !== null) {
       if (!proofValid(proof, t, record.permit_id ?? "") || proof.proof_id !== record.effect_start_proof_id) {
-        throw new Error("normal intake effect corruption: invalid start proof");
+        failReadback("proof");
       }
     } else if (proof !== undefined) {
-      throw new Error("normal intake effect corruption: divergent start proof");
+      failReadback("proof");
     }
 
     if (record.binding_id !== null) {
-      if (!record.binding || !bindingValid(record.binding, record.binding_id) || !record.permit_id || !this.kv) {
-        throw new Error("normal intake effect corruption: invalid binding evidence");
-      }
+      if (!record.binding || !record.permit_id) failReadback("binding_invalid");
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
-      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
+      catch { failReadback("binding_unavailable"); }
       const readableV2PostBind = record.sidecar_version === 2
         && ["BOUND", "DRIVING", "COMMITTED"].includes(record.state) && raw === null;
       if (!readableV2PostBind && (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding,
         record.sidecar_version === 2 ? record.effect_start_proof_id ?? undefined : undefined))) {
-        throw new Error("normal intake effect corruption: divergent binding evidence");
+        failReadback(raw === null ? "binding_invalid" : "binding_divergent");
       }
     } else if (record.binding_intent) {
       const expected = bindingIntentPayloadFor(t, record, proof);
-      if (!expected) throw new Error("normal intake effect corruption: invalid binding intent");
+      if (!expected) failReadback("binding_invalid");
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
-      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
-      if (raw !== null && raw !== expected) throw new Error("normal intake effect corruption: divergent binding intent");
-    } else if (this.kv) {
+      catch { failReadback("binding_unavailable"); }
+      if (raw !== null && raw !== expected) failReadback("binding_divergent");
+    } else {
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
-      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
-      if (raw !== null) throw new Error("normal intake effect corruption: divergent binding evidence");
+      catch { failReadback("binding_unavailable"); }
+      if (raw !== null) failReadback("binding_divergent");
     }
 
-    if (!await ownerMirrorEvidenceValid(this.kv, t, record)) {
-      throw new Error("normal intake effect corruption: divergent mirror evidence");
-    }
+    const mirror = await ownerMirrorEvidence(this.kv, t, record);
+    if (mirror === "unavailable") failReadback("mirror_unavailable");
+    if (mirror === "invalid") failReadback("mirror_invalid");
 
     if (record.state === "COMMITTED") {
       if (!record.permit_id || !record.binding || !record.effect_observation
         || !trustedReceipt(record.effect_observation as ContainmentEffectReceipt, t, record.permit_id, record.binding)) {
-        throw new Error("normal intake effect corruption: invalid receipt evidence");
+        failReadback("receipt");
       }
       return { kind: "committed", state: "COMMITTED" };
     }
