@@ -29,6 +29,7 @@ pub mod clw_drive;
 pub mod compute_budget_api;
 mod compute_budget_config;
 pub mod compute_grant;
+pub(crate) mod compute_grant_verifier;
 pub mod corelink_auth;
 /// WP-BILLING-TARGET — the corelink-billing usage-push adapter (default-off).
 pub mod corelink_billing;

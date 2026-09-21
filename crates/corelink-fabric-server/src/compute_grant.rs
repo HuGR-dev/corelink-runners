@@ -4,10 +4,11 @@ use std::collections::HashMap;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use corelink_fabric::compute_budget::{ExternalComputeReservation, ExternalWorkloadKind};
-use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::compute_grant_verifier::verify_raw_payload;
 
 pub(crate) const MAX_TOKEN_BYTES: usize = 8 * 1024;
 const MAX_TTL_MS: u64 = 90_000;
@@ -28,6 +29,13 @@ pub(crate) struct GrantPayload {
     pub maximum_wall_ms: u64,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
+}
+
+/// The sole pre-verification decode: it selects the configured public key.
+/// All grant semantics are evaluated only after the raw payload verifies.
+#[derive(Deserialize)]
+struct KeySelector {
+    key_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -76,17 +84,17 @@ impl GrantVerifier {
         if signature.len() != 64 {
             return Err(GrantError::Malformed);
         }
+        let key_selector: KeySelector =
+            serde_json::from_slice(&payload_bytes).map_err(|_| GrantError::Malformed)?;
+        let key = self
+            .public_keys
+            .get(&key_selector.key_id)
+            .filter(|key| key.len() == 32)
+            .ok_or(GrantError::InvalidSignature)?;
+        verify_raw_payload(key, &payload_bytes, &signature)?;
         let payload: GrantPayload =
             serde_json::from_slice(&payload_bytes).map_err(|_| GrantError::Malformed)?;
         validate_payload(&payload, now_ms, allow_expired)?;
-        let key = self
-            .public_keys
-            .get(&payload.key_id)
-            .filter(|key| key.len() == 32)
-            .ok_or(GrantError::InvalidSignature)?;
-        UnparsedPublicKey::new(&ED25519, key)
-            .verify(&payload_bytes, &signature)
-            .map_err(|_| GrantError::InvalidSignature)?;
 
         let mut digest = Sha256::new();
         digest.update(token.as_bytes());
@@ -131,9 +139,7 @@ fn validate_payload(
             .key_id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-        || Uuid::parse_str(&payload.tenant_id)
-            .map(|id| id.is_nil())
-            .unwrap_or(true)
+        || !corelink_fabric::compute_grant::is_canonical_tenant_id(&payload.tenant_id)
         || Uuid::parse_str(&payload.reservation_id)
             .map(|id| id.is_nil())
             .unwrap_or(true)
@@ -276,6 +282,42 @@ mod tests {
     }
 
     #[test]
+    fn verifies_raw_payload_before_payload_semantics() {
+        let (token, keys) = signed_payload(None);
+        let (payload, signature) = token.split_once('.').unwrap();
+        let payload = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let payload = String::from_utf8(payload).unwrap().replace(
+            "11111111-1111-4111-8111-111111111111",
+            "11111111-1111-4111-8111-11111111111A",
+        );
+        let tampered = format!("{}.{}", URL_SAFE_NO_PAD.encode(payload), signature);
+        assert!(matches!(
+            GrantVerifier::new(keys).verify(&tampered, now_for_test(), false),
+            Err(GrantError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_key_and_signed_invalid_tenant_or_ceiling() {
+        let (token, mut keys) = signed_payload(None);
+        keys.insert("issuer-1".into(), vec![0; 32]);
+        assert!(matches!(
+            GrantVerifier::new(keys).verify(&token, now_for_test(), false),
+            Err(GrantError::InvalidSignature)
+        ));
+        for (field, value) in [
+            ("tenant_id", json!("11111111-1111-4111-8111-11111111111A")),
+            ("ceiling_vcpu_ms", json!("0")),
+        ] {
+            let (token, keys) = signed_payload(Some((field, value)));
+            assert!(matches!(
+                GrantVerifier::new(keys).verify(&token, now_for_test(), false),
+                Err(GrantError::Malformed)
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_tamper_duplicate_and_unknown_fields() {
         let (token, keys) = signed_payload(None);
         let mut tampered = token.into_bytes();
@@ -288,7 +330,7 @@ mod tests {
             ),
             Err(GrantError::InvalidSignature | GrantError::Malformed)
         ));
-        let (unknown, _) = signed_payload(Some(("unknown", json!(true))));
+        let (unknown, keys) = signed_payload(Some(("unknown", json!(true))));
         assert!(matches!(
             GrantVerifier::new(keys).verify(&unknown, now_for_test(), false),
             Err(GrantError::Malformed)
