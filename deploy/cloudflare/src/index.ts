@@ -4888,40 +4888,54 @@ const NORMAL_INTAKE_OWNED_EFFECT_STATES: ReadonlySet<NormalIntakeOwnedEffectStat
   "PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "ABORTED_PRE_EFFECT", "UNKNOWN",
 ]);
 
-function isReadbackRecord(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function hasExactReadbackKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Reflect.ownKeys(value);
-  return actual.length === expected.length && expected.every(key => actual.includes(key));
-}
-
 function parseNormalIntakeEffectReadback(
   value: unknown,
   allowedReasons: ReadonlySet<NormalIntakeReadbackUnavailableReason>,
 ): { kind: "success"; effect: NormalIntakeEffectReadbackSuccess }
   | { kind: "unavailable"; reason: NormalIntakeReadbackUnavailableReason } {
   const unavailable = (reason: NormalIntakeReadbackUnavailableReason) => ({ kind: "unavailable" as const, reason });
-  if (!isReadbackRecord(value) || typeof value.kind !== "string") return unavailable("effect_dto_invalid");
-  if (value.kind === "unavailable") {
-    if (!hasExactReadbackKeys(value, ["kind", "reason"]) || typeof value.reason !== "string") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return unavailable("effect_dto_invalid");
+
+  // RPC structured-clone transports enumerable string properties. Prototype,
+  // symbol, and non-enumerable metadata are not part of this DTO contract.
+  // Object.keys and descriptor reads do not invoke ordinary getters; descriptor
+  // access also lets us reject accessor-backed fields before observing values.
+  let actualKeys: string[];
+  try { actualKeys = Object.keys(value); }
+  catch { return unavailable("effect_dto_invalid"); }
+  const unavailableKeys = ["kind", "reason"] as const;
+  const stateKeys = ["kind", "state"] as const;
+  const matches = (expected: readonly string[]) => actualKeys.length === expected.length
+    && expected.every(key => actualKeys.includes(key));
+  const fields = matches(unavailableKeys) ? unavailableKeys : matches(stateKeys) ? stateKeys : null;
+  if (!fields) return unavailable("effect_dto_invalid");
+
+  const properties: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of fields) {
+    let descriptor: PropertyDescriptor | undefined;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); }
+    catch { return unavailable("effect_dto_invalid"); }
+    if (!descriptor || !descriptor.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, "value")) {
       return unavailable("effect_dto_invalid");
     }
-    if (value.reason === "unexpected") return unavailable("effect_do_unexpected");
-    if (!allowedReasons.has(value.reason as NormalIntakeReadbackUnavailableReason)) return unavailable("effect_dto_invalid");
-    return unavailable(value.reason as NormalIntakeReadbackUnavailableReason);
+    properties[key] = descriptor.value;
   }
-  if (value.kind === "missing" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === null) {
+
+  if (typeof properties.kind !== "string") return unavailable("effect_dto_invalid");
+  if (properties.kind === "unavailable" && fields === unavailableKeys) {
+    if (typeof properties.reason !== "string") return unavailable("effect_dto_invalid");
+    if (properties.reason === "unexpected") return unavailable("effect_do_unexpected");
+    if (!allowedReasons.has(properties.reason as NormalIntakeReadbackUnavailableReason)) return unavailable("effect_dto_invalid");
+    return unavailable(properties.reason as NormalIntakeReadbackUnavailableReason);
+  }
+  if (properties.kind === "missing" && fields === stateKeys && properties.state === null) {
     return { kind: "success", effect: { kind: "missing", state: null } };
   }
-  if (value.kind === "owned" && hasExactReadbackKeys(value, ["kind", "state"])
-    && typeof value.state === "string" && NORMAL_INTAKE_OWNED_EFFECT_STATES.has(value.state as NormalIntakeOwnedEffectState)) {
-    return { kind: "success", effect: { kind: "owned", state: value.state as NormalIntakeOwnedEffectState } };
+  if (properties.kind === "owned" && fields === stateKeys
+    && typeof properties.state === "string" && NORMAL_INTAKE_OWNED_EFFECT_STATES.has(properties.state as NormalIntakeOwnedEffectState)) {
+    return { kind: "success", effect: { kind: "owned", state: properties.state as NormalIntakeOwnedEffectState } };
   }
-  if (value.kind === "committed" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === "COMMITTED") {
+  if (properties.kind === "committed" && fields === stateKeys && properties.state === "COMMITTED") {
     return { kind: "success", effect: { kind: "committed", state: "COMMITTED" } };
   }
   return unavailable("effect_dto_invalid");
