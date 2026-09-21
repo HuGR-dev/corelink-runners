@@ -162,6 +162,8 @@ export interface AuthorizedDevenvStart {
     readonly patId: string;
     readonly expiresAtMs: number;
     readonly computeReservationId?: string;
+    /** Exact signed compute-grant duration; required whenever compute is armed. */
+    readonly maximumWallMs?: number;
   };
 }
 

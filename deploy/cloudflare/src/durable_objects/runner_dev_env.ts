@@ -41,6 +41,7 @@ const AUTHORIZED_STOP_KEY_PREFIX = "devenv:authorized-stop:";
 const AUTHORIZED_STOP_INDEX_KEY = "devenv:authorized-stop-index";
 const AUTHORIZED_STOP_TTL_MS = 8 * 3600 * 1000 + 3600 * 1000;
 const MAX_AUTHORIZED_STOP_TOMBSTONES = 64;
+const COMPUTE_DEADLINE_KEY = "compute:devenv-deadline";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function authorizedStopKey(tenantId: unknown, sessionUuid: unknown): string | undefined {
@@ -102,6 +103,14 @@ export class RunnerDevEnvDO extends Container<any> {
         this.execToken = crypto.randomUUID();
         await this.ctx.storage.put(EXEC_TOKEN_KEY, this.execToken);
       }
+      const deadline = await this.ctx.storage.get<unknown>(COMPUTE_DEADLINE_KEY);
+      if (deadline !== undefined) {
+        const storedDeadline = deadline as { sessionUuid?: unknown; deadlineMs?: unknown };
+        if (!deadline || typeof deadline !== "object" || Array.isArray(deadline) ||
+            typeof storedDeadline.sessionUuid !== "string" || !Number.isSafeInteger(storedDeadline.deadlineMs) ||
+            (storedDeadline.deadlineMs as number) <= 0) throw new Error("DEVENV_COMPUTE_DEADLINE_CORRUPT");
+        await this.schedule(new Date(storedDeadline.deadlineMs as number), "expireAuthorizedSession", { sessionUuid: storedDeadline.sessionUuid });
+      }
     });
   }
 
@@ -155,7 +164,7 @@ export class RunnerDevEnvDO extends Container<any> {
 
   async prepareAuthorizedCompute(binding: ComputeBinding): Promise<void> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      if (binding.workloadKind !== "devenv" || binding.reservationId !== binding.workloadId || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
+      if (binding.workloadKind !== "devenv" || binding.reservationId !== binding.workloadId || binding.vcpuCount !== 4) {
         throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
       }
       if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_COMPUTE_SESSION_ACTIVE");
@@ -202,15 +211,29 @@ export class RunnerDevEnvDO extends Container<any> {
         throw new Error("DEVENV_AUTHORIZED_START_CANCELED");
       }
       const reservationId = payload?.grant?.computeReservationId;
-      if (reservationId && (reservationId !== payload.grant.sessionUuid ||
-          await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId)) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      const maximumWallMs = payload?.grant?.maximumWallMs;
+      if (reservationId) {
+        if (reservationId !== payload.grant.sessionUuid || typeof maximumWallMs !== "number" || !Number.isSafeInteger(maximumWallMs) ||
+            await this.ctx.storage.get<string>("compute:devenv-session") !== reservationId) throw new Error("DEVENV_COMPUTE_BINDING_INVALID");
+      }
+      if (this.devenvState.status !== "stopped" && this.devenvState.status !== "errored") throw new Error("DEVENV_START_REQUIRES_TERMINAL_STATE");
       try {
+        if (reservationId) {
+          const deadlineMs = payload.grant.expiresAtMs;
+          await this.computeObligations().validateRuntimeDeadline(reservationId, payload.grant.sessionUuid, maximumWallMs as number, deadlineMs, Date.now());
+          // This record precedes credential staging and provider ownership, so a
+          // restarted DO can restore the hard stop even after a mid-start crash.
+          await this.ctx.storage.put(COMPUTE_DEADLINE_KEY, { sessionUuid: payload.grant.sessionUuid, deadlineMs });
+          await this.schedule(new Date(deadlineMs), "expireAuthorizedSession", { sessionUuid: payload.grant.sessionUuid });
+        }
         return await launchAuthorizedDevenv({
           env: this.env, credentials: this.credentials, execToken: this.execToken,
           getState: () => this.devenvState, transition: (state) => this.transitionState(state),
           settle: () => this.recordUsage(), completeStopped: () => this.completeStoppedSession(),
           start: async (envVars) => {
-            if (reservationId) await this.computeObligations().claimProvider(reservationId, payload.grant.sessionUuid, Date.now());
+            if (reservationId) {
+              await this.computeObligations().claimProvider(reservationId, payload.grant.sessionUuid, Date.now());
+            }
             this.envVars = envVars;
             await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
           },
@@ -221,6 +244,11 @@ export class RunnerDevEnvDO extends Container<any> {
         if (reservationId) {
           try { await this.computeObligations().abandonUnused(reservationId); }
           catch { /* The independently scheduled compute obligation remains. */ }
+          const deadline = await this.ctx.storage.get<{ sessionUuid: string }>(COMPUTE_DEADLINE_KEY);
+          if (deadline?.sessionUuid === payload.grant.sessionUuid &&
+              (this.devenvState.status === "stopped" || this.devenvState.status === "errored")) {
+            await this.ctx.storage.delete(COMPUTE_DEADLINE_KEY);
+          }
         }
         throw error;
       }
@@ -501,6 +529,10 @@ export class RunnerDevEnvDO extends Container<any> {
       generationId: this.devenvState.generationId,
       terminalUsage,
     };
+    if (terminalUsage) {
+      const deadline = await this.ctx.storage.get<{ sessionUuid: string }>(COMPUTE_DEADLINE_KEY);
+      if (deadline?.sessionUuid === terminalUsage.sessionId) await this.ctx.storage.delete(COMPUTE_DEADLINE_KEY);
+    }
     await this.recordUsage();
   }
 
