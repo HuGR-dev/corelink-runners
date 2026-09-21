@@ -94,7 +94,7 @@ describe("canonical containment effect route", () => {
     expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
   });
 
-  it.each(["permit", "start proof", "binding", "mirror"] as const)("does not retry malformed complete DRIVING %s evidence", async kind => {
+  it.each(["permit", "start proof", "binding", "mirror", "expiry", "expiry overflow"] as const)("does not retry malformed complete DRIVING %s evidence", async kind => {
     const { ledger, storage, values } = make(); const t = tuple();
     const failedProvider = await runCanonicalEffect({ ...deps(ledger, t), drive: async () => { throw new Error("provider response lost"); } });
     expect(failedProvider).toMatchObject({ status: "unknown_terminal", retryable: true });
@@ -102,6 +102,14 @@ describe("canonical containment effect route", () => {
     if (kind === "permit") {
       const attempt = storage.map.get(attemptKey) as any;
       attempt.permit.permit_id = `${attempt.permit_id}-mismatch`;
+      storage.map.set(attemptKey, attempt);
+    } else if (kind === "expiry" || kind === "expiry overflow") {
+      const attempt = storage.map.get(attemptKey) as any;
+      if (kind === "expiry") attempt.expires_ms = Number.MAX_SAFE_INTEGER;
+      else {
+        attempt.created_ms = Number.MAX_SAFE_INTEGER - 60_000;
+        attempt.expires_ms = Number.MAX_SAFE_INTEGER;
+      }
       storage.map.set(attemptKey, attempt);
     } else {
       const activeKey = containmentSpawnActiveKey(t);

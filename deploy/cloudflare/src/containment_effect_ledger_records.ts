@@ -5,6 +5,7 @@ import type {
 
 export const HEX = /^[0-9a-f]{64}$/;
 export const NONCE = /^[0-9a-f]{32}$/;
+export const OWNER_RECORD_TTL_MS = 120_000;
 const REPO = /^[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?\/[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?$/;
 export const PREFIX = "containment:v1:";
 const enc = (v: string) => encodeURIComponent(v);
@@ -117,7 +118,10 @@ export function recordValid(v: unknown, t: OwnerTuple): v is OwnerRecordV1 {
     || (r.binding_id !== null && !bindingValid(r.binding, r.binding_id ?? null))
     || (r.binding_id === null && r.binding !== undefined)
     || (r.effect_start_proof_id === null) !== (r.effect_started === false)
-    || !validTime(r.created_ms) || !validTime(r.expires_ms) || typeof r.tombstone !== "boolean") return false;
+    || !validTime(r.created_ms) || !validTime(r.expires_ms)
+    || r.created_ms > Number.MAX_SAFE_INTEGER - OWNER_RECORD_TTL_MS
+    || r.expires_ms !== r.created_ms + OWNER_RECORD_TTL_MS
+    || typeof r.tombstone !== "boolean") return false;
   if (r.state === "PREPARED" || r.state === "CLAIM_ACQUIRED") return r.permit_id === null && r.binding_id === null && r.effect_start_proof_id === null && r.tombstone === false;
   if (r.state === "PERMIT_ISSUED") return r.permit_id !== null && r.binding_id === null && r.tombstone === false;
   if (r.state === "BOUND" || r.state === "DRIVING") return r.permit_id !== null && r.binding_id !== null && r.effect_start_proof_id !== null && r.tombstone === false;

@@ -111,6 +111,45 @@ describe("normal intake effect recovery", () => {
     expect(activeCount).toBe(0);
   });
 
+  it("upgrades expired-drive uncertainty when the original live drive commits", async () => {
+    const f = fixture(); const eventId = "late-live-drive-delivery"; const jobId = "8605";
+    await enqueue(f, eventId, jobId);
+    let releaseStart!: () => void;
+    let markStartEntered!: () => void;
+    const startBlocked = new Promise<void>(resolve => { releaseStart = resolve; });
+    const startEntered = new Promise<void>(resolve => { markStartEntered = resolve; });
+    f.startWithEnv.mockImplementationOnce(async () => { markStartEntered(); await startBlocked; });
+
+    const firstDrain = runNormalIntakeDrain(f.runtime);
+    await startEntered;
+    vi.setSystemTime(Date.now() + 120_001);
+    await runNormalIntakeDrain(f.runtime);
+
+    const afterExpiry = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
+    expect(afterExpiry.state).toBe("uncertain");
+    expect(f.d.storage.map.get("normal-inbox:v1:count")).toBe(1);
+    expect(await f.d.instance.normalIntakePending()).toHaveLength(0);
+
+    releaseStart();
+    await firstDrain;
+
+    const record = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
+    expect(record.state).toBe("complete");
+    expect(f.d.storage.map.get("normal-inbox:v1:count")).toBe(0);
+    expect(await f.d.instance.normalIntakePending()).toHaveLength(0);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(1);
+    expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"))).toHaveLength(1);
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+
+    await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "complete");
+    await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "uncertain");
+    await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "retry");
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
+    expect(f.d.storage.map.get("normal-inbox:v1:count")).toBe(0);
+    expect(await f.d.instance.normalIntakePending()).toHaveLength(0);
+    vi.clearAllTimers();
+  });
+
   it("settles an expired sole DRIVING owner as uncertain without preparing or reclaiming", async () => {
     const f = fixture(); const eventId = "expired-driving-delivery"; const jobId = "8604";
     await enqueue(f, eventId, jobId);

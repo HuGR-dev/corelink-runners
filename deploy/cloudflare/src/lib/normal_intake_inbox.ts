@@ -125,7 +125,7 @@ export class NormalIntakeInbox {
       const value = await tx.get<unknown>(key);
       if (!validRecord(value, eventId)) fail("missing or malformed event record");
       if (value.body_sha256 !== expectedBodySha) throw new NormalIntakeConflictError();
-      if (value.state === "complete" || value.state === "uncertain") return;
+      if (value.state === "complete" || (value.state === "uncertain" && outcome !== "complete")) return;
       const nextState: NormalIntakeState = outcome === "complete" ? "complete" : outcome === "uncertain" ? "uncertain" : "pending";
       if (outcome === "retry" && now > Number.MAX_SAFE_INTEGER - 60_000) throw new Error("invalid normal intake retry time");
       const next: NormalIntakeRecord = { schema_version: 1, event_id: value.event_id, body_sha256: value.body_sha256,

@@ -1,6 +1,6 @@
 import type { KvLike } from "./lib";
 import {
-  HEX, NONCE, PREFIX, activeKey, activePointerProjection, attemptKey, bindingKey,
+  HEX, NONCE, OWNER_RECORD_TTL_MS, PREFIX, activeKey, activePointerProjection, attemptKey, bindingKey,
   bindingValid, mirrorKey, normalizeTuple, permitValid, pointerMatchesAttempt, pointerValid, proofValid, recordValid, requestTuple,
   startKey, validText, validTime,
 } from "./containment_effect_ledger_records";
@@ -487,11 +487,11 @@ export class ContainmentEffectLedger {
         return this.out(t, current.state === "COMMITTED" ? "owned" : "busy", current.state, current);
       }
       const created = request.now ?? Date.now();
-      if (!validTime(created) || !validTime(created + 120_000)) return this.out(t, "rejected", null);
+      if (!validTime(created) || !validTime(created + OWNER_RECORD_TTL_MS)) return this.out(t, "rejected", null);
       const r: OwnerRecordV1 = {
         schema_version: 1, tuple: t, ...t, nonce: t.caller_nonce, state: "PREPARED",
         permit_id: null, binding_id: null, effect_start_proof_id: null,
-        effect_started: false, created_ms: created, expires_ms: created + 120_000,
+        effect_started: false, created_ms: created, expires_ms: created + OWNER_RECORD_TTL_MS,
         tombstone: false, attempt_key: attemptKey(t),
       };
       await s.put(attemptKey(t), r);
