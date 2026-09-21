@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ContainmentEffectLedger, type OwnerTuple } from "../src/containment_effect_ledger";
-import { containmentSpawnActiveKey, containmentSpawnAttemptKey, drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey, drainOwnerTuple, intakeOwnerTuple, redriveOwnerTuple, runCanonicalEffect } from "../src/containment_effect_route";
 
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
 class Storage {
@@ -84,7 +84,7 @@ describe("canonical containment effect route", () => {
     const suffix = activeKey.slice("containment:v1:spawn-active:".length);
     if (sidecar === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { stale: true });
     else if (sidecar === "binding") values.set(`containment:v1:effect-binding:${suffix}`, "stale");
-    else values.set(`containment:v1:spawn-mirror:${suffix}`, "stale");
+    else values.set(containmentSpawnMirrorKey(t), "stale");
     const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => true); const drive = vi.fn(async () => ({ resource_id: "resource", receipt_id: "r", provider_signature: "s" }));
 
     const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive });
@@ -116,7 +116,7 @@ describe("canonical containment effect route", () => {
       const suffix = activeKey.slice("containment:v1:spawn-active:".length);
       if (kind === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { corrupted: true });
       else if (kind === "binding") values.set(`containment:v1:effect-binding:${suffix}`, "corrupted");
-      else values.set(`containment:v1:spawn-mirror:${suffix}`, "corrupted");
+      else values.set(containmentSpawnMirrorKey(t), "corrupted");
     }
     const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => { throw new Error("must not reacquire malformed DRIVING owner"); });
     const retry = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive: async () => undefined });

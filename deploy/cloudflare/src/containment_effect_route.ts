@@ -1,6 +1,7 @@
 import {
   containmentSpawnActiveKey,
   containmentSpawnAttemptKey,
+  containmentSpawnMirrorKey,
   type ContainmentEffectBinding,
   type ContainmentEffectReceipt,
   type ContainmentEffectPermit,
@@ -170,6 +171,37 @@ export async function runCanonicalEffect<TOpts extends object>(
     const resumable = existing.kind === "owned" && (existing.state === "PREPARED" || existing.state === "CLAIM_ACQUIRED" || existing.state === "PERMIT_ISSUED" || existing.state === "BOUND");
     let state: "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND" = (resumable ? existing.state : "PREPARED") as "PREPARED" | "CLAIM_ACQUIRED" | "PERMIT_ISSUED" | "BOUND";
     let ownerRecord: any = resumable ? existing.record : undefined;
+    const bindingBase = {
+      schema_version: 1 as const,
+      provider: deps.provider,
+      resource_id: deps.resource_id,
+      idempotency_key: deps.idempotency_key,
+    };
+    const binding: ContainmentEffectBinding = {
+      ...bindingBase,
+      binding_sha256: await sha256(JSON.stringify(bindingBase)),
+    };
+    // A persisted BOUND owner already has the provider binding. Validate or
+    // repair that durable binding before preparation callbacks, which may
+    // authorize and mint external credentials. The normal post-claim checks
+    // below still revalidate it immediately before BOUND -> DRIVING.
+    if (state === "BOUND") {
+      const persisted = ownerRecord as { permit?: ContainmentEffectPermit; permit_id?: string | null; effect_start_proof_id?: string | null } | undefined;
+      if (!persisted?.permit || persisted.permit.permit_id !== persisted.permit_id
+        || !text(persisted.effect_start_proof_id)) {
+        return { status: "unknown_terminal", reason: "missing persisted BOUND permit or start proof" };
+      }
+      const started = await deps.ledger.ownerBegin(req, persisted.permit.permit_id);
+      if (!started.proof || started.proof.proof_id !== persisted.effect_start_proof_id
+        || (started.kind !== "already_started" && started.kind !== "owned")) {
+        return { status: "unknown_terminal", reason: "corrupt persisted BOUND start proof" };
+      }
+      const validated = await deps.ledger.ownerBind(req, persisted.permit.permit_id, started.proof.proof_id, binding);
+      if (validated.kind !== "bound") {
+        return terminal(validated) ?? (validated.kind === "unavailable" ? { status: "unavailable" } : { status: "unauthorized" });
+      }
+      ownerRecord = validated.record ?? ownerRecord;
+    }
     if (deps.beforeClaim) await deps.beforeClaim();
     claimAdmitted = await deps.claim();
     // A persisted tuple does not transfer or replace the external claim. Every
@@ -196,16 +228,6 @@ export async function runCanonicalEffect<TOpts extends object>(
     }
     let permit: ContainmentEffectPermit;
     let proof: NonNullable<OwnerResult["proof"]>;
-    const bindingBase = {
-      schema_version: 1 as const,
-      provider: deps.provider,
-      resource_id: deps.resource_id,
-      idempotency_key: deps.idempotency_key,
-    };
-    const binding: ContainmentEffectBinding = {
-      ...bindingBase,
-      binding_sha256: await sha256(JSON.stringify(bindingBase)),
-    };
     if (state === "CLAIM_ACQUIRED") {
       const mirrored = await deps.ledger.ownerMirror(req, "acquired");
       const mirrorDigest = observationDigest(mirrored);
@@ -283,18 +305,12 @@ export async function runCanonicalEffect<TOpts extends object>(
       }
       proof = started.proof;
     }
-    let boundBinding = binding;
-    if (state === "PERMIT_ISSUED") {
-      const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
-      if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
-      boundBinding = (bound.record as any)?.binding ?? binding;
-    } else {
-      const persistedBinding = (ownerRecord as { binding?: ContainmentEffectBinding } | undefined)?.binding;
-      if (!persistedBinding || persistedBinding.binding_sha256 !== binding.binding_sha256) {
-        await releaseClaim(); return { status: "unknown_terminal", reason: "missing or corrupt persisted binding" };
-      }
-      boundBinding = persistedBinding;
-    }
+    // Always revalidate the binding before the BOUND -> DRIVING transition.
+    // V2 BOUND records can repair an absent KV projection from the canonical
+    // DO record; mismatches and KV outages fail before any provider call.
+    const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
+    if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
+    const boundBinding = (bound.record as any)?.binding ?? binding;
     const driving = await deps.ledger.ownerMarkDriving(req, permit.permit_id, proof.proof_id);
     // A concurrent retry that observes an already-started transition is
     // terminal uncertainty, never permission to invoke the provider again.
@@ -364,7 +380,7 @@ export async function runCanonicalEffect<TOpts extends object>(
   }
 }
 
-export { containmentSpawnActiveKey, containmentSpawnAttemptKey };
+export { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey };
 
 export async function callerNonceForEffect(tuple: Omit<OwnerTuple, "caller_nonce">): Promise<string> {
   return (await sha256(JSON.stringify(tuple))).slice(0, 32);

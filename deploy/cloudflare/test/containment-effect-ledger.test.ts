@@ -33,7 +33,7 @@ async function claim(ledger: ContainmentEffectLedger, t = tuple()) {
 
 describe("T3-W17-R14 owner ledger", () => {
   it.each(["start proof", "binding", "mirror"] as const)("does not call a %s-only residue missing", async sidecar => {
-    const { ledger, storage, map } = make(); const t = tuple();
+    const { ledger, storage, map } = make(); const t = { ...tuple(), repo: "acme/repo" };
     const active = containmentSpawnActiveKey(t); const attempt = containmentSpawnAttemptKey(t);
     const suffix = active.slice("containment:v1:spawn-active:".length);
     if (sidecar === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { stale: true });
@@ -81,6 +81,33 @@ describe("T3-W17-R14 owner ledger", () => {
     expect(again.record?.tuple.caller_nonce).toBe(nonce);
   });
 
+  it("uses deterministic nonce-qualified V2 mirrors and projects the confirmation digest into the active pointer", async () => {
+    const { ledger, storage, map } = make(); const t = tuple();
+    const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
+    await ledger.prepare(request); await ledger.acquire(request);
+    const first = await ledger.mirror(request, "acquired");
+    const firstRaw = map.get(first.key);
+    const second = await ledger.mirror(request, "acquired");
+    expect(first.kind).toBe("exact");
+    expect(first.key).toBe(`containment:v1:spawn-mirror:acme/repo/123/redrive/${encodeURIComponent(t.effect_id)}/${nonce}`);
+    expect(second.key).toBe(first.key);
+    expect(second.payload).toBe(first.payload);
+    expect(second.payload_digest).toBe(first.payload_digest);
+    expect(map.get(first.key)).toBe(firstRaw);
+
+    const confirmed = await ledger.confirm({ ...request, observation_kind: second.kind, observation_digest: second.payload_digest }, second.payload_digest!, second.payload_digest!);
+    expect(confirmed.kind).toBe("permit_issued");
+    const attempt = storage.map.get(containmentSpawnAttemptKey(t)) as Record<string, unknown>;
+    const pointer = storage.map.get(containmentSpawnActiveKey(t)) as Record<string, unknown>;
+    expect(attempt.sidecar_version).toBe(2);
+    expect(pointer.sidecar_version).toBe(2);
+    expect(pointer.mirror_digest).toBe(second.payload_digest);
+    expect("binding_intent" in pointer).toBe(false);
+
+    storage.map.set(containmentSpawnActiveKey(t), { ...pointer, mirror_digest: "f".repeat(64) });
+    expect((await ledger.observe(containmentSpawnActiveKey(t), containmentSpawnAttemptKey(t))).kind).toBe("unknown");
+  });
+
   it("requires exact mirror write/readback before issuing a permit", async () => {
     const { ledger } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
     await ledger.prepare(request); await ledger.acquire(request); const digest = await ownerTupleDigest(t);
@@ -93,6 +120,40 @@ describe("T3-W17-R14 owner ledger", () => {
     expect((await ledger.mirror(request)).kind).toBe("unavailable"); expect(map.size).toBe(0);
     await ledger.prepare(request); expect((await ledger.mirror(request)).kind).toBe("unavailable"); expect(map.size).toBe(0);
     await ledger.acquire(request); expect((await ledger.mirror(request)).kind).toBe("exact");
+  });
+
+  it("prevents a stale mirror writer from replacing a newer nonce's canonical mirror", async () => {
+    const { ledger, kv, map } = make(); const firstTuple = tuple(nonce);
+    const firstRequest = { schema_version: 1 as const, tuple: firstTuple, caller_nonce: nonce };
+    expect((await ledger.prepare(firstRequest)).kind).toBe("prepared");
+    expect((await ledger.acquire(firstRequest)).kind).toBe("acquired");
+    let entered!: () => void; let release!: () => void;
+    const putEntered = new Promise<void>(resolve => { entered = resolve; });
+    const putGate = new Promise<void>(resolve => { release = resolve; });
+    const originalPut = kv.put.getMockImplementation()!;
+    kv.put.mockImplementation(async (key, value) => {
+      const payload = JSON.parse(value) as { caller_nonce: string };
+      if (payload.caller_nonce === nonce) { entered(); await putGate; }
+      await originalPut(key, value);
+    });
+
+    const staleWrite = ledger.mirror(firstRequest, "acquired");
+    await putEntered;
+    expect((await ledger.abort(firstRequest)).kind).toBe("aborted");
+    const nextTuple = tuple(nonce2);
+    const nextRequest = { schema_version: 1 as const, tuple: nextTuple, caller_nonce: nonce2 };
+    expect((await ledger.prepare(nextRequest)).kind).toBe("prepared");
+    expect((await ledger.acquire(nextRequest)).kind).toBe("acquired");
+    const currentMirror = await ledger.mirror(nextRequest, "acquired");
+    expect(currentMirror.kind).toBe("exact");
+    release();
+    const staleResult = await staleWrite;
+    expect(staleResult.kind).not.toBe("exact");
+    expect(staleResult.key).not.toBe(currentMirror.key);
+
+    const persisted = await kv.get(currentMirror.key);
+    expect(persisted).not.toBeNull();
+    expect(JSON.parse(persisted!).caller_nonce).toBe(nonce2);
   });
 
   it("rejects a caller nonce mismatch and preserves a crash-retry nonce", async () => {
@@ -127,6 +188,54 @@ describe("T3-W17-R14 owner ledger", () => {
     const started = await ledger.beginEffect(request, permit.permit_id); const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "f".repeat(64) };
     let reads = 0; kv.get.mockImplementation(async key => { const raw = map.get(key) ?? null; reads++; if (reads === 2 && raw) { const x = JSON.parse(raw); x.binding.resource_id = "replacement"; return JSON.stringify(x); } return raw; });
     expect((await ledger.bind(request, permit.permit_id, started.proof!.proof_id, binding)).kind).toBe("unknown");
+  });
+
+  it("does not overwrite a conflicting binding sidecar that predates the canonical intent", async () => {
+    const { ledger, map } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t);
+    const started = await ledger.beginEffect(request, confirmed.permit!.permit_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "a".repeat(64) };
+    const key = `containment:v1:effect-binding:acme/repo/${t.job_id}/${t.path}/${encodeURIComponent(t.effect_id)}`;
+    const preexisting = "foreign-sidecar-must-not-be-replaced";
+    map.set(key, preexisting);
+
+    const result = await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding);
+
+    expect(result.kind).not.toBe("bound");
+    expect(map.get(key)).toBe(preexisting);
+  });
+
+  it("does not replace the canonical binding sidecar on a conflicting post-BOUND retry", async () => {
+    const { ledger, map } = make(); const t = tuple(); const { request, confirmed } = await claim(ledger, t);
+    const started = await ledger.beginEffect(request, confirmed.permit!.permit_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "b".repeat(64) };
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    const key = `containment:v1:effect-binding:acme/repo/${t.job_id}/${t.path}/${encodeURIComponent(t.effect_id)}`;
+    const original = map.get(key);
+    const conflict = { ...binding, resource_id: "replacement-resource", binding_sha256: "c".repeat(64) };
+
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, conflict)).kind).not.toBe("bound");
+    expect(map.get(key)).toBe(original);
+  });
+
+  it("fences a conflicting retry against an intent persisted before the KV sidecar", async () => {
+    const { ledger, storage, kv, map } = make(); const t = { ...tuple(), repo: "acme/repo" };
+    const { request, confirmed } = await claim(ledger, t);
+    const beforeKv = structuredClone([...map.entries()]);
+    const started = await ledger.beginEffect(request, confirmed.permit!.permit_id);
+    const binding = { schema_version: 1 as const, provider: "provider", resource_id: "resource-1", idempotency_key: "idem-1", binding_sha256: "d".repeat(64) };
+    kv.put.mockRejectedValueOnce(new Error("simulated pre-sidecar failure"));
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("unavailable");
+    const attemptKey = containmentSpawnAttemptKey(t);
+    const before = storage.map.get(attemptKey) as { binding_intent: unknown };
+    expect(before.binding_intent).toBeDefined();
+    const replacement = { ...binding, resource_id: "replacement-resource", binding_sha256: "e".repeat(64) };
+    kv.put.mockClear();
+
+    expect((await ledger.bind(request, confirmed.permit!.permit_id, started.proof!.proof_id, replacement)).kind).not.toBe("bound");
+
+    expect((storage.map.get(attemptKey) as { binding_intent: unknown }).binding_intent).toEqual(before.binding_intent);
+    expect([...map.entries()]).toEqual(beforeKv);
+    expect(kv.put).not.toHaveBeenCalled();
   });
 
   it("returns the existing proof on retries and never authorizes a second drive", async () => {

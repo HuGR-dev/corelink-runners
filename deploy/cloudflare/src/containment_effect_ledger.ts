@@ -1,7 +1,7 @@
 import type { KvLike } from "./lib";
 import {
   HEX, NONCE, OWNER_RECORD_TTL_MS, PREFIX, activeKey, activePointerProjection, attemptKey, bindingKey,
-  bindingValid, mirrorKey, normalizeTuple, permitValid, pointerMatchesAttempt, pointerValid, proofValid, recordValid, requestTuple,
+  bindingValid, mirrorKey, versionedMirrorKey, normalizeTuple, permitValid, pointerMatchesAttempt, pointerValid, proofValid, recordValid, requestTuple,
   startKey, validText, validTime,
 } from "./containment_effect_ledger_records";
 
@@ -122,6 +122,19 @@ export interface OwnerRecordV1 {
   effect_observation?: EffectObservationV1 | ContainmentEffectReceipt;
   attempt_key?: string;
   reap_proof?: EffectReapProofV1;
+  /** Versioned KV sidecar protocol. Absent on pre-v2 durable records. */
+  sidecar_version?: 2;
+  /** SHA-256 of the exact nonce-qualified mirror bytes accepted at confirm. */
+  mirror_digest?: string;
+  /** Cross-store write-ahead intent, kept only in the DO owner record. */
+  binding_intent?: OwnerBindingIntentV2;
+}
+export interface OwnerBindingIntentV2 {
+  schema_version: 1;
+  tuple: OwnerTuple;
+  permit_id: string;
+  proof_id: string;
+  binding: ContainmentEffectBinding;
 }
 export interface EffectReapProofV1 {
   schema_version: 1;
@@ -144,6 +157,8 @@ export interface OwnerPointerV1 {
   caller_nonce: string; nonce: string; attempt_key: string; state: ContainmentEffectState;
   permit_id: string | null; binding_id: string | null; effect_start_proof_id: string | null;
   tombstone: boolean;
+  sidecar_version?: 2;
+  mirror_digest?: string;
 }
 export interface SpawnMirrorPayloadV1 {
   schema_version: 1;
@@ -224,16 +239,16 @@ interface EffectStorage {
   transaction<T>(fn: (s: EffectStorage) => Promise<T>): Promise<T>;
 }
 function legacyTuple(i: ContainmentEffectIdentity, nonce: string, owner: string, token: string, epoch: number): OwnerTuple | null { return normalizeTuple({ ...i, path: "redrive", event_id: `${PREFIX}legacy:${i.effect_id}`, reservation_epoch: epoch, effect_id: i.effect_id, owner, token, lease_epoch: epoch, drain_owner: owner, drain_lease_epoch: epoch, caller_nonce: nonce }); }
-export function containmentSpawnActiveKey(t: OwnerTuple): string { return activeKey(t); }
-export function containmentSpawnAttemptKey(t: OwnerTuple): string { return attemptKey(t); }
-export function containmentSpawnMirrorKey(t: OwnerTuple): string { return mirrorKey(t); }
+export function containmentSpawnActiveKey(t: OwnerTuple): string { const n = normalizeTuple(t); return n ? activeKey(n) : ""; }
+export function containmentSpawnAttemptKey(t: OwnerTuple): string { const n = normalizeTuple(t); return n ? attemptKey(n) : ""; }
+export function containmentSpawnMirrorKey(t: OwnerTuple): string { const n = normalizeTuple(t); return n ? versionedMirrorKey(n) : ""; }
 export function containmentEffectPointerKey(i: ContainmentEffectIdentity | OwnerTuple): string {
   if ("path" in i) { const t = normalizeTuple(i); return t ? activeKey(t) : ""; }
   const t = legacyTuple(i, "00000000000000000000000000000001", "legacy-owner", "legacy-token", 1);
   return t ? activeKey(t) : "";
 }
 export function containmentEffectMirrorKey(i: ContainmentEffectIdentity | OwnerTuple): string {
-  if ("path" in i) { const t = normalizeTuple(i); return t ? mirrorKey(t) : ""; }
+  if ("path" in i) { const t = normalizeTuple(i); return t ? versionedMirrorKey(t) : ""; }
   const t = legacyTuple(i, "00000000000000000000000000000001", "legacy-owner", "legacy-token", 1);
   return t ? mirrorKey(t) : "";
 }
@@ -259,8 +274,25 @@ async function mirrorValid(v: unknown, t: OwnerTuple): Promise<boolean> {
 }
 async function ownerMirrorEvidenceValid(kv: KvLike | undefined, t: OwnerTuple, record: OwnerRecordV1): Promise<boolean> {
   if (!kv) return false;
-  let raw: string | null;
-  try { raw = await kv.get(mirrorKey(t)); } catch { return false; }
+  const v2 = record.sidecar_version === 2;
+  let raw: string | null | undefined;
+  try { raw = await kv.get(v2 ? versionedMirrorKey(t) : mirrorKey(t)); } catch { raw = undefined; }
+  if (v2 && record.mirror_digest !== undefined) {
+    // Once the exact mirror bytes have been durably anchored with the permit,
+    // later mirror loss is recoverable. A present mirror remains immutable
+    // evidence and must match both its original digest and canonical payload.
+    if (raw === null || raw === undefined) {
+      return ["PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "UNKNOWN"].includes(record.state);
+    }
+    try {
+      const parsed = JSON.parse(raw) as SpawnMirrorPayloadV1;
+      return raw === JSON.stringify(parsed) && (await mirrorValid(parsed, t))
+        && parsed.result === "acquired" && parsed.permit_id === null
+        && await sha256(raw) === record.mirror_digest;
+    } catch { return false; }
+  }
+  if (raw === undefined) return false;
+  if (raw === null && v2) return record.state === "PREPARED" || record.state === "ABORTED_PRE_EFFECT";
   const missingAllowed = record.state === "PREPARED" || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT";
   if (raw === null) return missingAllowed;
   if (record.state === "PREPARED") return false;
@@ -282,13 +314,28 @@ function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: stri
     && validText(r.receipt_id) && HEX.test(r.receipt_sha256)
     && validText(r.provider_signature);
 }
-function bindingPayloadValid(raw: string, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding): boolean {
+function bindingPayload(t: OwnerTuple, permit: string, binding: ContainmentEffectBinding, proofId?: string): string {
+  return JSON.stringify({ schema_version: 1, tuple: t, permit_id: permit,
+    ...(proofId ? { proof_id: proofId } : {}), binding });
+}
+function bindingPayloadValid(raw: string, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding, proofId?: string): boolean {
   try {
     const x = JSON.parse(raw);
-    return raw === JSON.stringify(x) && x?.schema_version === 1 && x.permit_id === permit
+    return raw === JSON.stringify(x) && raw === bindingPayload(t, permit, binding, proofId)
+      && x?.schema_version === 1 && x.permit_id === permit
       && JSON.stringify(x.tuple) === JSON.stringify(t) && bindingValid(x.binding, binding.binding_sha256)
       && JSON.stringify(x.binding) === JSON.stringify(binding);
   } catch { return false; }
+}
+function bindingIntentPayloadFor(t: OwnerTuple, record: OwnerRecordV1, proof: unknown): string | null {
+  const intent = record.binding_intent;
+  if (!intent || !record.permit_id || !record.effect_start_proof_id
+    || intent.permit_id !== record.permit_id || intent.proof_id !== record.effect_start_proof_id
+    || JSON.stringify(intent.tuple) !== JSON.stringify(t)
+    || !proofValid(proof, t, record.permit_id) || proof.proof_id !== record.effect_start_proof_id
+    || !bindingValid(intent.binding, intent.binding.binding_sha256)) return null;
+  return bindingPayload(t, record.permit_id, intent.binding,
+    record.sidecar_version === 2 ? record.effect_start_proof_id : undefined);
 }
 function compat(r: OwnerRecordV1, t: OwnerTuple, receipt: ContainmentEffectReceipt | null = null): ContainmentEffectAttempt {
   const x = r as OwnerRecordV1 & { permit?: ContainmentEffectPermit; binding?: ContainmentEffectBinding };
@@ -324,7 +371,7 @@ export class ContainmentEffectLedger {
     const nonce = attempt.startsWith(attemptPrefix) ? attempt.slice(attemptPrefix.length) : "";
     const startSidecarKey = suffix === null ? "" : `${PREFIX}effect-start:${suffix}`;
     const bindingSidecarKey = suffix === null ? "" : `${PREFIX}effect-binding:${suffix}`;
-    const mirrorSidecarKey = suffix === null ? "" : `${PREFIX}spawn-mirror:${suffix}`;
+    const legacyMirrorSidecarKey = suffix === null ? "" : `${PREFIX}spawn-mirror:${suffix}`;
     const snapshot = await this.storage.transaction(async s => ({
       p: await s.get<OwnerPointerV1>(pointer),
       a: await s.get<OwnerRecordV1>(attempt),
@@ -334,9 +381,9 @@ export class ContainmentEffectLedger {
     const unknown = (): OwnerResult => ({ schema_version: 1, kind: "unknown", tuple_digest: "",
       attempt_key: attempt, active_pointer_key: pointer, permit: null, proof: null, state: "UNKNOWN" });
     if (!this.kv) return unknown();
-    const mirrorEvidence = async (): Promise<string | null | undefined> => {
-      if (!mirrorSidecarKey || !this.kv) return null;
-      try { return await this.kv.get(mirrorSidecarKey); } catch { return undefined; }
+    const mirrorEvidence = async (key: string): Promise<string | null | undefined> => {
+      if (!key || !this.kv) return null;
+      try { return await this.kv.get(key); } catch { return undefined; }
     };
     const bindingEvidence = async (): Promise<string | null | undefined> => {
       if (!bindingSidecarKey || !this.kv) return null;
@@ -344,8 +391,12 @@ export class ContainmentEffectLedger {
     };
     if (p === undefined && a === undefined) {
       if (suffix === null || !/^[0-9a-f]{32}$/.test(nonce) || snapshot.start !== undefined || !this.kv) return unknown();
-      const [binding, mirror] = await Promise.all([bindingEvidence(), mirrorEvidence()]);
-      if (binding !== null || mirror !== null) return unknown();
+      const [binding, legacyMirror, versionedMirror] = await Promise.all([
+        bindingEvidence(), mirrorEvidence(legacyMirrorSidecarKey),
+        mirrorEvidence(`${legacyMirrorSidecarKey}/${encodeURIComponent(nonce)}`),
+      ]);
+      if (binding !== null || legacyMirror !== null || versionedMirror !== null
+        || binding === undefined || legacyMirror === undefined || versionedMirror === undefined) return unknown();
       return { schema_version: 1, kind: "missing", tuple_digest: "",
         attempt_key: attempt, active_pointer_key: pointer, permit: null,
         proof: null, state: null };
@@ -389,9 +440,17 @@ export class ContainmentEffectLedger {
     } else if (snapshot.start !== undefined) return unknown();
     const bindingSidecar = await bindingEvidence();
     if (a.binding_id !== null) {
-      if (!a.permit_id || !a.binding || !this.kv || typeof bindingSidecar !== "string"
-        || !bindingPayloadValid(bindingSidecar, t, a.permit_id, a.binding)) return unknown();
-    } else if (bindingSidecar !== null) return unknown();
+      const recoverableMissingV2Bound = a.sidecar_version === 2 && a.state === "BOUND"
+        && (bindingSidecar === null || bindingSidecar === undefined);
+      if (!a.permit_id || !a.binding || !this.kv
+        || (!recoverableMissingV2Bound && (typeof bindingSidecar !== "string"
+          || !bindingPayloadValid(bindingSidecar, t, a.permit_id, a.binding,
+            a.sidecar_version === 2 ? a.effect_start_proof_id ?? undefined : undefined)))) return unknown();
+    } else if (a.binding_intent) {
+      const expected = bindingIntentPayloadFor(t, a, snapshot.start);
+      if (!expected || (bindingSidecar !== null && bindingSidecar !== undefined && bindingSidecar !== expected)) return unknown();
+    } else if (bindingSidecar !== null
+      && !(bindingSidecar === undefined && a.sidecar_version === 2 && a.state === "PERMIT_ISSUED")) return unknown();
     if (!await ownerMirrorEvidenceValid(this.kv, t, a)) return unknown();
     return this.out(a.tuple, a.state === "COMMITTED" ? "committed" : "owned", a.state, a);
   }
@@ -408,8 +467,10 @@ export class ContainmentEffectLedger {
     if (pointer === undefined && attempt === undefined) {
       if (proof !== undefined) throw new Error("normal intake readback has unresolved sidecar evidence");
       try {
-        const [binding, mirror] = await Promise.all([this.kv.get(bindingKey(t)), this.kv.get(mirrorKey(t))]);
-        if (binding !== null || mirror !== null) throw new Error("normal intake readback has unresolved sidecar evidence");
+        const [binding, mirror, versionedMirror] = await Promise.all([
+          this.kv.get(bindingKey(t)), this.kv.get(mirrorKey(t)), this.kv.get(versionedMirrorKey(t)),
+        ]);
+        if (binding !== null || mirror !== null || versionedMirror !== null) throw new Error("normal intake readback has unresolved sidecar evidence");
       } catch { throw new Error("normal intake readback sidecar evidence unavailable"); }
       return { kind: "missing", state: null };
     }
@@ -443,9 +504,18 @@ export class ContainmentEffectLedger {
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
       catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
-      if (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding)) {
+      const repairableV2Bound = record.sidecar_version === 2 && record.state === "BOUND" && raw === null;
+      if (!repairableV2Bound && (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding,
+        record.sidecar_version === 2 ? record.effect_start_proof_id ?? undefined : undefined))) {
         throw new Error("normal intake effect corruption: divergent binding evidence");
       }
+    } else if (record.binding_intent) {
+      const expected = bindingIntentPayloadFor(t, record, proof);
+      if (!expected) throw new Error("normal intake effect corruption: invalid binding intent");
+      let raw: string | null;
+      try { raw = await this.kv.get(bindingKey(t)); }
+      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
+      if (raw !== null && raw !== expected) throw new Error("normal intake effect corruption: divergent binding intent");
     } else if (this.kv) {
       let raw: string | null;
       try { raw = await this.kv.get(bindingKey(t)); }
@@ -492,7 +562,7 @@ export class ContainmentEffectLedger {
         schema_version: 1, tuple: t, ...t, nonce: t.caller_nonce, state: "PREPARED",
         permit_id: null, binding_id: null, effect_start_proof_id: null,
         effect_started: false, created_ms: created, expires_ms: created + OWNER_RECORD_TTL_MS,
-        tombstone: false, attempt_key: attemptKey(t),
+        tombstone: false, attempt_key: attemptKey(t), sidecar_version: 2,
       };
       await s.put(attemptKey(t), r);
       await s.put(activeKey(t), r);
@@ -528,29 +598,52 @@ export class ContainmentEffectLedger {
       payload_digest: null, observed_at_ms: Date.now(),
     });
     if (!t || !this.kv) return unavailable();
-    const key = mirrorKey(t);
+    let key = versionedMirrorKey(t);
     const authorization = await this.storage.transaction(async s => {
       const p = await s.get<OwnerPointerV1>(activeKey(t)); const a = await s.get<OwnerRecordV1>(attemptKey(t));
       const owned = ["CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED"].includes(a?.state ?? "");
       const ok = !!a && !!p && pointerMatchesAttempt(p, a, t) && (result === "acquired" ? a.state === "CLAIM_ACQUIRED" : owned);
-      return { ok, permit_id: ok ? a!.permit_id : null };
+      return { ok, record: ok ? a! : undefined };
     });
     if (!authorization.ok) return unavailable(key);
+    const record = authorization.record!;
+    key = record.sidecar_version === 2 ? versionedMirrorKey(t) : mirrorKey(t);
     const payload: SpawnMirrorPayloadV1 = {
       schema_version: 1, tuple: t, tuple_digest: await ownerTupleDigest(t),
-      caller_nonce: t.caller_nonce, result, owner: t.owner, token: t.token,
-      lease_epoch: t.lease_epoch, permit_id: authorization.permit_id,
-      attempt_key: attemptKey(t), active_pointer_key: activeKey(t), written_at_ms: Date.now(),
+      caller_nonce: t.caller_nonce,
+      result: "acquired",
+      owner: t.owner, token: t.token,
+      lease_epoch: t.lease_epoch,
+      permit_id: null,
+      attempt_key: attemptKey(t), active_pointer_key: activeKey(t), written_at_ms: record.created_ms,
     };
     const text = JSON.stringify(payload);
     try {
-      await this.kv.put(key, text);
+      let existing = await this.kv.get(key);
+      if (record.mirror_digest !== undefined) {
+        if (existing === null) return { schema_version: 1, kind: "missing", key, payload: null, payload_digest: null, observed_at_ms: Date.now() };
+        if (await sha256(existing) !== record.mirror_digest) return unavailable(key);
+      } else if (existing === null) {
+        await this.kv.put(key, text);
+        existing = await this.kv.get(key);
+      }
+      if (existing === null) return { schema_version: 1, kind: "missing", key, payload: null, payload_digest: null, observed_at_ms: Date.now() };
+      const digest = await sha256(existing);
+      const parsed = JSON.parse(existing) as SpawnMirrorPayloadV1;
+      const valid = await mirrorValid(parsed, t) && parsed.result === "acquired" && parsed.permit_id === null
+        && (record.sidecar_version !== 2 || existing === text);
+      if (!valid) {
+        return { schema_version: 1, kind: "mismatch", key, payload: existing, payload_digest: digest, observed_at_ms: Date.now() };
+      }
       const back = await this.kv.get(key);
-      if (back === null) return { schema_version: 1, kind: "missing", key, payload: null, payload_digest: null, observed_at_ms: Date.now() };
-      const parsed = JSON.parse(back);
-      const digest = await sha256(back);
-      if (back !== text || !(await mirrorValid(parsed, t))) return { schema_version: 1, kind: "mismatch", key, payload: back, payload_digest: digest, observed_at_ms: Date.now() };
-      return { schema_version: 1, kind: "exact", key, payload: back, payload_digest: digest, observed_at_ms: Date.now() };
+      if (back !== existing) return unavailable(key);
+      const stillOwned = await this.storage.transaction(async s => {
+        const p = await s.get<OwnerPointerV1>(activeKey(t));
+        const a = await s.get<OwnerRecordV1>(attemptKey(t));
+        return !!a && !!p && a.caller_nonce === t.caller_nonce && pointerMatchesAttempt(p, a, t);
+      });
+      if (!stillOwned) return unavailable(key);
+      return { schema_version: 1, kind: "exact", key, payload: existing, payload_digest: digest, observed_at_ms: Date.now() };
     } catch {
       return unavailable(key);
     }
@@ -560,22 +653,39 @@ export class ContainmentEffectLedger {
     if (!t || (external_permit_id !== undefined && !validText(external_permit_id)) || !HEX.test(mirror_digest) || mirror_digest !== readback_digest
       || request.observation_kind !== "exact" || request.observation_digest !== mirror_digest) return rejected();
     if (!this.kv) return rejected();
-    let mirrorRaw: string | null;
-    try { mirrorRaw = await this.kv.get(mirrorKey(t)); } catch { return rejected(); }
-    if (!mirrorRaw) return rejected();
-    let mirrorValue: unknown;
-    try { mirrorValue = JSON.parse(mirrorRaw); } catch { return rejected(); }
-    if (!(await mirrorValid(mirrorValue, t)) || await sha256(mirrorRaw) !== mirror_digest) return rejected();
+    const initial = await this.storage.get<OwnerRecordV1>(attemptKey(t));
+    if (!initial || !recordValid(initial, t)) return rejected();
+    const v2Anchored = initial.sidecar_version === 2 && initial.mirror_digest !== undefined
+      && ["PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED"].includes(initial.state);
+    if (v2Anchored && initial.mirror_digest !== mirror_digest) return rejected();
+    const mirrorSidecarKey = initial.sidecar_version === 2 ? versionedMirrorKey(t) : mirrorKey(t);
+    let mirrorRaw: string | null | undefined;
+    try { mirrorRaw = await this.kv.get(mirrorSidecarKey); }
+    catch { if (!v2Anchored) return rejected(); }
+    if (mirrorRaw === null && !v2Anchored) return rejected();
+    if (typeof mirrorRaw === "string") {
+      let mirrorValue: unknown;
+      try { mirrorValue = JSON.parse(mirrorRaw); } catch { return rejected(); }
+      if (!(await mirrorValid(mirrorValue, t)) || await sha256(mirrorRaw) !== mirror_digest) return rejected();
+      if (initial.sidecar_version === 2) {
+        const canonical = JSON.stringify({ schema_version: 1, tuple: t, tuple_digest: await ownerTupleDigest(t),
+          caller_nonce: t.caller_nonce, result: "acquired", owner: t.owner, token: t.token,
+          lease_epoch: t.lease_epoch, permit_id: null, attempt_key: attemptKey(t),
+          active_pointer_key: activeKey(t), written_at_ms: initial.created_ms });
+        if (mirrorRaw !== canonical) return rejected();
+      }
+    }
     return this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t));
       const p: any = await s.get(activeKey(t));
-      if (!a || !p || !pointerMatchesAttempt(p, a, t)
+      if (!a || !p || !recordValid(a, t) || !pointerMatchesAttempt(p, a, t)
         || p.attempt_key !== attemptKey(t) || a.nonce !== p.nonce) return this.out(t, "unknown", "UNKNOWN");
       if (a.state === "PERMIT_ISSUED" || a.state === "BOUND" || a.state === "DRIVING") {
-        if (external_permit_id !== undefined && a.permit_id !== external_permit_id) return this.out(t, "unknown", "UNKNOWN");
+        if ((a.sidecar_version === 2 && a.mirror_digest !== mirror_digest)
+          || (external_permit_id !== undefined && a.permit_id !== external_permit_id)) return this.out(t, "unknown", "UNKNOWN");
         return this.out(t, "owned", a.state, a);
       }
-      if (a.state !== "CLAIM_ACQUIRED") return this.out(t, "rejected", a.state, a);
+      if (a.state !== "CLAIM_ACQUIRED" || (a.sidecar_version === 2 && a.mirror_digest !== undefined)) return this.out(t, "rejected", a.state, a);
       const issued = Date.now();
       const permit: ContainmentEffectPermit = {
         schema_version: 1, permit_id: external_permit_id ?? crypto.randomUUID(), repo: t.repo,
@@ -584,7 +694,8 @@ export class ContainmentEffectLedger {
         issued_to_owner: t.owner, issued_to_epoch: t.lease_epoch,
         owner_token_digest: await sha256(t.token), issued_at_ms: issued, expires_ms: issued + 120_000,
       };
-      const n: any = { ...a, state: "PERMIT_ISSUED", permit_id: permit.permit_id, permit };
+      const n: any = { ...a, state: "PERMIT_ISSUED", permit_id: permit.permit_id, permit,
+        ...(a.sidecar_version === 2 ? { mirror_digest } : {}) };
       await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
       const out = await this.out(t, "permit_issued", n.state, n); out.permit = permit; return out;
     });
@@ -618,32 +729,57 @@ export class ContainmentEffectLedger {
   async bind(request: SpawnOwnerRequest, permit_id: string, proof_id: string, binding: ContainmentEffectBinding): Promise<OwnerResult> {
     const t = requestTuple(request); if (!t || !validText(permit_id) || !validText(proof_id)
       || !bindingValid(binding, binding?.binding_sha256 ?? null) || !this.kv) return rejected();
-    const authorized = await this.storage.transaction(async s => {
+    const intent = { schema_version: 1 as const, tuple: t, permit_id, proof_id, binding };
+    const staged = await this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t));
       const proof = await s.get<EffectStartProofV1>(startKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t)
         || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id
         || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t)
-        || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 ? this.out(t, "bound", a.state, a) : this.out(t, "rejected", a.state, a);
-      return a.state === "PERMIT_ISSUED" ? true : this.out(t, "rejected", a.state, a);
+        || await sha256(t.token) !== a.permit.owner_token_digest) return { result: await this.out(t, "unknown", "UNKNOWN") };
+      if (a.state === "BOUND") {
+        const exact = a.binding_id === binding.binding_sha256 && JSON.stringify(a.binding) === JSON.stringify(binding);
+        return exact ? { record: a as OwnerRecordV1, alreadyBound: true as const }
+          : { result: await this.out(t, "unknown", "UNKNOWN", a) };
+      }
+      if (a.state !== "PERMIT_ISSUED") return { result: await this.out(t, "rejected", a.state, a) };
+      if (a.binding_intent && JSON.stringify(a.binding_intent) !== JSON.stringify(intent)) {
+        return { result: await this.out(t, "unknown", "UNKNOWN", a) };
+      }
+      if (a.binding_intent) return { record: a as OwnerRecordV1, alreadyBound: false as const };
+      const n = { ...a, binding_intent: intent };
+      await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
+      return { record: n as OwnerRecordV1, alreadyBound: false as const };
     });
-    if (authorized !== true) return authorized;
-    const payload = JSON.stringify({ schema_version: 1, tuple: t, permit_id, binding });
+    if ("result" in staged && staged.result) return staged.result;
+    if (!staged.record) return rejected();
+    const record = staged.record;
+    const canonicalBinding = staged.alreadyBound ? record.binding : record.binding_intent?.binding;
+    const canonicalPermit = record.permit_id;
+    const canonicalProof = record.effect_start_proof_id;
+    if (!canonicalBinding || !canonicalPermit || !canonicalProof) return this.out(t, "unknown", "UNKNOWN", record);
+    const payload = bindingPayload(t, canonicalPermit, canonicalBinding,
+      record.sidecar_version === 2 ? canonicalProof : undefined);
     try {
-      await this.kv.put(bindingKey(t), payload); const back = await this.kv.get(bindingKey(t));
-      if (back !== payload) return rejected();
-    } catch { return rejected(); }
+      let current = await this.kv.get(bindingKey(t));
+      if (current === null) {
+        if (staged.alreadyBound && record.sidecar_version !== 2) return this.out(t, "unknown", "UNKNOWN", record);
+        await this.kv.put(bindingKey(t), payload);
+        current = await this.kv.get(bindingKey(t));
+      }
+      if (current !== payload || !bindingPayloadValid(current, t, canonicalPermit, canonicalBinding,
+        record.sidecar_version === 2 ? canonicalProof : undefined)) return this.out(t, "unknown", "UNKNOWN", record);
+      const verified = await this.kv.get(bindingKey(t));
+      if (verified !== payload) return this.out(t, "unknown", "UNKNOWN", record);
+    } catch { return this.out(t, "unavailable", record.state, record); }
     return this.storage.transaction(async s => {
       const a: any = await s.get(attemptKey(t)); const p: any = await s.get(activeKey(t)); const proof = await s.get<EffectStartProofV1>(startKey(t));
       if (!a || !p || !pointerMatchesAttempt(p, a, t) || !recordValid(a, t) || a.permit_id !== permit_id || a.effect_start_proof_id !== proof_id || !proofValid(proof, t, permit_id) || !permitValid(a.permit, t) || await sha256(t.token) !== a.permit.owner_token_digest) return this.out(t, "unknown", "UNKNOWN");
-      if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 ? this.out(t, "bound", a.state, a) : this.out(t, "rejected", a.state, a);
-      if (a.state !== "PERMIT_ISSUED") return this.out(t, "rejected", a.state, a);
-      let current: string | null;
-      try { current = await this.kv!.get(bindingKey(t)); } catch { return this.out(t, "unknown", "UNKNOWN", a); }
-      if (!current || current !== payload || await sha256(current) !== await sha256(payload)
-        || !bindingPayloadValid(current, t, permit_id, binding)) return this.out(t, "unknown", "UNKNOWN", a);
-      const n = { ...a, state: "BOUND" as const, binding_id: binding.binding_sha256, binding };
+      if (a.state === "BOUND") return a.binding_id === binding.binding_sha256 && JSON.stringify(a.binding) === JSON.stringify(binding)
+        ? this.out(t, "bound", a.state, a) : this.out(t, "unknown", "UNKNOWN", a);
+      if (a.state !== "PERMIT_ISSUED" || !a.binding_intent || JSON.stringify(a.binding_intent) !== JSON.stringify(intent)) return this.out(t, "unknown", "UNKNOWN", a);
+      const { binding_intent: _intent, ...withoutIntent } = a;
+      const n = { ...withoutIntent, state: "BOUND" as const, binding_id: binding.binding_sha256, binding };
       await s.put(attemptKey(t), n); await s.put(activeKey(t), n);
       const out = await this.out(t, "bound", n.state, n); out.permit = a.permit; out.proof = proof; return out;
     });

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import worker, { runNormalIntakeDrain } from "../src/index";
-import { intakeOwnerTuple } from "../src/containment_effect_route";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey, intakeOwnerTuple } from "../src/containment_effect_route";
 import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const ADMIN = "normal-intake-readback-admin";
@@ -71,6 +71,21 @@ async function seedDrivingEffect(f: ReturnType<typeof fixture>, eventId: string)
   const bound = await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding);
   expect(bound.kind).toBe("bound");
   expect((await f.d.instance.ownerMarkDriving(request, confirmed.permit!.permit_id, started.proof!.proof_id)).kind).toBe("driving");
+}
+
+async function seedConfirmedIntakeOwner(f: ReturnType<typeof fixture>, eventId: string) {
+  const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+  const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+  expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+  expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+  const mirror = await f.d.instance.ownerMirror(request, "acquired");
+  expect(mirror.kind).toBe("exact");
+  const confirmed = await f.d.instance.ownerConfirm(
+    { ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest },
+    mirror.payload_digest!, mirror.payload_digest!,
+  );
+  expect(confirmed.kind).toBe("permit_issued");
+  return { tuple, request, mirror, confirmed };
 }
 
 function readRequest(query = "", auth?: string): Request {
@@ -185,17 +200,121 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(body).not.toContain(attempt.tuple.token);
   });
 
-  it.each(["absent", "malformed", "tuple", "permit"] as const)("fails closed when an existing intake owner mirror is %s", async corruption => {
+  it.each(["absent", "unavailable"] as const)("uses the durable confirmation digest when a previously confirmed mirror is %s", async failure => {
+    const f = fixture();
+    const eventId = `confirmed-mirror-${failure}`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const { tuple, mirror } = await seedConfirmedIntakeOwner(f, eventId);
+    const attempt = f.d.storage.map.get(containmentSpawnAttemptKey(tuple)) as Record<string, unknown>;
+    expect(attempt.mirror_digest).toBe(mirror.payload_digest);
+    const mirrorKey = containmentSpawnMirrorKey(tuple);
+    expect(f.store.map.get(mirrorKey)).toBe(mirror.payload);
+    if (failure === "absent") f.store.map.delete(mirrorKey);
+    else f.store.get.mockImplementation(async key => {
+      if (key === mirrorKey) throw new Error("mirror KV unavailable after durable confirmation");
+      return f.store.map.get(key) ?? null;
+    });
+
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { effect: { kind: string; state: string } };
+    expect(body.effect).toEqual({ kind: "owned", state: "PERMIT_ISSUED" });
+  });
+
+  it("rejects a changed canonical mirror when its durable confirmation digest is present", async () => {
+    const f = fixture(); const eventId = "confirmed-mirror-digest-mismatch";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const { tuple, mirror } = await seedConfirmedIntakeOwner(f, eventId);
+    const attempt = f.d.storage.map.get(containmentSpawnAttemptKey(tuple)) as Record<string, unknown>;
+    expect(attempt.mirror_digest).toBe(mirror.payload_digest);
+    const changed = JSON.parse(mirror.payload!) as { written_at_ms: number };
+    changed.written_at_ms += 1;
+    f.store.map.set(mirror.key, JSON.stringify(changed));
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
+  it("keeps legacy confirmed owners dependent on their live canonical mirror when no digest was recorded", async () => {
+    const f = fixture(); const eventId = "legacy-confirmed-mirror-no-digest";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const { tuple, mirror } = await seedConfirmedIntakeOwner(f, eventId);
+    const attemptKey = containmentSpawnAttemptKey(tuple);
+    const activeKey = containmentSpawnActiveKey(tuple);
+    const attempt = f.d.storage.map.get(attemptKey) as Record<string, unknown>;
+    const pointer = f.d.storage.map.get(activeKey) as Record<string, unknown>;
+    delete attempt.sidecar_version; delete pointer.sidecar_version;
+    delete attempt.mirror_digest;
+    delete pointer.mirror_digest;
+    f.d.storage.map.set(attemptKey, attempt);
+    f.d.storage.map.set(activeKey, pointer);
+    const legacyMirrorKey = `containment:v1:spawn-mirror:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    f.store.map.delete(mirror.key);
+    f.store.map.set(legacyMirrorKey, mirror.payload!);
+
+    expect((await read(f, `?event_id=${encodeURIComponent(eventId)}`)).status).toBe(200);
+    f.store.map.delete(legacyMirrorKey);
+    const missingMirror = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    expect(missingMirror.status).toBe(503);
+    expect(await missingMirror.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
+  it("reads a pre-v2 owner from its legacy mirror key without inventing a durable digest", async () => {
+    const f = fixture(); const eventId = "legacy-v1-mirror-fallback";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const { tuple, mirror } = await seedConfirmedIntakeOwner(f, eventId);
+    const attemptKey = containmentSpawnAttemptKey(tuple);
+    const activeKey = containmentSpawnActiveKey(tuple);
+    const attempt = f.d.storage.map.get(attemptKey) as Record<string, unknown>;
+    const pointer = f.d.storage.map.get(activeKey) as Record<string, unknown>;
+    delete attempt.sidecar_version; delete attempt.mirror_digest;
+    delete pointer.sidecar_version; delete pointer.mirror_digest;
+    f.d.storage.map.set(attemptKey, attempt); f.d.storage.map.set(activeKey, pointer);
+    f.store.map.delete(mirror.key);
+    const legacyMirrorKey = `containment:v1:spawn-mirror:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    f.store.map.set(legacyMirrorKey, mirror.payload!);
+
+    expect((await read(f, `?event_id=${encodeURIComponent(eventId)}`)).status).toBe(200);
+    expect(f.d.storage.map.get(attemptKey)).not.toHaveProperty("mirror_digest");
+    f.store.map.delete(legacyMirrorKey);
+    expect((await read(f, `?event_id=${encodeURIComponent(eventId)}`)).status).toBe(503);
+  });
+
+  it("fails closed when an acquired owner has no durable confirmation and its mirror is absent", async () => {
+    const f = fixture();
+    const eventId = "unconfirmed-mirror-absent";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+    expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+    const mirror = await f.d.instance.ownerMirror(request, "acquired");
+    expect(mirror.kind).toBe("exact");
+    f.store.map.delete(mirror.key);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
+  it.each(["malformed", "tuple", "permit"] as const)("fails closed when an existing intake owner mirror is %s", async corruption => {
     const f = fixture(); const eventId = `mirror-${corruption}-mismatch`;
     await f.d.instance.normalIntakeEnqueue(intake(eventId));
     await seedDrivingEffect(f, eventId);
     await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "uncertain");
     const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
-    const mirrorKey = `containment:v1:spawn-mirror:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    const mirrorKey = containmentSpawnMirrorKey(tuple);
     const mirrorRaw = f.store.map.get(mirrorKey);
     expect(mirrorRaw).toBeDefined();
-    if (corruption === "absent") f.store.map.delete(mirrorKey);
-    else if (corruption === "malformed") f.store.map.set(mirrorKey, "not-json");
+    if (corruption === "malformed") f.store.map.set(mirrorKey, "not-json");
     else {
       const mirror = JSON.parse(mirrorRaw!) as { tuple: { event_id: string }; permit_id: string | null };
       if (corruption === "tuple") mirror.tuple.event_id = "different-delivery";
