@@ -9,8 +9,10 @@ import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-hel
 
 const ADMIN = "normal-intake-readback-admin";
 const BODY_SHA = "b".repeat(64);
-const symbolExtraEffectDto = { kind: "missing", state: null, [Symbol("secret")]: "SENTINEL_secret_token" };
+const symbolMetadata = Symbol("transport metadata");
+const symbolUnavailableEffectDto = { kind: "unavailable", reason: "owner_evidence", [symbolMetadata]: "SENTINEL_secret_token" };
 const customPrototypeEffectDto = Object.assign(Object.create({ token: "SENTINEL_secret_token" }), { kind: "missing", state: null });
+Object.defineProperty(customPrototypeEffectDto, "transport", { value: "SENTINEL_secret_token", enumerable: false });
 
 function intake(event_id: string) {
   return {
@@ -679,13 +681,57 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(body).not.toContain("SENTINEL_secret_token");
   });
 
+  it("sanitizes a canonical unavailable DTO while ignoring symbol transport metadata", async () => {
+    const f = fixture();
+    const eventId = "readback-symbol-transport-metadata";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue(symbolUnavailableEffectDto as never);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "owner_evidence" });
+    expect(body).not.toContain("SENTINEL_secret_token");
+  });
+
+  it("sanitizes a canonical success DTO while ignoring its custom prototype", async () => {
+    const f = fixture();
+    const eventId = "readback-custom-prototype-metadata";
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue(customPrototypeEffectDto as never);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(body).effect).toEqual({ kind: "missing", state: null });
+    expect(body).not.toContain("SENTINEL_secret_token");
+  });
+
+  it("rejects an own accessor field without invoking its getter", async () => {
+    const f = fixture();
+    const eventId = "readback-accessor-dto-field";
+    let getterCalls = 0;
+    const dto = { kind: "missing", state: null };
+    Object.defineProperty(dto, "state", { enumerable: true, get() { getterCalls++; throw new Error("SENTINEL_secret_token"); } });
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue(dto as never);
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({ error: "normal intake readback unavailable", reason: "effect_dto_invalid" });
+    expect(getterCalls).toBe(0);
+    expect(body).not.toContain("SENTINEL_secret_token");
+  });
+
   it.each([
     ["unknown kind", { kind: "SENTINEL_secret_token", state: null }],
     ["malformed owned state", { kind: "owned", state: "SENTINEL_secret_token" }],
     ["owned committed state", { kind: "owned", state: "COMMITTED" }],
     ["extra success field", { kind: "missing", state: null, token: "SENTINEL_secret_token" }],
-    ["symbol extra field", symbolExtraEffectDto],
-    ["custom prototype", customPrototypeEffectDto],
     ["extra unavailable field", { kind: "unavailable", reason: "owner_evidence", token: "SENTINEL_secret_token" }],
     ["unknown unavailable reason", { kind: "unavailable", reason: "SENTINEL_secret_token" }],
   ] as const)("rejects malformed readback DTO: %s", async (_caseName, dto) => {
