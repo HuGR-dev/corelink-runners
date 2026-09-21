@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-21 — Pin Fabricd credential-lifecycle image
+
+Pin the Fabricd container to the immutable image built from corelink-runners
+commit `739d6588`, which includes the tenant credential lifecycle API used by
+runner minting.
+
 ### 2026-09-21 — Arm runner compute admission from its Fabric endpoint
 
 Runner authorization now requests and requires a signed compute grant only when
