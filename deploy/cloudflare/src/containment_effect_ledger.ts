@@ -247,10 +247,12 @@ export function containmentEffectReadbackFailure(error: unknown): ContainmentEff
 export interface ContainmentEffectAttempt extends OwnerRecordV1 { repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; created_at_ms: number; updated_at_ms: number; permit: ContainmentEffectPermit | null; binding: ContainmentEffectBinding | null; provider_receipt: ContainmentEffectReceipt | null }
 export interface ContainmentEffectMirror { schema_version: 1; repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; state: Exclude<ContainmentEffectState, "ABORTED_PRE_EFFECT">; permit_id: string | null; binding_sha256: string | null }
 
-interface EffectStorage {
+interface EffectTransaction {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
-  transaction<T>(fn: (s: EffectStorage) => Promise<T>): Promise<T>;
+}
+interface EffectStorage extends EffectTransaction {
+  transaction<T>(fn: (s: EffectTransaction) => Promise<T>): Promise<T>;
 }
 function legacyTuple(i: ContainmentEffectIdentity, nonce: string, owner: string, token: string, epoch: number): OwnerTuple | null { return normalizeTuple({ ...i, path: "redrive", event_id: `${PREFIX}legacy:${i.effect_id}`, reservation_epoch: epoch, effect_id: i.effect_id, owner, token, lease_epoch: epoch, drain_owner: owner, drain_lease_epoch: epoch, caller_nonce: nonce }); }
 export function containmentSpawnActiveKey(t: OwnerTuple): string { const n = normalizeTuple(t); return n ? activeKey(n) : ""; }
@@ -379,7 +381,7 @@ function compat(r: OwnerRecordV1, t: OwnerTuple, receipt: ContainmentEffectRecei
 export class ContainmentEffectLedger {
   private readonly storage: EffectStorage;
   constructor(storage: EffectStorage, private readonly kv?: KvLike) {
-    const pointerPut = (s: EffectStorage, key: string, value: unknown) =>
+    const pointerPut = (s: EffectTransaction, key: string, value: unknown) =>
       s.put(key, key.startsWith(`${PREFIX}spawn-active:`)
         ? activePointerProjection(value as Record<string, unknown>) : value);
     this.storage = {
@@ -387,7 +389,6 @@ export class ContainmentEffectLedger {
       put: (key, value) => pointerPut(storage, key, value),
       transaction: fn => storage.transaction(s => fn({
         get: s.get.bind(s), put: (key, value) => pointerPut(s, key, value),
-        transaction: s.transaction.bind(s),
       })),
     };
   }

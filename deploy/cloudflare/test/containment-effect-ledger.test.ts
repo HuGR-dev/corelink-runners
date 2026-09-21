@@ -16,6 +16,21 @@ class Storage {
   async put(key: string, value: unknown): Promise<void> { this.map.set(key, clone(value)); }
   async transaction<T>(fn: (s: Storage) => Promise<T>): Promise<T> { const run = this.tail.then(async () => { const tx = new Storage(); tx.map = new Map([...this.map].map(([k, v]) => [k, clone(v)])); const out = await fn(tx); this.map = tx.map; return out; }); this.tail = run.then(() => undefined, () => undefined); return run; }
 }
+class ProductionShapedStorage {
+  map = new Map<string, unknown>();
+  async get<T>(key: string): Promise<T | undefined> { return clone(this.map.get(key) as T); }
+  async put(key: string, value: unknown): Promise<void> { this.map.set(key, clone(value)); }
+  async transaction<T>(fn: (txn: { get<T>(key: string): Promise<T | undefined>; put(key: string, value: unknown): Promise<void> }) => Promise<T>): Promise<T> {
+    const staged = new Map([...this.map].map(([key, value]) => [key, clone(value)]));
+    const txn = {
+      get: async <V>(key: string): Promise<V | undefined> => clone(staged.get(key) as V),
+      put: async (key: string, value: unknown): Promise<void> => { staged.set(key, clone(value)); },
+    };
+    const result = await fn(txn);
+    this.map = staged;
+    return result;
+  }
+}
 function make() {
   const storage = new Storage(); const map = new Map<string, string>();
   const kv = { get: vi.fn(async (k: string) => map.get(k) ?? null), put: vi.fn(async (k: string, v: string) => { map.set(k, v); }), delete: vi.fn(async (k: string) => { map.delete(k); }) };
@@ -32,6 +47,18 @@ async function claim(ledger: ContainmentEffectLedger, t = tuple()) {
 }
 
 describe("T3-W17-R14 owner ledger", () => {
+  it("adapts a production-shaped transaction view without requiring nested transactions", async () => {
+    const storage = new ProductionShapedStorage();
+    const values = new Map<string, string>();
+    const kv = { get: vi.fn(async (key: string) => values.get(key) ?? null), put: vi.fn(async (key: string, value: string) => { values.set(key, value); }), delete: vi.fn(async (key: string) => { values.delete(key); }) };
+    const ledger = new ContainmentEffectLedger(storage, kv);
+    const request = { schema_version: 1 as const, tuple: tuple(), caller_nonce: nonce };
+
+    expect((await ledger.prepare(request)).kind).toBe("prepared");
+    expect(storage.map.has(containmentSpawnAttemptKey(request.tuple))).toBe(true);
+    expect(storage.map.has(containmentSpawnActiveKey(request.tuple))).toBe(true);
+  });
+
   it.each(["start proof", "binding", "mirror"] as const)("does not call a %s-only residue missing", async sidecar => {
     const { ledger, storage, map } = make(); const t = { ...tuple(), repo: "acme/repo" };
     const active = containmentSpawnActiveKey(t); const attempt = containmentSpawnAttemptKey(t);
