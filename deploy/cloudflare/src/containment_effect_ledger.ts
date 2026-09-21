@@ -228,7 +228,7 @@ export interface ContainmentEffectReapInput { identity: ContainmentEffectIdentit
 export type ContainmentEffectResult = { status: "prepared" | "active" | "committed" | "transitioned" | "aborted" | "reaped"; attempt: ContainmentEffectAttempt } | { status: "stale" | "busy" | "invalid" | "unknown_terminal" | "mirror_unavailable" | "mirror_mismatch" };
 export type ContainmentEffectReadback =
   | { kind: "missing"; state: null }
-  | { kind: "owned"; state: ContainmentEffectState }
+  | { kind: "owned"; state: Exclude<ContainmentEffectState, "COMMITTED"> }
   | { kind: "committed"; state: "COMMITTED" }
   | { kind: "unavailable"; reason: ContainmentEffectReadbackFailure };
 export type ContainmentEffectReadbackFailure =

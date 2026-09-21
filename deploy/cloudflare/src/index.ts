@@ -4882,8 +4882,9 @@ export default {
 type NormalIntakeReadbackUnavailableReason = ContainmentEffectReadbackFailure
   | "delivery_readback_unavailable" | "effect_rpc_unavailable";
 type NormalIntakeEffectReadbackSuccess = Exclude<ContainmentEffectReadback, { kind: "unavailable" }>;
-const NORMAL_INTAKE_EFFECT_STATES: ReadonlySet<ContainmentEffectState> = new Set([
-  "PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "COMMITTED", "ABORTED_PRE_EFFECT", "UNKNOWN",
+type NormalIntakeOwnedEffectState = Exclude<ContainmentEffectState, "COMMITTED">;
+const NORMAL_INTAKE_OWNED_EFFECT_STATES: ReadonlySet<NormalIntakeOwnedEffectState> = new Set([
+  "PREPARED", "CLAIM_ACQUIRED", "PERMIT_ISSUED", "BOUND", "DRIVING", "ABORTED_PRE_EFFECT", "UNKNOWN",
 ]);
 
 function isReadbackRecord(value: unknown): value is Record<string, unknown> {
@@ -4913,8 +4914,8 @@ function parseNormalIntakeEffectReadback(
     return { kind: "success", effect: { kind: "missing", state: null } };
   }
   if (value.kind === "owned" && hasExactReadbackKeys(value, ["kind", "state"])
-    && typeof value.state === "string" && NORMAL_INTAKE_EFFECT_STATES.has(value.state as ContainmentEffectState)) {
-    return { kind: "success", effect: { kind: "owned", state: value.state as ContainmentEffectState } };
+    && typeof value.state === "string" && NORMAL_INTAKE_OWNED_EFFECT_STATES.has(value.state as NormalIntakeOwnedEffectState)) {
+    return { kind: "success", effect: { kind: "owned", state: value.state as NormalIntakeOwnedEffectState } };
   }
   if (value.kind === "committed" && hasExactReadbackKeys(value, ["kind", "state"]) && value.state === "COMMITTED") {
     return { kind: "success", effect: { kind: "committed", state: "COMMITTED" } };

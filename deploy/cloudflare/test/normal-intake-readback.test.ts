@@ -9,6 +9,8 @@ import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-hel
 
 const ADMIN = "normal-intake-readback-admin";
 const BODY_SHA = "b".repeat(64);
+const symbolExtraEffectDto = { kind: "missing", state: null, [Symbol("secret")]: "SENTINEL_secret_token" };
+const customPrototypeEffectDto = Object.assign(Object.create({ token: "SENTINEL_secret_token" }), { kind: "missing", state: null });
 
 function intake(event_id: string) {
   return {
@@ -663,7 +665,10 @@ describe("GET /internal/v1/normal-intake", () => {
   it.each([
     ["unknown kind", { kind: "SENTINEL_secret_token", state: null }],
     ["malformed owned state", { kind: "owned", state: "SENTINEL_secret_token" }],
+    ["owned committed state", { kind: "owned", state: "COMMITTED" }],
     ["extra success field", { kind: "missing", state: null, token: "SENTINEL_secret_token" }],
+    ["symbol extra field", symbolExtraEffectDto],
+    ["custom prototype", customPrototypeEffectDto],
     ["extra unavailable field", { kind: "unavailable", reason: "owner_evidence", token: "SENTINEL_secret_token" }],
   ] as const)("rejects malformed readback DTO: %s", async (_caseName, dto) => {
     const f = fixture();
