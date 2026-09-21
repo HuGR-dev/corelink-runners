@@ -5,6 +5,24 @@ export interface ComputeBinding {
   workloadKind: "spawn_worker_runner" | "devenv"; workloadId: string;
   vcpuCount: number; maximumWallMs: number;
 }
+
+/**
+ * Reads the duration from the signed payload so callers which receive only a
+ * grant can still construct the exact binding. `stage` subsequently binds
+ * every field to this payload before any remote compute operation.
+ */
+export function maximumWallMsFromComputeGrant(token: string): number {
+  if (typeof token !== "string" || new TextEncoder().encode(token).length > 8192) throw new Error("invalid compute grant");
+  const [encoded, signature, ...rest] = token.split(".");
+  if (!encoded || !signature || rest.length || !/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[A-Za-z0-9_-]+$/.test(signature)) throw new Error("invalid compute grant");
+  try {
+    const padded = encoded.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - encoded.length % 4) % 4);
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), c => c.charCodeAt(0)))) as { maximum_wall_ms?: unknown };
+    const maximumWallMs = payload.maximum_wall_ms;
+    if (typeof maximumWallMs !== "number" || !Number.isSafeInteger(maximumWallMs) || maximumWallMs < 1 || maximumWallMs > 28_800_000) throw new Error("invalid compute grant");
+    return maximumWallMs;
+  } catch { throw new Error("invalid compute grant"); }
+}
 export interface ComputeObligationStorage {
   get<T>(key: string): Promise<T | undefined>;
   put(key: string, value: unknown): Promise<void>;
@@ -49,6 +67,7 @@ export class ComputeObligations {
     if (row.terminalKind === "settled" || row.actualVcpuMs !== undefined) {
       if (typeof row.actualVcpuMs !== "string" || !/^(0|[1-9][0-9]{0,18})$/.test(row.actualVcpuMs) ||
           BigInt(row.actualVcpuMs) > I64_MAX || typeof row.evidenceDigest !== "string" || !/^[0-9a-f]{64}$/i.test(row.evidenceDigest)) throw new Error("corrupt compute obligation");
+      if (row.terminalKind === "settled" && BigInt(row.actualVcpuMs) > BigInt(binding.vcpuCount) * BigInt(binding.maximumWallMs)) throw new Error("corrupt compute obligation");
     }
     if (row.providerReceipt !== undefined) {
       const receipt = this.terminalConfig
@@ -117,6 +136,17 @@ export class ComputeObligations {
     await this.storage.put(this.key(reservationId), { ...row, phase: "dispatched" });
   }
 
+  /** Refuse a DevEnv deadline that would outlive the signed grant's wall bound. */
+  async validateRuntimeDeadline(reservationId: string, workloadId: string, maximumWallMs: number, deadlineMs: number, nowMs: number): Promise<void> {
+    const row = await this.read(reservationId);
+    if (!row || row.phase !== "active" || row.binding.workloadId !== workloadId ||
+        row.binding.maximumWallMs !== maximumWallMs || !Number.isSafeInteger(deadlineMs) ||
+        !Number.isSafeInteger(nowMs) || deadlineMs <= nowMs) throw new Error("compute obligation deadline refused");
+    const payload = this.parseToken(row.binding);
+    const signedDeadline = (payload.expires_at_ms as number) + row.binding.maximumWallMs;
+    if (!Number.isSafeInteger(signedDeadline) || deadlineMs > signedDeadline) throw new Error("compute obligation deadline refused");
+  }
+
   async abandonUnused(reservationId: string): Promise<void> {
     const row = await this.read(reservationId);
     if (!row || row.phase === "dispatched" || row.phase === "settling") throw new Error("compute obligation abandonment refused");
@@ -141,6 +171,7 @@ export class ComputeObligations {
     if (row.phase === "terminal") { if (row.providerReceipt && sameReceipt(row.providerReceipt, proven)) return; throw new Error("compute settlement conflict"); }
     if (row.phase !== "dispatched" && row.phase !== "settling") throw new Error("compute settlement refused");
     if (row.phase === "settling" && (!row.providerReceipt || !sameReceipt(row.providerReceipt, proven))) throw new Error("compute settlement conflict");
+    if (BigInt(proven.actual_vcpu_ms) > BigInt(row.binding.vcpuCount) * BigInt(row.binding.maximumWallMs)) throw new Error("compute settlement exceeds reservation");
     const next = { ...row, phase: "settling" as const, actualVcpuMs: proven.actual_vcpu_ms, evidenceDigest: proven.evidence_digest, providerReceipt: proven };
     if (row.phase !== "settling") await this.storage.put(this.key(reservationId), next);
     const remoteReceipt = await this.client.settle(row.binding.token, reservationId, proven.actual_vcpu_ms, proven.evidence_digest);

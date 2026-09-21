@@ -39,6 +39,14 @@ describe("durable compute runtime obligations", () => {
     await s.obligations.settleProven(reservationId, terminal("settled"));
   });
 
+  it("refuses settlement above the signed vCPU-ms reservation", async () => {
+    const s = setup();
+    await s.obligations.prepare(binding(), 1_050_000);
+    await s.obligations.claimProvider(reservationId, "work", 1_050_001);
+    await expect(s.obligations.settleProven(reservationId, terminal("settled", reservationId, "2001"))).rejects.toThrow("exceeds reservation");
+    expect(s.calls).toEqual(["reserve", "activate"]);
+  });
+
   it("cancels prepared work and retains abandoning state on remote failure", async () => {
     const s = setup(); const b = binding();
     await s.obligations.prepare(b, 1_050_000);

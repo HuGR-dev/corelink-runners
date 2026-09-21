@@ -1,5 +1,5 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
-import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
+import { ComputeObligations, maximumWallMsFromComputeGrant, type ComputeBinding } from "./lib/compute_budget_obligation";
 import { NormalIntakeInbox, isNormalIntakeEventId, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
@@ -567,7 +567,7 @@ export class ContainmentDO extends DurableObject<Env> {
   }
 
   async prepareCompute(binding: ComputeBinding): Promise<void> {
-    if (binding.workloadKind !== "spawn_worker_runner" || binding.vcpuCount !== 4 || binding.maximumWallMs !== 28_800_000) {
+    if (binding.workloadKind !== "spawn_worker_runner" || binding.vcpuCount !== 4) {
       throw new Error("COMPUTE_BINDING_INVALID");
     }
     return this.ctx.blockConcurrencyWhile(() => this.computeObligations().prepare(binding, Date.now()));
@@ -2910,7 +2910,8 @@ async function prepareSpawn(
     if (authorized.computeGrant) {
       computeOwned = true;
       await containmentAuthority(env).prepareCompute({ token: authorized.computeGrant, reservationId: preparationId,
-        tenantId: authorized.tenant, workloadKind: "spawn_worker_runner", workloadId: jobId, vcpuCount: 4, maximumWallMs: 28_800_000 });
+        tenantId: authorized.tenant, workloadKind: "spawn_worker_runner", workloadId: jobId, vcpuCount: 4,
+        maximumWallMs: maximumWallMsFromComputeGrant(authorized.computeGrant) });
     }
     mint = await buildContainerEnv(env, { ...params, credentialOperationId: preparationId }, env0);
     if (mint.patId && mint.tenant) {

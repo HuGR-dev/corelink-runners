@@ -22,11 +22,11 @@ const NOW = Date.parse("2026-09-05T12:00:00Z");
 const tenantId = "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3";
 const sessionUuid = "11111111-1111-4111-8111-111111111111";
 
-function grant(id = sessionUuid, patId = "22222222-2222-4222-8222-222222222222"): AuthorizedDevenvStart {
-  return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid: id, patId, casPat: "synthetic-cas-secret", expiresAtMs: NOW + 60_000, computeReservationId: id } };
+function grant(id = sessionUuid, patId = "22222222-2222-4222-8222-222222222222", expiresAtMs = NOW + 60_000, maximumWallMs = 28_800_000): AuthorizedDevenvStart {
+  return { config: { workspaceName: "repo", profileName: "browser", tier: "standard-4" }, grant: { tenantId, sessionUuid: id, patId, casPat: "synthetic-cas-secret", expiresAtMs, computeReservationId: id, maximumWallMs } };
 }
-function token(id = sessionUuid) {
-  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: id, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000, issued_at_ms: NOW - 1_000, expires_at_ms: NOW + 60_000 };
+function token(id = sessionUuid, maximumWallMs = 28_800_000, expiresAtMs = NOW + 60_000) {
+  const payload = { v: 1, key_id: "key", tenant_id: tenantId, workload_kind: "devenv", workload_id: id, reservation_id: id, period_key: 202609, ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: maximumWallMs, issued_at_ms: expiresAtMs - 60_000, expires_at_ms: expiresAtMs };
   return `${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`;
 }
 function obligationToken(id: string, workloadId: string, expiresAtMs = NOW + 60_000) {
@@ -56,6 +56,40 @@ beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("authorized DevEnv compute composition", () => {
+  it("rejects a relay wall-bound mismatch before claiming provider capacity", async () => {
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+    await f.instance.prepareAuthorizedCompute({ token: token(sessionUuid, 1_000), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 1_000 });
+    await expect(f.instance.startAuthorizedDevenv(grant(sessionUuid, "22222222-2222-4222-8222-222222222222", NOW + 1_000, 999))).rejects.toThrow("compute obligation deadline refused");
+    expect(f.instance.start).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["reserve", "activate", "cancel"]);
+  });
+
+  it("hard-stops the dynamic wall deadline and reconstructs it after a restart", async () => {
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+    await f.instance.prepareAuthorizedCompute({ token: token(sessionUuid, 1_000), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 1_000 });
+    await f.instance.startAuthorizedDevenv(grant(sessionUuid, "22222222-2222-4222-8222-222222222222", NOW + 1_000, 1_000));
+    expect(f.stored.get("compute:devenv-deadline")).toEqual({ sessionUuid, deadlineMs: NOW + 1_000 });
+    const restarted = new RunnerDevEnvDO(f.ctx, f.env);
+    await f.ctx.blockConcurrencyWhile(async () => undefined);
+    expect(vi.mocked(restarted.schedule).mock.calls.some(([when, callback, payload]) =>
+      when.getTime() === NOW + 1_000 && callback === "expireAuthorizedSession" && (payload as { sessionUuid: string }).sessionUuid === sessionUuid,
+    )).toBe(true);
+    vi.mocked(Date.now).mockReturnValue(NOW + 1_000);
+    await restarted.expireAuthorizedSession({ sessionUuid });
+    expect(restarted.destroy).toHaveBeenCalledTimes(1);
+    expect(f.stored.has("compute:devenv-deadline")).toBe(false);
+  });
+
+  it("refuses a prepared reservation whose retry would cross its signed UTC-period deadline", async () => {
+    const monthEnd = Date.parse("2026-10-01T00:00:00Z");
+    vi.mocked(Date.now).mockReturnValue(monthEnd - 2);
+    const fetcher = vi.fn(async (url: string) => response(url)); const f = fixture(fetcher);
+    await f.instance.prepareAuthorizedCompute({ token: token(sessionUuid, 1, monthEnd - 1), reservationId: sessionUuid, tenantId, workloadKind: "devenv", workloadId: sessionUuid, vcpuCount: 4, maximumWallMs: 1 });
+    await expect(f.instance.startAuthorizedDevenv(grant(sessionUuid, "22222222-2222-4222-8222-222222222222", monthEnd + 1, 1))).rejects.toThrow("compute obligation deadline refused");
+    expect(f.instance.start).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname.split("/").pop())).toEqual(["reserve", "activate", "cancel"]);
+  });
+
   it("retries failures from an earlier page after a restart and a successful tail", async () => {
     const failedId = "11111111-1111-4111-8111-000000000001";
     let unavailable = true;
