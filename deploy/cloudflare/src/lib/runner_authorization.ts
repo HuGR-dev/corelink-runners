@@ -18,7 +18,7 @@ function required(value: unknown): value is string {
   return typeof value === "string" && value.trim() === value && value.length > 0;
 }
 
-function validResponse(value: unknown): RunnerAuthorization | null {
+function validResponse(value: unknown, computeArmed: boolean): RunnerAuthorization | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const tenant = record.tenant;
@@ -27,7 +27,9 @@ function validResponse(value: unknown): RunnerAuthorization | null {
   const computeGrant = record.compute_grant;
   if (!required(tenant) || typeof maxConcurrency !== "number" || !Number.isSafeInteger(maxConcurrency) || maxConcurrency <= 0) return null;
   if (maxVcpuH !== undefined && (typeof maxVcpuH !== "number" || !Number.isSafeInteger(maxVcpuH) || maxVcpuH <= 0 || maxVcpuH > 0xffffffff)) return null;
-  if (maxVcpuH !== undefined && (typeof computeGrant !== "string" || computeGrant.length < 1 || computeGrant.length > 8192)) return null;
+  if (computeGrant !== undefined && (typeof computeGrant !== "string" || computeGrant.length < 1 || computeGrant.length > 8192)) return null;
+  if (computeArmed && maxVcpuH !== undefined && computeGrant === undefined) return null;
+  if (!computeArmed && computeGrant !== undefined) return null;
   if (maxVcpuH === undefined && computeGrant !== undefined) return null;
   return {
     ...(typeof computeGrant === "string" ? { computeGrant } : {}),
@@ -43,6 +45,7 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
   const repo = params.repoFullName;
   const installationId = params.installationId;
   const acquiringPat = params.acquiringPat;
+  const computeArmed = required(env.FABRIC_COMPUTE_URL);
   if (!required(key) || !required(jobId) || !required(repo)
     || (!required(installationId) && !required(acquiringPat))) throw new RunnerAuthorizationError();
   const optionC = required(acquiringPat);
@@ -59,7 +62,7 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
       headers,
       body: JSON.stringify({
         job_id: jobId,
-        ...(params.computeReservationId ? { compute_reservation_id: params.computeReservationId } : {}),
+        ...(computeArmed && params.computeReservationId ? { compute_reservation_id: params.computeReservationId } : {}),
         repo_full_name: repo,
         ...(installationId ? { installation_id: installationId } : {}),
       }),
@@ -67,7 +70,7 @@ export async function authorizeRunner(env: MintEnv, params: MintParams): Promise
     if (!response.ok) throw new RunnerAuthorizationError();
     let value: unknown;
     try { value = await response.json(); } catch { throw new RunnerAuthorizationError(); }
-    const result = validResponse(value);
+    const result = validResponse(value, computeArmed);
     if (!result) throw new RunnerAuthorizationError();
     return result;
   } catch (error) {

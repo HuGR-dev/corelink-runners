@@ -16,8 +16,11 @@ function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
-function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean; adoptStatus?: number; metered?: boolean; revokeStatus?: number } = {}) {
-  const d = makeDO({ RUNNER_JOB_PATS: kv(), FABRIC_COMPUTE_URL: "https://fabric.example" });
+function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintKey?: boolean; adoptStatus?: number; metered?: boolean; advisoryUnarmed?: boolean; computeUrl?: string | null; revokeStatus?: number } = {}) {
+  const d = makeDO({
+    RUNNER_JOB_PATS: kv(),
+    ...(options.computeUrl === null ? {} : { FABRIC_COMPUTE_URL: options.computeUrl ?? "https://fabric.example" }),
+  });
   let gate = Promise.resolve();
   d.instance = new ContainmentDO({ storage: d.storage, blockConcurrencyWhile: (fn: () => Promise<void>) => {
     const result = gate.then(fn);
@@ -34,7 +37,7 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); calls.push({ url, init });
     if (url.endsWith("/internal/v1/runner/authorize")) {
-      if (options.metered) {
+      if (options.metered || options.advisoryUnarmed) {
         const request = JSON.parse(String(init?.body));
         computeId = request.compute_reservation_id;
         const now = Date.now();
@@ -43,14 +46,19 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
           ceiling_vcpu_ms: "864000000", vcpu_count: 4, maximum_wall_ms: 28_800_000,
           issued_at_ms: now, expires_at_ms: now + 60_000 };
         const token = btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-        return json({ tenant: TENANT, max_concurrency: 2, max_vcpu_h: 240, compute_grant: `${token}.signature` });
+        return json({
+          tenant: TENANT,
+          max_concurrency: 2,
+          max_vcpu_h: 240,
+          ...(options.metered ? { compute_grant: `${token}.signature` } : {}),
+        });
       }
       return json({ tenant: TENANT, max_concurrency: 2 }, options.authorizeStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/mint")) {
       order.push("mint");
       return json({ token_plaintext: "new-secret", pat_id: "new-pat", tenant: TENANT, lifecycle_generation: "1", max_concurrency: 2,
-        ...(options.metered ? { max_vcpu_h: 240 } : {}) }, options.mintStatus ?? 200);
+        ...(options.metered || options.advisoryUnarmed ? { max_vcpu_h: 240 } : {}) }, options.mintStatus ?? 200);
     }
     if (url.endsWith("/internal/v1/runner/revoke")) return new Response(null, { status: options.revokeStatus ?? 204 });
     if (url.includes("/internal/v1/compute/")) {
@@ -83,6 +91,7 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
     CORELINK_MINT_URL: "https://mint.example",
     GITHUB_MINT_TOKEN: "github-token",
     SPAWN_WORKER_PUBLIC_URL: "https://worker.example",
+    ...(options.computeUrl === null ? {} : { FABRIC_COMPUTE_URL: options.computeUrl ?? "https://fabric.example" }),
     CONCURRENCY_SLOTS: ns(slots),
   });
   return { d, store, slotsStorage, slots, runtime, order, calls, fetchMock };
@@ -111,6 +120,16 @@ afterEach(() => {
 });
 
 describe("spawn preparation before containment claim", () => {
+  it("accepts advisory max_vcpu_h without a grant while compute is unarmed and skips prepareCompute", async () => {
+    const f = fixture({ computeUrl: null, advisoryUnarmed: true });
+    const prepareCompute = vi.spyOn(f.d.instance, "prepareCompute");
+    await queued(f, "7130");
+
+    expect(prepareCompute).not.toHaveBeenCalled();
+    expect(f.calls.filter(({ url }) => url.includes("/internal/v1/compute/"))).toHaveLength(0);
+    expect(getContainer).toHaveBeenCalledOnce();
+  });
+
   it.each([undefined, "", " ", " padded-pat"])("refuses a configured unavailable PAT without installation fallback (%j)", async (secret) => {
     const f = fixture();
     Object.assign(f.runtime, { REPO_TENANT_PAT_MAP: JSON.stringify({ "acme/repo": "TENANT_PAT" }), TENANT_PAT: secret });

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### 2026-09-21 — Arm runner compute admission from its Fabric endpoint
+
+Runner authorization now requests and requires a signed compute grant only when
+`FABRIC_COMPUTE_URL` is configured. Without that endpoint, `max_vcpu_h` remains
+advisory: authorization accepts the ceiling without a grant, omits the reservation
+id from the server request, and skips `prepareCompute`. Unexpected grants and
+grants without a metered ceiling remain invalid.
+
 ### 2026-09-02 — T7-W1 current ledger and immutable finding identity
 
 The current-facing roadmap now indexes the complete remediation ledger: the 247-finding

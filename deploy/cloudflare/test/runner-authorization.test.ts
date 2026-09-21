@@ -5,6 +5,7 @@ import type { MintEnv, MintParams } from "../src/lib";
 const env: MintEnv = {
   CORELINK_RUNNER_MINT_AUTH_KEY: "dispatch-key",
   CORELINK_MINT_URL: "https://mint.example",
+  FABRIC_COMPUTE_URL: "https://fabric.example",
   CORELINK_CF_ACCESS_CLIENT_ID: "cf-id",
   CORELINK_CF_ACCESS_CLIENT_SECRET: "cf-secret",
 };
@@ -50,6 +51,31 @@ describe("authorizeRunner", () => {
       return Response.json({ tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12 });
     }));
     await expect(authorizeRunner(env, { ...params, computeReservationId: id })).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
+  it("accepts max_vcpu_h without a grant while compute admission is unarmed", async () => {
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(JSON.parse(String(init.body))).not.toHaveProperty("compute_reservation_id");
+      return Response.json({ tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    await expect(authorizeRunner({ ...env, FABRIC_COMPUTE_URL: undefined }, { ...params, computeReservationId: "reservation-1" })).resolves.toEqual({
+      tenant: "tenant-1", maxConcurrency: 4, maxVcpuH: 12,
+    });
+  });
+
+  it("rejects an unexpected compute grant while compute admission is unarmed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      tenant: "tenant-1", max_concurrency: 4, max_vcpu_h: 12, compute_grant: "fixture.grant",
+    })));
+    await expect(authorizeRunner({ ...env, FABRIC_COMPUTE_URL: undefined }, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
+  });
+
+  it("rejects a compute grant when the authorization has no ceiling", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      tenant: "tenant-1", max_concurrency: 4, compute_grant: "fixture.grant",
+    })));
+    await expect(authorizeRunner(env, params)).rejects.toBeInstanceOf(RunnerAuthorizationError);
   });
 
   it("fails closed on transport errors", async () => {

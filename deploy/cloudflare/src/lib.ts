@@ -51,6 +51,9 @@ export interface MintEnv {
   // armed deliberately.
   REQUIRE_MINT_KEY?: string;
   CORELINK_MINT_URL?: string;
+  // Presence arms monthly compute admission. Without this endpoint, max_vcpu_h
+  // remains advisory and the server may omit a compute grant.
+  FABRIC_COMPUTE_URL?: string;
   // CF Access (Inc-3) service-token pair for the gated `/internal/v1/*` edge. Set
   // as Worker secrets on corelink-spawn-worker; WITHOUT them the runner-mint call
   // 403s at the Cloudflare Access edge (the Inc-3 lockdown strands every spawn).
