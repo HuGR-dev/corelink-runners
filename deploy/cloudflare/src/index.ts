@@ -1292,6 +1292,33 @@ export class ContainmentDO extends DurableObject<Env> {
     return true;
   }
 
+  async acknowledgeTerminal(eventId: string, owner: string, epoch: number, now = Date.now()): Promise<boolean> {
+    return this.tx(async (s) => {
+      const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
+      const event = (await s.get(containmentEventKey(eventId))) as ContainmentEvent | undefined;
+      if (!meta || !event || !isCurrentHead(meta, event) || !leaseMatches(meta, owner, epoch, now)
+        || event.state !== "CLAIMED" || event.claim?.owner !== owner || event.claim.lease_epoch !== epoch
+        || event.effect_permit !== null) return false;
+      if (!Number.isSafeInteger(meta.backlog_count) || meta.backlog_count < 1) return false;
+      const pause = (await s.get(containmentPauseKey(event.pause_seq))) as ContainmentPause | undefined;
+      if (!pause || pause.event_id !== event.event_id || pause.pause_seq !== event.pause_seq) return false;
+      const indexKey = containmentJobIndexKey(event.repo, event.job_id);
+      const index = await s.get(indexKey) as ContainmentJobIndex | undefined;
+      const marker = await s.get(containmentJobIndexMarkerKey(event.repo, event.job_id));
+      if (!index || !isValidJobIndex(index, event.repo, event.job_id)
+        || !isValidJobIndexMarker(marker, event.repo, event.job_id)
+        || !index.active_event_ids.includes(event.event_id)) return false;
+      const backlog = meta.backlog_count - 1;
+      await s.delete(containmentEventKey(eventId));
+      await s.delete(containmentPauseKey(event.pause_seq));
+      const remaining = index.active_event_ids.filter((id) => id !== event.event_id);
+      if (remaining.length === 0) await s.delete(indexKey);
+      else await s.put(indexKey, { ...index, active_event_ids: remaining, active_count: remaining.length, updated_at_ms: now });
+      await s.put(CONTAINMENT_META_KEY, { ...meta, drain_cursor: event.pause_seq, backlog_count: backlog, drain_requested: backlog > 0 });
+      return true;
+    });
+  }
+
   async releaseLease(owner: string, epoch: number): Promise<void> {
     await this.tx(async (s) => {
       const meta = (await s.get(CONTAINMENT_META_KEY)) as ContainmentMeta | undefined;
@@ -3605,6 +3632,7 @@ async function fetchJobObservation(
     const authToken = await mintJitAuthToken(env, installationId);
     if (!authToken) return null;
     const r = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}`, {
+      method: "GET",
       headers: {
         authorization: `Bearer ${authToken}`,
         accept: "application/vnd.github+json",
@@ -4546,6 +4574,7 @@ type ContainmentDrainDependencies = {
   bindContainmentSpawnClaim?: typeof bindContainmentSpawnClaim;
   driveSpawn?: typeof driveSpawn;
   containmentEvidenceDigest?: typeof containmentEvidenceDigest;
+  observeTerminalJob?: typeof fetchJobObservation;
 };
 
 export async function runContainmentDrain(env: Env, dependencies: ContainmentDrainDependencies = {}): Promise<void> {
@@ -4553,6 +4582,7 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
   const bindClaim = dependencies.bindContainmentSpawnClaim ?? bindContainmentSpawnClaim;
   const drive = dependencies.driveSpawn ?? driveSpawn;
   const evidenceDigest = dependencies.containmentEvidenceDigest ?? containmentEvidenceDigest;
+  const observeTerminalJob = dependencies.observeTerminalJob ?? fetchJobObservation;
   let authority: DurableObjectStub<ContainmentDO>;
   try { authority = containmentAuthority(env); } catch { return; }
   const owner = crypto.randomUUID();
@@ -4575,9 +4605,21 @@ export async function runContainmentDrain(env: Env, dependencies: ContainmentDra
         if (!(await authority.acknowledge(event.event_id, owner, lease.epoch))) break;
         continue;
       }
-      if (!env.RUNNER_JOB_PATS) break;
       if (installationAllowlistArmed(env.INSTALLATION_ALLOWLIST)
         && !isInstallationAllowlisted(env.INSTALLATION_ALLOWLIST, event.installation_id)) break;
+      let observation: JobObservation | null;
+      try {
+        observation = await observeTerminalJob(env, event.repo, event.job_id, event.installation_id);
+      } catch {
+        break;
+      }
+      if (observation?.httpStatus !== 200 || !observation.job || typeof observation.job !== "object" || Array.isArray(observation.job)) break;
+      if (observation.job.status === "completed") {
+        if (!(await authority.acknowledgeTerminal(event.event_id, owner, lease.epoch))) break;
+        continue;
+      }
+      if (observation.job.status !== "queued") break;
+      if (!env.RUNNER_JOB_PATS) break;
       if (env.WEBHOOK_LIMITER && !(await env.WEBHOOK_LIMITER.limit({ key: `spawn:${event.repo}` })).success) break;
       const tuple = await drainOwnerTuple(event.repo, event.job_id, event.effect_id, event.event_id, owner, lease.epoch);
       const spawnOpts: ContainmentDriveOpts = { jobId: event.job_id, repo: event.repo, installationId: event.installation_id, labels: event.labels };

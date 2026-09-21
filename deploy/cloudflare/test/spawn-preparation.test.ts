@@ -91,7 +91,9 @@ function fixture(options: { mintStatus?: number; authorizeStatus?: number; mintK
 async function queued(f: ReturnType<typeof fixture>, jobId: string) {
   await bootstrap(f.d, jobId);
   await f.d.instance.append(event(Number(jobId), { job_id: jobId }));
-  await runContainmentDrain(f.runtime as never);
+  await runContainmentDrain(f.runtime as never, {
+    observeTerminalJob: async () => ({ httpStatus: 200, job: { status: "queued" } }),
+  });
 }
 
 function drivingRecords(f: ReturnType<typeof fixture>) {
