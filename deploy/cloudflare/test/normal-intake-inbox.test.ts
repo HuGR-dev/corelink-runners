@@ -46,6 +46,16 @@ describe("NormalIntakeInbox", () => {
     await inbox.enqueue(input("retry"), 100, 500); expect((await inbox.pending(100)).length).toBe(0); expect((await inbox.pending(601))[0].event_id).toBe("retry");
     await inbox.settle("retry", "a".repeat(64), "complete", 601); expect((await inbox.pending(601)).length).toBe(0); expect((await inbox.enqueue(input("new"))).status).toBe("accepted");
   });
+  it("inspects one delivery without changing its durable inbox snapshot", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    await inbox.enqueue(input("inspect-me"), 1000, 250);
+    const before = structuredClone([...storage.data.entries()]);
+
+    const record = await (inbox as unknown as { inspect(eventId: string): Promise<unknown> }).inspect("inspect-me");
+
+    expect(record).toEqual({ ...input("inspect-me"), repo: "owner/repo", state: "pending", next_attempt_ms: 1250 });
+    expect([...storage.data.entries()]).toEqual(before);
+  });
   it("serializes concurrent admissions and rejects malformed or key-crossing identities", async () => {
     const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
     const results = await Promise.all(Array.from({ length: 100 }, (_, i) => inbox.enqueue(input(`same/${i}`, i), i)));

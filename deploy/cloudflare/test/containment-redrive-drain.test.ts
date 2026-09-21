@@ -219,6 +219,44 @@ describe("T3-W17 deterministic continuation crash seams", () => {
     }
   });
 
+  it("reclaims an acquired-mirror predecessor only after strict drain admission", async () => {
+    const { d, store } = await queuedDrain();
+    const oldAuthority = authorityProxy(d.instance, {
+      ownerMirror: async (...args: Parameters<ContainmentDO["ownerMirror"]>) => {
+        const mirror = await d.instance.ownerMirror(...args);
+        if (mirror.kind === "exact") throw new Error("crash after acquired mirror");
+        return mirror;
+      },
+    });
+    await runContainmentDrain(envWithAuthority(d, store, oldAuthority), {
+      observeTerminalJob: observeQueuedJob,
+      driveSpawn: async () => providerReceipt({ jobId: "1", repo: "acme/repo" }),
+    });
+    const predecessorMirror = [...store.map.entries()].find(([key]) => key.startsWith("containment:v1:spawn-mirror:"));
+    expect(predecessorMirror).toBeDefined();
+    expect(JSON.parse(predecessorMirror![1])).toMatchObject({ result: "acquired", permit_id: null });
+    expect((await d.instance.getEvent("evt-1"))?.effect_permit).toBeNull();
+
+    vi.setSystemTime(T0 + 120_000);
+    const permits = new Set<string>();
+    const newAuthority = authorityProxy(d.instance, {
+      beginEffect: async (...args: Parameters<ContainmentDO["beginEffect"]>) => {
+        const permit = await d.instance.beginEffect(...args);
+        if (permit) permits.add(permit.permit_id);
+        return permit;
+      },
+    });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string; effect_id?: string; containment_event_id?: string; effect_permit_id?: string }) => {
+      await writeDeliveredProof(store, { jobId: opts.jobId, effect_id: opts.effect_id!, containment_event_id: opts.containment_event_id!, effect_permit_id: opts.effect_permit_id! });
+      return providerReceipt(opts);
+    });
+    await runContainmentDrain(envWithAuthority(d, store, newAuthority), { observeTerminalJob: observeQueuedJob, driveSpawn: drive });
+
+    expect(permits.size).toBe(1); expect(drive).toHaveBeenCalledTimes(1);
+    expect(await d.instance.getEvent("evt-1")).toBeNull();
+    expect(await d.instance.snapshot()).toMatchObject({ drain_cursor: 1, backlog_count: 0 });
+  });
+
   it("refuses cross-lease owner reap after a legacy permit exists", async () => {
     const { d, store } = await queuedDrain();
     const oldAuthority = authorityProxy(d.instance, {

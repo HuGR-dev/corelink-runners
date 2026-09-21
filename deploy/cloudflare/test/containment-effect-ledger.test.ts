@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ContainmentEffectLedger, ownerTupleDigest, type ContainmentEffectReceipt, type OwnerTuple } from "../src/containment_effect_ledger";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey } from "../src/containment_effect_route";
 
 const nonce = "0123456789abcdef0123456789abcdef";
 const nonce2 = "fedcba9876543210fedcba9876543210";
@@ -31,6 +32,40 @@ async function claim(ledger: ContainmentEffectLedger, t = tuple()) {
 }
 
 describe("T3-W17-R14 owner ledger", () => {
+  it.each(["start proof", "binding", "mirror"] as const)("does not call a %s-only residue missing", async sidecar => {
+    const { ledger, storage, map } = make(); const t = tuple();
+    const active = containmentSpawnActiveKey(t); const attempt = containmentSpawnAttemptKey(t);
+    const suffix = active.slice("containment:v1:spawn-active:".length);
+    if (sidecar === "start proof") storage.map.set(`containment:v1:effect-start:${suffix}`, { stale: true });
+    else if (sidecar === "binding") map.set(`containment:v1:effect-binding:${suffix}`, "stale");
+    else map.set(`containment:v1:spawn-mirror:${suffix}`, "stale");
+
+    expect((await ledger.observe(active, attempt)).kind).toBe("unknown");
+  });
+
+  it("reads pointer and attempt from one consistent storage snapshot", async () => {
+    const storage = new Storage(); const values = new Map<string, string>();
+    const kv = { get: vi.fn(async (key: string) => values.get(key) ?? null), put: vi.fn(async (key: string, value: string) => { values.set(key, value); }), delete: vi.fn(async (key: string) => { values.delete(key); }) };
+    const t = tuple();
+    const active = containmentSpawnActiveKey(t); const attempt = containmentSpawnAttemptKey(t);
+    const request = { schema_version: 1 as const, tuple: t, caller_nonce: t.caller_nonce };
+    let entered = false; let release!: () => void; let signal!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const activeRead = new Promise<void>(resolve => { signal = resolve; });
+    const originalGet = storage.get.bind(storage);
+    storage.get = async <T>(key: string): Promise<T | undefined> => {
+      const value = await originalGet<T>(key);
+      if (key === active && !entered) { entered = true; signal(); await gate; }
+      return value;
+    };
+    const ledger = new ContainmentEffectLedger(storage, kv);
+    const observed = ledger.observe(active, attempt);
+    await Promise.race([activeRead, new Promise(resolve => setTimeout(resolve, 0))]);
+    if (entered) { await ledger.prepare(request); release(); }
+
+    expect((await observed).kind).toBe("missing");
+  });
+
   it("uses exact active/attempt/mirror keys and preserves caller nonce", async () => {
     const { ledger, storage, map } = make(); const t = tuple(); const request = { schema_version: 1 as const, tuple: t, caller_nonce: nonce };
     expect((await ledger.prepare(request)).kind).toBe("prepared");
