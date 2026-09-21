@@ -257,6 +257,18 @@ async function mirrorValid(v: unknown, t: OwnerTuple): Promise<boolean> {
   if (!mirrorShapeValid(v, t)) return false;
   return (v as SpawnMirrorPayloadV1).tuple_digest === await ownerTupleDigest(t);
 }
+async function ownerMirrorEvidenceValid(kv: KvLike | undefined, t: OwnerTuple, record: OwnerRecordV1): Promise<boolean> {
+  if (!kv) return false;
+  let raw: string | null;
+  try { raw = await kv.get(mirrorKey(t)); } catch { return false; }
+  const missingAllowed = record.state === "PREPARED" || record.state === "CLAIM_ACQUIRED" || record.state === "ABORTED_PRE_EFFECT";
+  if (raw === null) return missingAllowed;
+  if (record.state === "PREPARED") return false;
+  try {
+    const parsed = JSON.parse(raw) as SpawnMirrorPayloadV1;
+    return parsed.result === "acquired" && parsed.permit_id === null && await mirrorValid(parsed, t);
+  } catch { return false; }
+}
 function trustedReceipt(r: ContainmentEffectReceipt, t: OwnerTuple, permit: string, binding: ContainmentEffectBinding | null): boolean {
   return r.schema_version === 1 && r.trusted === true && !!binding && r.repo === t.repo
     && r.job_id === t.job_id && r.path === t.path
@@ -349,16 +361,8 @@ export class ContainmentEffectLedger {
       const nextNonce = noncePrefix && attempt.startsWith(noncePrefix) ? attempt.slice(noncePrefix.length) : "";
       const previous = predecessor && previousAttemptKey
         ? await this.storage.get<OwnerRecordV1>(previousAttemptKey) : undefined;
-      let predecessorMirrorSafe = false;
-      const predecessorMirror = await mirrorEvidence();
-      if (predecessorMirror === null) predecessorMirrorSafe = true;
-      else if (predecessor && typeof predecessorMirror === "string") {
-        try {
-          const parsed = JSON.parse(predecessorMirror) as SpawnMirrorPayloadV1;
-          predecessorMirrorSafe = parsed.result === "acquired" && parsed.permit_id === null
-            && await mirrorValid(parsed, predecessor);
-        } catch { /* malformed predecessor sidecar remains fenced */ }
-      }
+      const predecessorMirrorSafe = !!predecessor && !!previous
+        && await ownerMirrorEvidenceValid(this.kv, predecessor, previous);
       if (predecessor && activeKey(predecessor) === pointer && nextNonce !== predecessor.caller_nonce
         && /^[0-9a-f]{32}$/.test(nextNonce) && p.state === "ABORTED_PRE_EFFECT" && p.tombstone === true
         && previous && recordValid(previous, predecessor) && previous.state === "ABORTED_PRE_EFFECT"
@@ -388,15 +392,7 @@ export class ContainmentEffectLedger {
       if (!a.permit_id || !a.binding || !this.kv || typeof bindingSidecar !== "string"
         || !bindingPayloadValid(bindingSidecar, t, a.permit_id, a.binding)) return unknown();
     } else if (bindingSidecar !== null) return unknown();
-    const mirror = await mirrorEvidence();
-    if (mirror === undefined) return unknown();
-    if (mirror !== null) {
-      try {
-        const parsed = JSON.parse(mirror);
-        if (!(await mirrorValid(parsed, t))
-          || (a.permit_id !== null && (parsed.result !== "acquired" || parsed.permit_id !== null))) return unknown();
-      } catch { return unknown(); }
-    }
+    if (!await ownerMirrorEvidenceValid(this.kv, t, a)) return unknown();
     return this.out(a.tuple, a.state === "COMMITTED" ? "committed" : "owned", a.state, a);
   }
   async inspectIntakeOwner(tuple: OwnerTuple): Promise<ContainmentEffectReadback> {
@@ -455,6 +451,10 @@ export class ContainmentEffectLedger {
       try { raw = await this.kv.get(bindingKey(t)); }
       catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
       if (raw !== null) throw new Error("normal intake effect corruption: divergent binding evidence");
+    }
+
+    if (!await ownerMirrorEvidenceValid(this.kv, t, record)) {
+      throw new Error("normal intake effect corruption: divergent mirror evidence");
     }
 
     if (record.state === "COMMITTED") {

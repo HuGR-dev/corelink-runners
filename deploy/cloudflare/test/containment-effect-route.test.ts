@@ -37,6 +37,47 @@ function deps(ledger: ContainmentEffectLedger, t: OwnerTuple) {
 }
 
 describe("canonical containment effect route", () => {
+  it("treats a same-tuple ABORTED_PRE_EFFECT tombstone as terminal before claim or preparation", async () => {
+    const { ledger } = make(); const t = tuple();
+    const request = { schema_version: 1 as const, tuple: t, caller_nonce: t.caller_nonce };
+    expect((await ledger.prepare(request)).kind).toBe("prepared");
+    expect((await ledger.abort(request, t.owner, t.token)).kind).toBe("aborted");
+    const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => true); const drive = vi.fn(async () => undefined);
+
+    const result = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive });
+
+    expect(result).toMatchObject({ status: "unknown_terminal" });
+    expect(result).not.toHaveProperty("retryable");
+    expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(drive).not.toHaveBeenCalled();
+  });
+
+  it("keeps live DRIVING retryable while the original provider can still commit", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(5_000);
+    let release!: () => void; let signal!: () => void;
+    const providerGate = new Promise<void>(resolve => { release = resolve; });
+    const providerEntered = new Promise<void>(resolve => { signal = resolve; });
+    const { ledger } = make(); const t = tuple();
+    const firstDrive = vi.fn(async () => {
+      signal(); await providerGate;
+      return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "live-receipt", provider_signature: "live-signature" };
+    });
+    try {
+      const first = runCanonicalEffect({ ...deps(ledger, t), drive: firstDrive });
+      await providerEntered;
+      const beforeClaim = vi.fn(async () => {}); const claim = vi.fn(async () => { throw new Error("must not replace live DRIVING owner"); });
+      const duplicateDrive = vi.fn(async () => undefined);
+      const concurrent = await runCanonicalEffect({ ...deps(ledger, t), beforeClaim, claim, drive: duplicateDrive });
+
+      expect(concurrent).toMatchObject({ status: "unknown_terminal", retryable: true });
+      expect(beforeClaim).not.toHaveBeenCalled(); expect(claim).not.toHaveBeenCalled(); expect(duplicateDrive).not.toHaveBeenCalled();
+      release();
+      expect((await first).status).toBe("committed");
+      expect(firstDrive).toHaveBeenCalledTimes(1);
+    } finally {
+      release(); vi.useRealTimers();
+    }
+  });
+
   it.each(["start proof", "binding", "mirror"] as const)("fails closed without owners when a %s sidecar survives", async sidecar => {
     const { ledger, storage, values } = make(); const t = tuple();
     const activeKey = containmentSpawnActiveKey(t);

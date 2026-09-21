@@ -110,7 +110,7 @@ function retryableUnknownTerminal(reason?: string): CanonicalEffectRouteResult {
 function terminal(result: OwnerResult): CanonicalEffectRouteResult | null {
   if (result.kind === "missing") return null;
   if (result.kind === "reaped_predecessor") return { status: "unknown_terminal" };
-  if (result.state === "UNKNOWN") return { status: "unknown_terminal" };
+  if (result.state === "UNKNOWN" || result.state === "ABORTED_PRE_EFFECT") return { status: "unknown_terminal" };
   if (result.kind === "committed" && result.record) {
     const receipt = receiptFrom(result.record);
     if (receipt) return { status: "committed", receipt, finalized: false };
@@ -118,7 +118,9 @@ function terminal(result: OwnerResult): CanonicalEffectRouteResult | null {
   if (result.kind === "unknown" || result.kind === "legacy_unknown") return { status: "unknown_terminal" };
   if (result.state === "DRIVING" && result.record?.state === "DRIVING"
     && (result.kind === "owned" || result.kind === "busy" || result.kind === "already_started" || result.kind === "driving")) {
-    return retryableUnknownTerminal();
+    return Date.now() <= result.record.expires_ms
+      ? retryableUnknownTerminal()
+      : { status: "unknown_terminal" };
   }
   if (result.kind === "busy" || result.kind === "already_started" || result.kind === "driving") return { status: "unknown_terminal" };
   return null;

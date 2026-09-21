@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import { ConcurrencySlotsDO, runNormalIntakeDrain } from "../src/index";
-import { containmentSpawnActiveKey, intakeOwnerTuple } from "../src/containment_effect_route";
-import { FakeStorage, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
+import { containmentSpawnActiveKey, containmentSpawnAttemptKey, intakeOwnerTuple } from "../src/containment_effect_route";
+import { FakeStorage, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
 const BODY_SHA = "a".repeat(64);
 
@@ -109,6 +109,44 @@ describe("normal intake effect recovery", () => {
     expect(committedEffect).toBe(true);
     expect(record.state).toBe("complete");
     expect(activeCount).toBe(0);
+  });
+
+  it("settles an expired sole DRIVING owner as uncertain without preparing or reclaiming", async () => {
+    const f = fixture(); const eventId = "expired-driving-delivery"; const jobId = "8604";
+    await enqueue(f, eventId, jobId);
+    const tuple = await intakeOwnerTuple("acme/repo", jobId, `containment:v1:${eventId}`, eventId);
+    const request = { schema_version: 1 as const, tuple, caller_nonce: tuple.caller_nonce };
+    expect((await f.d.instance.ownerPrepare(request)).kind).toBe("prepared");
+    expect((await f.d.instance.ownerAcquire(request)).kind).toBe("acquired");
+    const mirror = await f.d.instance.ownerMirror(request, "acquired");
+    expect(mirror.kind).toBe("exact");
+    const confirmed = await f.d.instance.ownerConfirm(
+      { ...request, observation_kind: mirror.kind, observation_digest: mirror.payload_digest },
+      mirror.payload_digest!, mirror.payload_digest!,
+    );
+    expect(confirmed.kind).toBe("permit_issued");
+    const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+    const bindingBase = { schema_version: 1 as const, provider: "cloudflare-container", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+    expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    expect((await f.d.instance.ownerMarkDriving(request, confirmed.permit!.permit_id, started.proof!.proof_id)).kind).toBe("driving");
+    const attemptKey = containmentSpawnAttemptKey(tuple);
+    const attempt = f.d.storage.map.get(attemptKey) as { expires_ms: number };
+    attempt.expires_ms = Date.now() - 1;
+    f.d.storage.map.set(attemptKey, attempt);
+
+    await runNormalIntakeDrain(f.runtime);
+
+    const inbox = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
+    const pendingIndex = [...f.d.storage.map.keys()].filter(key => key.startsWith("normal-inbox:v1:pending:"));
+    const authorizations = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"));
+    const mints = f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/mint"));
+    expect(inbox.state).toBe("uncertain");
+    expect(pendingIndex).toHaveLength(0);
+    expect(await f.d.instance.normalIntakePending()).toHaveLength(0);
+    expect(authorizations).toHaveLength(0); expect(mints).toHaveLength(0);
+    expect(f.store.map.has(`spawn:${jobId}`)).toBe(false);
+    expect(f.startWithEnv).not.toHaveBeenCalled();
   });
 
   it("quarantines corrupt persisted owner evidence without repeating preparation", async () => {

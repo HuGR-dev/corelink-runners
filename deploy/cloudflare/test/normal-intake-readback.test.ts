@@ -185,6 +185,30 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(body).not.toContain(attempt.tuple.token);
   });
 
+  it.each(["absent", "malformed", "tuple", "permit"] as const)("fails closed when an existing intake owner mirror is %s", async corruption => {
+    const f = fixture(); const eventId = `mirror-${corruption}-mismatch`;
+    await f.d.instance.normalIntakeEnqueue(intake(eventId));
+    await seedDrivingEffect(f, eventId);
+    await f.d.instance.normalIntakeSettle(eventId, BODY_SHA, "uncertain");
+    const tuple = await intakeOwnerTuple("acme/repo", "8201", `containment:v1:${eventId}`, eventId);
+    const mirrorKey = `containment:v1:spawn-mirror:acme/repo/8201/intake/${encodeURIComponent(tuple.effect_id)}`;
+    const mirrorRaw = f.store.map.get(mirrorKey);
+    expect(mirrorRaw).toBeDefined();
+    if (corruption === "absent") f.store.map.delete(mirrorKey);
+    else if (corruption === "malformed") f.store.map.set(mirrorKey, "not-json");
+    else {
+      const mirror = JSON.parse(mirrorRaw!) as { tuple: { event_id: string }; permit_id: string | null };
+      if (corruption === "tuple") mirror.tuple.event_id = "different-delivery";
+      else mirror.permit_id = "divergent-permit-id";
+      f.store.map.set(mirrorKey, JSON.stringify(mirror));
+    }
+
+    const response = await read(f, `?event_id=${encodeURIComponent(eventId)}`);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "normal intake readback unavailable" });
+  });
+
   it.each([
     ["pending", "pending"],
     ["uncertain", "uncertain"],
