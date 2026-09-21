@@ -1,6 +1,7 @@
 import {
   containmentSpawnActiveKey,
   containmentSpawnAttemptKey,
+  containmentSpawnMirrorKey,
   type ContainmentEffectBinding,
   type ContainmentEffectReceipt,
   type ContainmentEffectPermit,
@@ -283,18 +284,12 @@ export async function runCanonicalEffect<TOpts extends object>(
       }
       proof = started.proof;
     }
-    let boundBinding = binding;
-    if (state === "PERMIT_ISSUED") {
-      const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
-      if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
-      boundBinding = (bound.record as any)?.binding ?? binding;
-    } else {
-      const persistedBinding = (ownerRecord as { binding?: ContainmentEffectBinding } | undefined)?.binding;
-      if (!persistedBinding || persistedBinding.binding_sha256 !== binding.binding_sha256) {
-        await releaseClaim(); return { status: "unknown_terminal", reason: "missing or corrupt persisted binding" };
-      }
-      boundBinding = persistedBinding;
-    }
+    // Always revalidate the binding before the BOUND -> DRIVING transition.
+    // V2 BOUND records can repair an absent KV projection from the canonical
+    // DO record; mismatches and KV outages fail before any provider call.
+    const bound = await deps.ledger.ownerBind(req, permit.permit_id, proof.proof_id, binding);
+    if (bound.kind !== "bound") { await releaseClaim(); return terminal(bound) ?? { status: "unauthorized" }; }
+    const boundBinding = (bound.record as any)?.binding ?? binding;
     const driving = await deps.ledger.ownerMarkDriving(req, permit.permit_id, proof.proof_id);
     // A concurrent retry that observes an already-started transition is
     // terminal uncertainty, never permission to invoke the provider again.
@@ -364,7 +359,7 @@ export async function runCanonicalEffect<TOpts extends object>(
   }
 }
 
-export { containmentSpawnActiveKey, containmentSpawnAttemptKey };
+export { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey };
 
 export async function callerNonceForEffect(tuple: Omit<OwnerTuple, "caller_nonce">): Promise<string> {
   return (await sha256(JSON.stringify(tuple))).slice(0, 32);

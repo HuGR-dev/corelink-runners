@@ -136,7 +136,6 @@ describe("normal intake effect recovery", () => {
     await runNormalIntakeDrain(f.runtime);
 
     const record = f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string };
-    expect(f.startWithEnv).not.toHaveBeenCalled();
     expect(record.state).toBe("complete");
     expect(f.startWithEnv).toHaveBeenCalledTimes(1);
     expect(f.fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/runner/authorize"))).toHaveLength(1);
@@ -209,6 +208,53 @@ describe("normal intake effect recovery", () => {
 
     expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
     expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("rematerializes a missing BOUND sidecar from the canonical DO binding before provider start", async () => {
+    const f = fixture(); const eventId = "bound-sidecar-rematerialize"; const jobId = "8611";
+    await enqueue(f, eventId, jobId);
+    const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+    const bindingBase = { schema_version: 1 as const, provider: "cloudflare-container", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+    expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    const bindingKey = `containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`;
+    f.store.map.delete(bindingKey);
+    const beforeStorage = structuredClone([...f.d.storage.map.entries()]);
+    const beforeKv = structuredClone([...f.store.map.entries()]);
+    const readback = await readIntake(f, eventId);
+    const readbackBody = await readback.text();
+    expect(readback.status).toBe(200);
+    expect(JSON.parse(readbackBody)).toMatchObject({ effect: { kind: "owned", state: "BOUND" } });
+    expect(readbackBody).not.toContain("binding_intent");
+    expect([...f.d.storage.map.entries()]).toEqual(beforeStorage);
+    expect([...f.store.map.entries()]).toEqual(beforeKv);
+
+    await runNormalIntakeDrain(f.runtime);
+
+    expect(f.store.map.get(bindingKey)).toContain(JSON.stringify(binding));
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("complete");
+    expect(f.startWithEnv).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops before provider start when a BOUND sidecar cannot be read for validation", async () => {
+    const f = fixture(); const eventId = "bound-sidecar-kv-outage"; const jobId = "8612";
+    await enqueue(f, eventId, jobId);
+    const { tuple, request, confirmed } = await stageConfirmedIntakeOwner(f, eventId, jobId);
+    const started = await f.d.instance.ownerBegin(request, confirmed.permit!.permit_id);
+    const bindingBase = { schema_version: 1 as const, provider: "cloudflare-container", resource_id: `job:acme/repo/${jobId}`, idempotency_key: tuple.effect_id };
+    const binding = { ...bindingBase, binding_sha256: await digest(JSON.stringify(bindingBase)) };
+    expect((await f.d.instance.ownerBind(request, confirmed.permit!.permit_id, started.proof!.proof_id, binding)).kind).toBe("bound");
+    const bindingKey = `containment:v1:effect-binding:acme/repo/${jobId}/intake/${encodeURIComponent(tuple.effect_id)}`;
+    f.store.get.mockImplementation(async key => {
+      if (key === bindingKey) throw new Error("binding KV unavailable");
+      return f.store.map.get(key) ?? null;
+    });
+
+    await runNormalIntakeDrain(f.runtime);
+
+    expect(f.startWithEnv).not.toHaveBeenCalled();
+    expect((f.d.storage.map.get(`normal-inbox:v1:event:${eventId}`) as { state: string }).state).toBe("pending");
   });
 
   it("recovers after the BOUND transaction commits but its response is lost", async () => {

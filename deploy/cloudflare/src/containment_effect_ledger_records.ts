@@ -44,6 +44,7 @@ export function requestTuple(request: SpawnOwnerRequest): OwnerTuple | null {
 export const activeKey = (t: OwnerTuple) => `${PREFIX}spawn-active:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
 export const attemptKey = (t: OwnerTuple) => `${PREFIX}spawn-attempt:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}/${enc(t.caller_nonce)}`;
 export const mirrorKey = (t: OwnerTuple) => `${PREFIX}spawn-mirror:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
+export const versionedMirrorKey = (t: OwnerTuple) => `${mirrorKey(t)}/${enc(t.caller_nonce)}`;
 export const startKey = (t: OwnerTuple) => `${PREFIX}effect-start:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
 export const bindingKey = (t: OwnerTuple) => `${PREFIX}effect-binding:${t.repo}/${t.job_id}/${t.path}/${enc(t.effect_id)}`;
 
@@ -51,7 +52,7 @@ export function activePointerProjection(value: Record<string, unknown>): Record<
   const pointer = { ...value };
   delete pointer.created_ms; delete pointer.expires_ms; delete pointer.effect_started;
   delete pointer.permit; delete pointer.binding; delete pointer.effect_observation; delete pointer.provider_receipt;
-  delete pointer.reap_proof;
+  delete pointer.reap_proof; delete pointer.binding_intent;
   return pointer;
 }
 export function permitValid(v: unknown, t: OwnerTuple): v is ContainmentEffectPermit {
@@ -90,6 +91,8 @@ export function pointerValid(v: unknown, t: OwnerTuple, attempt?: unknown): v is
     && p.token === t.token && p.lease_epoch === t.lease_epoch && p.drain_owner === t.drain_owner
     && p.drain_lease_epoch === t.drain_lease_epoch && p.caller_nonce === t.caller_nonce
     && p.attempt_key === attemptKey(t) && states.includes(p.state as string)
+    && (p.sidecar_version === undefined || p.sidecar_version === 2)
+    && (p.mirror_digest === undefined || HEX.test(p.mirror_digest))
     && (p.permit_id === null || validText(p.permit_id)) && (p.binding_id === null || validText(p.binding_id))
     && (p.effect_start_proof_id === null || validText(p.effect_start_proof_id)) && typeof p.tombstone === "boolean"
     && (!attempt || (recordValid(attempt, t) && JSON.stringify(p) === JSON.stringify(activePointerProjection(attempt as unknown as Record<string, unknown>))))
@@ -122,6 +125,22 @@ export function recordValid(v: unknown, t: OwnerTuple): v is OwnerRecordV1 {
     || r.created_ms > Number.MAX_SAFE_INTEGER - OWNER_RECORD_TTL_MS
     || r.expires_ms !== r.created_ms + OWNER_RECORD_TTL_MS
     || typeof r.tombstone !== "boolean") return false;
+  const sidecarVersion = (r as { sidecar_version?: unknown }).sidecar_version;
+  const mirrorDigest = (r as { mirror_digest?: unknown }).mirror_digest;
+  const bindingIntent = (r as { binding_intent?: unknown }).binding_intent;
+  if (sidecarVersion !== undefined && sidecarVersion !== 2) return false;
+  if (sidecarVersion !== 2 && mirrorDigest !== undefined) return false;
+  if (sidecarVersion === 2 && mirrorDigest !== undefined && !HEX.test(String(mirrorDigest))) return false;
+  if (bindingIntent !== undefined) {
+    const intent = bindingIntent as { schema_version?: unknown; tuple?: unknown; permit_id?: unknown; proof_id?: unknown; binding?: unknown };
+    if (r.state !== "PERMIT_ISSUED" || r.binding_id !== null || r.binding !== undefined
+      || r.permit_id === null || !intent || intent.schema_version !== 1
+      || JSON.stringify(intent.tuple) !== JSON.stringify(t) || intent.permit_id !== r.permit_id
+      || !validText(intent.proof_id) || !bindingValid(intent.binding, (intent.binding as { binding_sha256?: string } | null)?.binding_sha256 ?? null)) return false;
+  }
+  if (sidecarVersion === 2 && r.state !== "CLAIM_ACQUIRED" && r.state !== "PREPARED" && mirrorDigest === undefined
+    && r.state !== "ABORTED_PRE_EFFECT" && r.state !== "UNKNOWN") return false;
+  if (sidecarVersion === 2 && r.state === "BOUND" && bindingIntent !== undefined) return false;
   if (r.state === "PREPARED" || r.state === "CLAIM_ACQUIRED") return r.permit_id === null && r.binding_id === null && r.effect_start_proof_id === null && r.tombstone === false;
   if (r.state === "PERMIT_ISSUED") return r.permit_id !== null && r.binding_id === null && r.tombstone === false;
   if (r.state === "BOUND" || r.state === "DRIVING") return r.permit_id !== null && r.binding_id !== null && r.effect_start_proof_id !== null && r.tombstone === false;
