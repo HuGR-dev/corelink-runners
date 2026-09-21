@@ -211,6 +211,10 @@ export interface ContainmentEffectPrepareInput { identity: ContainmentEffectIden
 export interface ContainmentEffectTransition { identity: ContainmentEffectIdentity; nonce: string; owner: string; owner_token: string; lease_epoch: number; now?: number }
 export interface ContainmentEffectReapInput { identity: ContainmentEffectIdentity; nonce: string; authority: "containment-reaper-v1"; lease_epoch: number; stale_after_ms: number; now?: number }
 export type ContainmentEffectResult = { status: "prepared" | "active" | "committed" | "transitioned" | "aborted" | "reaped"; attempt: ContainmentEffectAttempt } | { status: "stale" | "busy" | "invalid" | "unknown_terminal" | "mirror_unavailable" | "mirror_mismatch" };
+export type ContainmentEffectReadback =
+  | { kind: "missing"; state: null }
+  | { kind: "owned"; state: ContainmentEffectState }
+  | { kind: "committed"; state: "COMMITTED" };
 export interface ContainmentEffectAttempt extends OwnerRecordV1 { repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; created_at_ms: number; updated_at_ms: number; permit: ContainmentEffectPermit | null; binding: ContainmentEffectBinding | null; provider_receipt: ContainmentEffectReceipt | null }
 export interface ContainmentEffectMirror { schema_version: 1; repo: string; job_id: string; effect_id: string; nonce: string; owner: string; owner_token: string; lease_epoch: number; state: Exclude<ContainmentEffectState, "ABORTED_PRE_EFFECT">; permit_id: string | null; binding_sha256: string | null }
 
@@ -313,6 +317,59 @@ export class ContainmentEffectLedger {
         proof: null, state: "UNKNOWN" };
     }
     return this.out(a.tuple, a.state === "COMMITTED" ? "committed" : "owned", a.state, a);
+  }
+  async inspectIntakeOwner(tuple: OwnerTuple): Promise<ContainmentEffectReadback> {
+    const t = normalizeTuple(tuple);
+    if (!t || t.path !== "intake") throw new Error("invalid normal intake effect identity");
+    const [pointer, attempt] = await Promise.all([
+      this.storage.get<unknown>(activeKey(t)),
+      this.storage.get<unknown>(attemptKey(t)),
+    ]);
+    if (pointer === undefined && attempt === undefined) return { kind: "missing", state: null };
+    if (pointer === undefined || attempt === undefined || !recordValid(attempt, t)
+      || !pointerMatchesAttempt(pointer, attempt, t)) throw new Error("normal intake effect corruption: owner evidence mismatch");
+
+    const record = attempt as OwnerRecordV1;
+    if (record.attempt_key !== attemptKey(t) || record.nonce !== t.caller_nonce
+      || !pointerValid(pointer, t, record)) throw new Error("normal intake effect corruption: invalid owner evidence");
+
+    if (record.permit_id !== null && (await sha256(t.token)) !== record.permit?.owner_token_digest) {
+      throw new Error("normal intake effect corruption: invalid permit evidence");
+    }
+    const proof = await this.storage.get<unknown>(startKey(t));
+    if (record.effect_start_proof_id !== null) {
+      if (!proofValid(proof, t, record.permit_id ?? "") || proof.proof_id !== record.effect_start_proof_id) {
+        throw new Error("normal intake effect corruption: invalid start proof");
+      }
+    } else if (proof !== undefined) {
+      throw new Error("normal intake effect corruption: divergent start proof");
+    }
+
+    if (record.binding_id !== null) {
+      if (!record.binding || !bindingValid(record.binding, record.binding_id) || !record.permit_id || !this.kv) {
+        throw new Error("normal intake effect corruption: invalid binding evidence");
+      }
+      let raw: string | null;
+      try { raw = await this.kv.get(bindingKey(t)); }
+      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
+      if (!raw || !bindingPayloadValid(raw, t, record.permit_id, record.binding)) {
+        throw new Error("normal intake effect corruption: divergent binding evidence");
+      }
+    } else if (this.kv) {
+      let raw: string | null;
+      try { raw = await this.kv.get(bindingKey(t)); }
+      catch { throw new Error("normal intake effect corruption: binding evidence unavailable"); }
+      if (raw !== null) throw new Error("normal intake effect corruption: divergent binding evidence");
+    }
+
+    if (record.state === "COMMITTED") {
+      if (!record.permit_id || !record.binding || !record.effect_observation
+        || !trustedReceipt(record.effect_observation as ContainmentEffectReceipt, t, record.permit_id, record.binding)) {
+        throw new Error("normal intake effect corruption: invalid receipt evidence");
+      }
+      return { kind: "committed", state: "COMMITTED" };
+    }
+    return { kind: "owned", state: record.state };
   }
   async prepare(request: SpawnOwnerRequest): Promise<OwnerResult> {
     const t = requestTuple(request);

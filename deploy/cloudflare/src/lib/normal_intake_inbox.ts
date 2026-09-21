@@ -25,6 +25,7 @@ const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
 const text = (value: unknown, max = MAX_TEXT, empty = false): value is string =>
   typeof value === "string" && value.length <= max && (empty || value.length > 0) && !/[\u0000-\u001f\u007f]/.test(value);
+export const isNormalIntakeEventId = (value: unknown): value is string => text(value);
 const safeTime = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const eventKey = (id: string) => `${EVENT}${encodeURIComponent(id)}`;
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
@@ -32,7 +33,7 @@ const validCount = (value: unknown): value is number => Number.isSafeInteger(val
 
 function fail(message: string): never { throw new Error(`normal intake corruption: ${message}`); }
 function validateInput(input: NormalIntakeInput): NormalIntakeInput {
-  if (!input || input.schema_version !== 1 || !text(input.event_id) || !SHA.test(input.body_sha256) || !text(input.installation_id, MAX_TEXT, true)
+  if (!input || input.schema_version !== 1 || !isNormalIntakeEventId(input.event_id) || !SHA.test(input.body_sha256) || !text(input.installation_id, MAX_TEXT, true)
     || !safeTime(input.received_at_ms) || !Array.isArray(input.labels) || input.labels.length > 32
     || input.labels.some((label) => !text(label, 128))) throw new Error("invalid normal intake record");
   const identity = normalizeRedriveIdentity(input.repo, input.job_id);
@@ -56,6 +57,14 @@ function validateBody(body: string): void { if (!SHA.test(body)) throw new Error
 
 export class NormalIntakeInbox {
   constructor(private readonly storage: AuthorityStorage) {}
+
+  async inspect(eventId: string): Promise<NormalIntakeRecord | null> {
+    if (!isNormalIntakeEventId(eventId)) throw new Error("invalid normal intake event id");
+    const value = await this.storage.get<unknown>(eventKey(eventId));
+    if (value === undefined) return null;
+    if (!validRecord(value, eventId)) fail("malformed event record");
+    return value;
+  }
 
   async enqueue(input: NormalIntakeInput, now = Date.now(), delayMs = 0): Promise<{ status: "accepted" | "duplicate" | "conflict" | "full"; record?: NormalIntakeRecord }> {
     const normalized = validateInput(input);
@@ -109,7 +118,7 @@ export class NormalIntakeInbox {
   }
 
   async settle(eventId: string, expectedBodySha: string, outcome: NormalIntakeOutcome, now: number): Promise<void> {
-    if (!text(eventId) || !["complete", "uncertain", "retry"].includes(outcome)) throw new Error("invalid normal intake settlement");
+    if (!isNormalIntakeEventId(eventId) || !["complete", "uncertain", "retry"].includes(outcome)) throw new Error("invalid normal intake settlement");
     validateBody(expectedBodySha); validateNow(now);
     return this.storage.transaction(async (tx: AuthorityTransaction) => {
       const key = eventKey(eventId);

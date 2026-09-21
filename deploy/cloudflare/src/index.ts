@@ -1,6 +1,6 @@
 import { ComputeBudgetClient } from "./lib/compute_budget_client";
 import { ComputeObligations, type ComputeBinding } from "./lib/compute_budget_obligation";
-import { NormalIntakeInbox, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
+import { NormalIntakeInbox, isNormalIntakeEventId, type NormalIntakeInput, type NormalIntakeRecord } from "./lib/normal_intake_inbox";
 import { JobAttributionAuthority } from "./lib/job_attribution_authority";
 import { CredentialObligationAuthority } from "./lib/credential_obligation_authority";
 import { RetryEpochAuthority } from "./lib/retry_epoch_authority";
@@ -149,6 +149,7 @@ import {
   type ContainmentEffectPrepareInput,
   type ContainmentEffectReapInput,
   type ContainmentEffectReceipt,
+  type ContainmentEffectReadback,
   type ContainmentEffectResult,
   type ContainmentEffectTransition,
   type OwnerResult,
@@ -620,6 +621,16 @@ export class ContainmentDO extends DurableObject<Env> {
 
   async normalIntakePending(limit = 25): Promise<NormalIntakeRecord[]> {
     return new NormalIntakeInbox(this.ctx.storage).pending(Date.now(), limit);
+  }
+
+  async normalIntakeInspect(eventId: string): Promise<NormalIntakeRecord | null> {
+    return new NormalIntakeInbox(this.ctx.storage).inspect(eventId);
+  }
+
+  async normalIntakeEffectInspect(repo: string, jobId: string, eventId: string): Promise<ContainmentEffectReadback> {
+    const effectId = `containment:v1:${eventId}`;
+    const tuple = await intakeOwnerTuple(repo, jobId, effectId, eventId);
+    return this.effectLedger().inspectIntakeOwner(tuple);
   }
 
   async normalIntakeSettle(eventId: string, bodySha: string, outcome: "complete" | "uncertain" | "retry"): Promise<void> {
@@ -4692,7 +4703,7 @@ export async function runNormalIntakeDrain(env: Env, alreadyRateAdmittedEventId?
     });
     await authority.normalIntakeSettle(event.event_id, event.body_sha256,
       result.status === "committed" ? "complete"
-        : result.status === "unknown_terminal" || result.status === "mirror_tampered" ? "uncertain" : "retry");
+        : result.status === "mirror_tampered" ? "uncertain" : "retry");
     if (result.status === "committed") await bumpMetrics(env, "webhook_spawn_claimed");
     else if (result.status === "claim_refused") await bumpMetrics(env, "webhook_spawn_deduped");
   }
@@ -4860,6 +4871,38 @@ export default {
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
+
+    // Read-only normal-intake status. It uses the containment admin key because
+    // the delivery snapshot is internal operational data; the returned fields
+    // deliberately omit payload hashes, labels, and owner evidence.
+    if (request.method === "GET" && pathname === "/internal/v1/normal-intake") {
+      const key = env.CONTAINMENT_ADMIN_KEY ?? "";
+      if (key.length === 0) return json({ error: "not found" }, 404);
+      if (!safeEqual(request.headers.get("x-corelink-internal-auth") ?? "", key)) return unauthorized();
+      const params = [...url.searchParams.entries()];
+      if (params.length !== 1 || params[0][0] !== "event_id" || !isNormalIntakeEventId(params[0][1])) {
+        return json({ error: "invalid normal intake query" }, 400);
+      }
+      try {
+        const authority = containmentAuthority(env);
+        const record = await authority.normalIntakeInspect(params[0][1]);
+        if (!record) return json({ error: "not found" }, 404);
+        const effect = await authority.normalIntakeEffectInspect(record.repo, record.job_id, record.event_id);
+        return json({
+          schema_version: record.schema_version,
+          event_id: record.event_id,
+          job_id: record.job_id,
+          repo: record.repo,
+          installation_id: record.installation_id,
+          state: record.state,
+          received_at_ms: record.received_at_ms,
+          next_attempt_ms: record.next_attempt_ms,
+          effect,
+        }, 200);
+      } catch {
+        return json({ error: "normal intake readback unavailable" }, 503);
+      }
+    }
 
     // ── GET /internal/v1/metrics — direct-fleet golden-signal snapshot ───────
     // Gated by a DEDICATED observability key (X-Corelink-Internal-Auth), mirroring
