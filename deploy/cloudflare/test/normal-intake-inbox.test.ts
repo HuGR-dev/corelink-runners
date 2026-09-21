@@ -53,7 +53,7 @@ describe("NormalIntakeInbox", () => {
 
     const record = await (inbox as unknown as { inspect(eventId: string): Promise<unknown> }).inspect("inspect-me");
 
-    expect(record).toEqual({ ...input("inspect-me"), state: "pending", next_attempt_ms: 1250 });
+    expect(record).toEqual({ ...input("inspect-me"), repo: "owner/repo", state: "pending", next_attempt_ms: 1250 });
     expect([...storage.data.entries()]).toEqual(before);
   });
   it("serializes concurrent admissions and rejects malformed or key-crossing identities", async () => {
