@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@cloudflare/containers", () => ({ Container: class {}, getContainer: vi.fn() }));
 import { getContainer } from "@cloudflare/containers";
 import worker, { runNormalIntakeDrain } from "../src/index";
+import { ContainmentEffectLedger } from "../src/containment_effect_ledger";
 import { containmentSpawnActiveKey, containmentSpawnAttemptKey, containmentSpawnMirrorKey, intakeOwnerTuple } from "../src/containment_effect_route";
 import { ctx, digest, env, kv, makeDO, ns } from "./containment-redrive-test-helpers";
 
@@ -544,7 +545,9 @@ describe("GET /internal/v1/normal-intake", () => {
     ["mirror_invalid", "mirror payload invalid"],
     ["receipt", "receipt signature invalid"],
     ["delivery_readback_unavailable", "delivery storage unavailable"],
-    ["unexpected", "unexpected internal exception"],
+    ["tuple_unavailable", "owner tuple construction failure"],
+    ["ledger_unexpected", "unexpected ledger exception"],
+    ["effect_rpc_unavailable", "effect inspection RPC failure"],
   ] as const)("returns only the closed %s failure reason for %s", async (reason, failure) => {
     const f = fixture();
     const eventId = `reason-${reason}`;
@@ -613,6 +616,10 @@ describe("GET /internal/v1/normal-intake", () => {
       f.d.storage.map.set(attemptKey, attempt);
     } else if (failure === "delivery storage unavailable") {
       vi.spyOn(f.d.instance, "normalIntakeInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
+    } else if (failure === "owner tuple construction failure") {
+      vi.spyOn(crypto.subtle, "digest").mockRejectedValueOnce(new Error("SENTINEL_secret_token"));
+    } else if (failure === "unexpected ledger exception") {
+      vi.spyOn(ContainmentEffectLedger.prototype, "inspectIntakeOwner").mockRejectedValue(new Error("SENTINEL_secret_token"));
     } else {
       vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockRejectedValue(new Error("SENTINEL_secret_token"));
     }

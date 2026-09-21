@@ -234,7 +234,7 @@ export type ContainmentEffectReadback =
 export type ContainmentEffectReadbackFailure =
   | "owner_storage_unavailable" | "orphan_sidecar" | "owner_evidence" | "permit" | "proof"
   | "binding_unavailable" | "binding_divergent" | "binding_invalid"
-  | "mirror_unavailable" | "mirror_invalid" | "receipt" | "unexpected";
+  | "mirror_unavailable" | "mirror_invalid" | "receipt" | "tuple_unavailable" | "ledger_unexpected" | "unexpected";
 
 class ReadbackFailure extends Error {
   constructor(readonly reason: ContainmentEffectReadbackFailure) { super(reason); }
