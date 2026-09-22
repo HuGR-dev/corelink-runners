@@ -16,6 +16,8 @@ export const BILLING_QUARANTINE_PREFIX = "usage:quarantine:";
 export const BILLING_FLUSH_CURSOR_KEY = "usage:flush:cursor";
 const BILLING_SETTLED_PREFIX = "usage:settled:";
 export const BILLING_SETTLEMENT_TTL_S = USAGE_LEDGER_TTL_S;
+/** Keep an ingest acknowledgement bounded before parsing it. */
+export const BILLING_ACK_MAX_BYTES = 1_048_576;
 
 export interface BillingFlushResult {
   scanned: number;
@@ -29,6 +31,29 @@ interface UsageListPage {
   keys: { name: string }[];
   cursor?: string;
   list_complete?: boolean;
+}
+
+type BillingRecordOutcomeKind = "accepted" | "deduped" | "rejected" | "conflict";
+
+interface BillingRecordOutcome {
+  index: number;
+  idem_key: string | null;
+  outcome: BillingRecordOutcomeKind;
+  reason?: string;
+}
+
+interface BillingBatchAcknowledgement {
+  outcomes: BillingRecordOutcome[];
+  accepted: number;
+  deduped: number;
+  rejected: number;
+  total: number;
+}
+
+interface PendingBillingEvent {
+  key: string;
+  raw: string;
+  event: UsageEvent;
 }
 
 function quarantineKey(sourceKey: string): string {
@@ -59,7 +84,39 @@ async function quarantine(kv: KvLike, key: string, raw: string, reason: string):
   await kv.delete(key);
 }
 
-async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSignal): Promise<void> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function nonNegativeCount(value: unknown, max: number): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max ? value : null;
+}
+
+async function readBoundedResponseBody(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let body = "";
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return body + decoder.decode();
+    bytes += value.byteLength;
+    if (bytes > BILLING_ACK_MAX_BYTES) {
+      await reader.cancel();
+      throw new Error("billing usage acknowledgement too large");
+    }
+    body += decoder.decode(value, { stream: true });
+  }
+}
+
+async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSignal): Promise<BillingBatchAcknowledgement> {
   const response = await fetch(env.BILLING_INGEST_URL ?? "", {
     method: "POST",
     headers: {
@@ -71,7 +128,88 @@ async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSi
     body: JSON.stringify(events),
     ...(signal ? { signal } : {}),
   });
-  if (!response.ok) throw new Error(`billing usage-push ${response.status}`);
+  // The server uses 409 for a batch containing a durable conflict and 422 for
+  // an entirely rejected batch. Both responses carry useful per-record
+  // outcomes and must be parsed; every other non-202 is a transport/batch
+  // failure whose records remain retryable.
+  if (response.status !== 202 && response.status !== 409 && response.status !== 422) {
+    throw new Error(`billing usage-push ${response.status}`);
+  }
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > BILLING_ACK_MAX_BYTES)) {
+    throw new Error("billing usage acknowledgement too large");
+  }
+  const body = await readBoundedResponseBody(response);
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    throw new Error("billing usage acknowledgement invalid JSON");
+  }
+  if (!isRecord(value) || !hasExactKeys(value, ["outcomes", "accepted", "deduped", "rejected", "total"])
+    || !Array.isArray(value.outcomes)) {
+    throw new Error("billing usage acknowledgement missing outcomes");
+  }
+  if (value.outcomes.length !== events.length) {
+    throw new Error("billing usage acknowledgement outcome length mismatch");
+  }
+  const accepted = nonNegativeCount(value.accepted, events.length);
+  const deduped = nonNegativeCount(value.deduped, events.length);
+  const rejected = nonNegativeCount(value.rejected, events.length);
+  const total = nonNegativeCount(value.total, events.length);
+  if (accepted === null || deduped === null || rejected === null || total === null) {
+    throw new Error("billing usage acknowledgement counts invalid");
+  }
+  const outcomes: BillingRecordOutcome[] = [];
+  let actualAccepted = 0;
+  let actualDeduped = 0;
+  let actualRejected = 0;
+  let actualConflicts = 0;
+  for (let index = 0; index < events.length; index += 1) {
+    const item = value.outcomes[index];
+    if (!isRecord(item) || !hasExactKeys(item, ["index", "idem_key", "outcome"], ["reason"])
+      || item.index !== index
+      || (item.outcome !== "accepted" && item.outcome !== "deduped"
+        && item.outcome !== "rejected" && item.outcome !== "conflict")) {
+      throw new Error("billing usage acknowledgement outcome ordering invalid");
+    }
+    const idemKey = item.idem_key;
+    if (idemKey !== null && typeof idemKey !== "string") {
+      throw new Error("billing usage acknowledgement idem key invalid");
+    }
+    if (idemKey !== events[index].idem_key) {
+      // This worker only sends valid events. A missing or mismatched key would
+      // make settlement attribution ambiguous, so retain the complete chunk.
+      throw new Error("billing usage acknowledgement idem key mismatch");
+    }
+    const rawReason: unknown = item.reason;
+    const hasReason = rawReason !== undefined;
+    if ((hasReason && (typeof rawReason !== "string" || rawReason.length === 0))
+      || ((item.outcome === "rejected" || item.outcome === "conflict") !== hasReason)) {
+      throw new Error("billing usage acknowledgement reason invalid");
+    }
+    const reason = typeof rawReason === "string" ? rawReason : undefined;
+    const outcome = item.outcome as BillingRecordOutcomeKind;
+    if (outcome === "accepted") actualAccepted += 1;
+    else if (outcome === "deduped") actualDeduped += 1;
+    else if (outcome === "rejected") actualRejected += 1;
+    else actualConflicts += 1;
+    outcomes.push({ index, idem_key: idemKey, outcome, ...(reason !== undefined ? { reason } : {}) });
+  }
+  if (accepted !== actualAccepted || deduped !== actualDeduped || rejected !== actualRejected
+    || total !== accepted + deduped) {
+    throw new Error("billing usage acknowledgement counts mismatch");
+  }
+  if (actualConflicts > 0 && response.status !== 409) {
+    throw new Error("billing usage acknowledgement conflict status mismatch");
+  }
+  if (actualConflicts === 0 && actualRejected === events.length && response.status !== 422) {
+    throw new Error("billing usage acknowledgement rejection status mismatch");
+  }
+  if (actualConflicts === 0 && actualRejected !== events.length && response.status !== 202) {
+    throw new Error("billing usage acknowledgement success status mismatch");
+  }
+  return { outcomes, accepted, deduped, rejected, total };
 }
 
 /**
@@ -109,7 +247,7 @@ export async function flushBillingUsageBacklog(
       break;
     }
     result.pages += 1;
-    const events: UsageEvent[] = [];
+    const events: PendingBillingEvent[] = [];
     for (const item of page.keys ?? []) {
       if (!item.name.startsWith(BILLING_USAGE_PREFIX)
         || item.name.startsWith(BILLING_QUARANTINE_PREFIX)
@@ -142,7 +280,7 @@ export async function flushBillingUsageBacklog(
           logEvent("error", "billing_settlement_read_failed", { key: item.name, error: (error as Error).message });
           continue;
         }
-        if (!settled) events.push(event);
+        if (!settled) events.push({ key: item.name, raw, event });
       } catch (error) {
         // Defer deletion until the cursor has been exhausted. KV cursors are
         // opaque snapshots; mutating the namespace while walking them can make
@@ -156,11 +294,20 @@ export async function flushBillingUsageBacklog(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5_000);
       try {
-        await postBatch(env, chunk, controller.signal);
-        result.pushed += chunk.length;
-        await Promise.all(chunk.map((event) => kv.put(settledKey(event.idem_key), String(Date.now()), {
+        const acknowledgement = await postBatch(env, chunk.map((item) => item.event), controller.signal);
+        const settled = acknowledgement.outcomes.filter((item) => item.outcome === "accepted" || item.outcome === "deduped");
+        const explicitFailures = acknowledgement.outcomes.filter((item) => item.outcome === "rejected" || item.outcome === "conflict");
+        await Promise.all(settled.map((item) => kv.put(settledKey(chunk[item.index].event.idem_key), String(Date.now()), {
           expirationTtl: BILLING_SETTLEMENT_TTL_S,
         })));
+        result.pushed += settled.length;
+        for (const item of explicitFailures) {
+          quarantines.push({
+            key: chunk[item.index].key,
+            raw: chunk[item.index].raw,
+            reason: `billing_ingest_${item.outcome}${item.reason ? `:${item.reason}` : ""}`,
+          });
+        }
       } catch (error) {
         // Keep every source record. The same idem keys make the retry safe.
         result.failed += chunk.length;
