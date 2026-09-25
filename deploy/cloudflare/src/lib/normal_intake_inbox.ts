@@ -22,6 +22,7 @@ const PENDING = "normal-inbox:v1:pending:";
 const UNCERTAIN = "normal-inbox:v1:uncertain:";
 const COUNT = "normal-inbox:v1:count";
 const MAX = 500;
+const LEGACY_SCAN_PAGE_SIZE = 100;
 const MAX_TEXT = 256;
 const SHA = /^[0-9a-f]{64}$/;
 const text = (value: unknown, max = MAX_TEXT, empty = false): value is string =>
@@ -70,38 +71,52 @@ export class NormalIntakeInbox {
       const count = countValue === undefined && pending.size === 0 && uncertain.size === 0 ? 0 : countValue;
       if (!validCount(count)) fail("malformed active count");
       if (count !== pending.size + uncertain.size) {
-        // Rows written before the uncertain index existed are still durable
-        // dedupe records. The active counter bounds their possible count, so a
-        // one-page scan can safely recover the legacy census without mutating
-        // storage. If historical dedupe data exceeds that bound, fail closed
-        // rather than report a partial age/count as authoritative.
-        const events = await tx.list<unknown>({ prefix: EVENT, limit: MAX + 1 });
-        if (events.size > MAX) fail("legacy uncertain scan exceeds active bound");
+        const indexedCount = pending.size + uncertain.size;
+        if (count < indexedCount) fail("active indexes exceed count");
         for (const [key, eventId] of pending) {
           if (typeof eventId !== "string") fail("malformed pending index");
           const record = await tx.get<unknown>(eventKey(eventId));
           if (!validRecord(record, eventId) || record.state !== "pending" || key !== pendingKey(record)) fail("pending index/state mismatch");
         }
+        let oldestReceivedAt: number | null = null;
         for (const [key, eventId] of uncertain) {
           if (typeof eventId !== "string") fail("malformed uncertain index");
           const record = await tx.get<unknown>(eventKey(eventId));
           if (!validRecord(record, eventId) || record.state !== "uncertain" || key !== uncertainKey(record)) fail("uncertain index/state mismatch");
+          if (oldestReceivedAt === null || record.received_at_ms < oldestReceivedAt) oldestReceivedAt = record.received_at_ms;
         }
-        let pendingCount = 0;
-        let uncertainCount = 0;
-        let legacyOldest: number | null = null;
-        for (const [key, value] of events) {
-          if (!validRecord(value) || key !== eventKey(value.event_id)) fail("malformed event record during legacy scan");
-          if (value.state === "pending") {
-            pendingCount++;
-            if (key !== eventKey(value.event_id) || !pending.has(pendingKey(value))) fail("pending index/state mismatch");
-          } else if (value.state === "uncertain") {
-            uncertainCount++;
-            if (legacyOldest === null || value.received_at_ms < legacyOldest) legacyOldest = value.received_at_ms;
+
+        // Completed event rows are retained for delivery dedupe and can greatly
+        // outnumber active capacity. Scan them in bounded pages, retaining only
+        // the active census. The durable active count tells us how many legacy
+        // uncertain rows must be found; stop as soon as that bounded set is
+        // complete rather than requiring the retained history to fit one page.
+        const expectedLegacy = count - indexedCount;
+        let legacyFound = 0;
+        let cursor: string | undefined;
+        while (legacyFound < expectedLegacy) {
+          const page = await tx.list<unknown>({ prefix: EVENT, ...(cursor ? { startAfter: cursor } : {}), limit: LEGACY_SCAN_PAGE_SIZE });
+          if (page.size === 0) fail("active count/event mismatch");
+          for (const [key, value] of page) {
+            cursor = key;
+            if (!validRecord(value) || key !== eventKey(value.event_id)) fail("malformed event record during legacy scan");
+            if (value.state === "pending") {
+              const indexKey = pendingKey(value);
+              if (!pending.has(indexKey) || pending.get(indexKey) !== value.event_id) fail("pending index/state mismatch");
+            } else if (value.state === "uncertain") {
+              const indexKey = uncertainKey(value);
+              if (uncertain.has(indexKey)) {
+                if (uncertain.get(indexKey) !== value.event_id) fail("uncertain index/state mismatch");
+              } else {
+                legacyFound++;
+                if (legacyFound > expectedLegacy) fail("active count/event mismatch");
+                if (oldestReceivedAt === null || value.received_at_ms < oldestReceivedAt) oldestReceivedAt = value.received_at_ms;
+                if (legacyFound === expectedLegacy) break;
+              }
+            }
           }
         }
-        if (count !== pendingCount + uncertainCount) fail("active count/event mismatch");
-        return { count: uncertainCount, oldest_age_ms: legacyOldest === null ? null : Math.max(0, now - legacyOldest) };
+        return { count: uncertain.size + legacyFound, oldest_age_ms: oldestReceivedAt === null ? null : Math.max(0, now - oldestReceivedAt) };
       }
       let oldestReceivedAt: number | null = null;
       for (const [key, eventId] of uncertain) {

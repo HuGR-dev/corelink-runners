@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { NormalIntakeInbox } from "../src/lib/normal_intake_inbox";
 
 class Store {
-  data = new Map<string, unknown>(); fail = false; private tail = Promise.resolve();
+  data = new Map<string, unknown>(); fail = false; eventListCursors: (string | undefined)[] = []; private tail = Promise.resolve();
   async get<T>(key: string) { return this.data.get(key) as T | undefined; }
   async put(key: string, value: unknown) { if (this.fail) throw new Error("put failed"); this.data.set(key, value); }
   async delete(key: string) { this.data.delete(key); }
-  async list<T>(options: { prefix?: string; limit?: number }) {
-    return new Map([...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "")).sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit ?? Infinity) as [string, T][]);
+  async list<T>(options: { prefix?: string; limit?: number; startAfter?: string }) {
+    if (options.prefix === "normal-inbox:v1:event:") this.eventListCursors.push(options.startAfter);
+    return new Map([...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "") && (!options.startAfter || k > options.startAfter))
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).slice(0, options.limit ?? Infinity) as [string, T][]);
   }
   async transaction<T>(fn: (tx: Store) => Promise<T>) {
     const run = this.tail.then(async () => { const copy = new Map(this.data); const tx = Object.create(this) as Store; tx.data = copy; const result = await fn(tx); this.data = copy; return result; });
@@ -61,7 +63,7 @@ describe("NormalIntakeInbox", () => {
     expect((await inbox.enqueue(input("released"), 1003)).status).toBe("accepted");
     expect(storage.data.get("normal-inbox:v1:event:uncertain-0")).toMatchObject({ state: "complete" });
   });
-  it("reads legacy uncertain rows without an index through a bounded 500-row scan", async () => {
+  it("reads 500 legacy uncertain rows without an index", async () => {
     const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
     for (let i = 0; i < 500; i++) {
       await inbox.enqueue(input(`legacy-${i}`, i + 1), i + 1);
@@ -73,6 +75,23 @@ describe("NormalIntakeInbox", () => {
     await inbox.settle("legacy-0", "a".repeat(64), "complete", 1002);
     expect(await inbox.uncertainSummary(1002)).toEqual({ count: 499, oldest_age_ms: 1000 });
     expect((await inbox.enqueue(input("legacy-overflow"), 1003)).status).toBe("accepted");
+  });
+  it("pages past retained completed history to find a legacy uncertain row", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    for (let i = 0; i < 501; i++) {
+      const eventId = `history-${String(i).padStart(3, "0")}`;
+      await inbox.enqueue(input(eventId, i + 1), i + 1);
+      await inbox.settle(eventId, "a".repeat(64), "complete", i + 2);
+    }
+    await inbox.enqueue(input("legacy-z", 1000), 1000);
+    await inbox.settle("legacy-z", "a".repeat(64), "uncertain", 1001);
+    for (const key of [...storage.data.keys()]) if (key.startsWith("normal-inbox:v1:uncertain:")) storage.data.delete(key);
+
+    storage.eventListCursors = [];
+    expect(await inbox.uncertainSummary(2000)).toEqual({ count: 1, oldest_age_ms: 1000 });
+    expect(storage.eventListCursors.length).toBeGreaterThan(1);
+    expect(storage.eventListCursors[0]).toBeUndefined();
+    expect(storage.eventListCursors[1]).toBeDefined();
   });
   it("inspects one delivery without changing its durable inbox snapshot", async () => {
     const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
