@@ -85,6 +85,7 @@ export class RunnerDevEnvDO extends Container<any> {
   private wsPairs: Map<string, WsPair> = new Map();
   private readonly credentials: DevenvCredentials;
   private settlementPromise: Promise<DevenvUsageOutcome> | null = null;
+  private cleanupRetryScheduleFailed = false;
 
   constructor(ctx: any, env: any) {
     super(ctx, env);
@@ -111,7 +112,56 @@ export class RunnerDevEnvDO extends Container<any> {
             (storedDeadline.deadlineMs as number) <= 0) throw new Error("DEVENV_COMPUTE_DEADLINE_CORRUPT");
         await this.schedule(new Date(storedDeadline.deadlineMs as number), "expireAuthorizedSession", { sessionUuid: storedDeadline.sessionUuid });
       }
+      const cleanup = await this.credentials.current();
+      if (cleanup && (cleanup.cleanupPending || this.devenvState.status === "stopped" || this.devenvState.status === "errored")) {
+        await this.armCredentialCleanupRetry(cleanup.sessionUuid);
+      }
     });
+  }
+
+  private async armCredentialCleanupRetry(sessionUuid: string): Promise<void> {
+    const owner = await this.credentials.current();
+    if (!owner || owner.sessionUuid !== sessionUuid || owner.providerMayExist) return;
+    let retryAtMs: number;
+    try {
+      retryAtMs = (await this.credentials.planCleanupRetry(sessionUuid)) ?? Date.now() + 60_000;
+    } catch {
+      // Keep the existing durable cleanup handle; the DO alarm is a second recovery path.
+      retryAtMs = Date.now() + 60_000;
+    }
+    try {
+      const schedules = typeof this.listSchedules === "function"
+        ? await this.listSchedules<{ sessionUuid: string }>("expireAuthorizedSession")
+        : [];
+      if (!schedules.some((schedule) => schedule.payload?.sessionUuid === sessionUuid)) {
+        await this.schedule(new Date(retryAtMs), "expireAuthorizedSession", { sessionUuid });
+      }
+      this.cleanupRetryScheduleFailed = false;
+    } catch {
+      this.cleanupRetryScheduleFailed = true;
+      try { await this.ctx.storage.setAlarm(retryAtMs); } catch { /* retain the durable handle for constructor repair */ }
+    }
+  }
+
+  private async cleanupCredentials(providerStopped: boolean): Promise<boolean> {
+    const owner = await this.credentials.current();
+    const complete = await this.credentials.cleanup(providerStopped);
+    if (!complete && owner && !owner.providerMayExist) await this.armCredentialCleanupRetry(owner.sessionUuid);
+    return complete;
+  }
+
+  /** SDK scheduled callbacks are one-shot; this explicit consumer repairs alarm-write failures. */
+  override async alarm(...args: Parameters<Container["alarm"]>): Promise<void> {
+    await super.alarm(...args);
+    const owner = await this.credentials.current();
+    if (!owner) return;
+    const due = owner.cleanupPending === true &&
+      (typeof owner.cleanupRetryAtMs !== "number" || owner.cleanupRetryAtMs <= Date.now());
+    if (due) {
+      await this.expireAuthorizedSession({ sessionUuid: owner.sessionUuid });
+    } else if (this.cleanupRetryScheduleFailed) {
+      try { await this.ctx.storage.setAlarm(owner.cleanupRetryAtMs); } catch { /* durable handle remains for the next DO activation */ }
+    }
   }
 
   private async persistState(): Promise<void> {
@@ -238,6 +288,7 @@ export class RunnerDevEnvDO extends Container<any> {
             await this.start({ envVars, enableInternet: true }, { portToCheck: this.defaultPort, signal: AbortSignal.timeout(Math.max(1, Math.min(8000, payload.grant.expiresAtMs - Date.now()))) });
           },
           destroy: () => this.destroy(), schedule: (when, callback, value) => this.schedule(when, callback, value),
+          scheduleCleanupRetry: (sessionUuid) => this.armCredentialCleanupRetry(sessionUuid),
           noteActivity: () => this.noteActivity(),
         }, payload);
       } catch (error) {
@@ -317,7 +368,7 @@ export class RunnerDevEnvDO extends Container<any> {
         if (!stopped) throw new Error("DEVENV_PROVIDER_STOP_FAILED");
         throw error;
       } finally {
-        await this.credentials.cleanup(stopped);
+        await this.cleanupCredentials(stopped);
       }
       return { sessionUuid: requestedSession, status: "stopped" };
     });
@@ -387,9 +438,11 @@ export class RunnerDevEnvDO extends Container<any> {
 
   /** Session binding makes callbacks from an older SDK schedule harmless. */
   async expireAuthorizedSession(payload: { sessionUuid: string }): Promise<void> {
-    await this.ctx.blockConcurrencyWhile(() => this.credentials.expire(
+    const completed = await this.ctx.blockConcurrencyWhile(() => this.credentials.expire(
       payload?.sessionUuid, () => this.destroy(), () => this.completeStoppedSession(),
-    )).catch(() => { console.error(JSON.stringify({ event: "devenv_expiry_cleanup_pending" })); });
+    )).catch(() => undefined);
+    if (completed === false) await this.armCredentialCleanupRetry(payload.sessionUuid);
+    if (completed === undefined) console.error(JSON.stringify({ event: "devenv_expiry_cleanup_pending" }));
   }
 
   async requestStop(): Promise<{ readonly ok: true }> {
@@ -408,7 +461,7 @@ export class RunnerDevEnvDO extends Container<any> {
         try {
           await this.destroy(); stopped = true;
           await this.completeStoppedSession();
-        } finally { await this.credentials.cleanup(stopped); }
+        } finally { await this.cleanupCredentials(stopped); }
         return { ok: true };
       }
       
@@ -426,7 +479,7 @@ export class RunnerDevEnvDO extends Container<any> {
       });
       
       try { await this.stop(); } catch {
-        await this.credentials.cleanup(false);
+        await this.cleanupCredentials(false);
         throw new Error("DEVENV_PROVIDER_STOP_FAILED");
       }
       // Let the SIGTERM snapshot finish; onStop wipes credentials on confirmed exit.
@@ -511,7 +564,7 @@ export class RunnerDevEnvDO extends Container<any> {
 
   override async onStop(): Promise<void> {
     try { await this.completeStoppedSession(); }
-    finally { await this.credentials.cleanup(true); }
+    finally { await this.cleanupCredentials(true); }
   }
 
   private async completeStoppedSession(): Promise<void> {
@@ -555,7 +608,7 @@ export class RunnerDevEnvDO extends Container<any> {
       };
     }
     try { await this.recordUsage(); }
-    finally { await this.credentials.cleanup(false); }
+    finally { await this.cleanupCredentials(false); }
   }
 
   // ── In-Container Exec Client ─────────────────────────────────────

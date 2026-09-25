@@ -5,6 +5,8 @@ import { DEVENV_TIERS, validateProfileName, validateWorkspaceName, type Authoriz
 export const DEVENV_CREDENTIAL_KEY = "devenv:credential-cleanup";
 export const MAX_DEVENV_SESSION_MS = 8 * 3600 * 1000;
 const CLEANUP_TIMEOUT_MS = 5000;
+const CLEANUP_RETRY_BASE_MS = 60_000;
+const CLEANUP_RETRY_MAX_MS = 15 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface DevenvCredentialHandle {
@@ -16,6 +18,9 @@ export interface DevenvCredentialHandle {
   providerMayExist: boolean;
   stashWiped: boolean;
   revoked: boolean;
+  cleanupPending?: boolean;
+  cleanupRetryAttempt?: number;
+  cleanupRetryAtMs?: number;
 }
 
 function validUuid(value: unknown): value is string {
@@ -138,14 +143,39 @@ export class DevenvCredentials {
     } else if (!await this.cleanup(true)) throw new Error("DEVENV_CREDENTIAL_CLEANUP_PENDING");
   }
 
-  async expire(sessionUuid: string, destroy: () => Promise<void>, completeStopped: () => Promise<void>): Promise<void> {
+  async expire(sessionUuid: string, destroy: () => Promise<void>, completeStopped: () => Promise<void>): Promise<boolean | undefined> {
     const handle = await this.current();
-    if (!handle || handle.sessionUuid !== sessionUuid) return;
+    if (!handle || handle.sessionUuid !== sessionUuid) return true;
     let stopped = false;
+    let cleaned = false;
     try {
-      await destroy(); stopped = true;
-      await completeStopped();
-    } finally { await this.cleanup(stopped); }
+      if (handle.providerMayExist) {
+        await destroy(); stopped = true;
+        await completeStopped();
+      } else {
+        stopped = true;
+      }
+    } finally { cleaned = await this.cleanup(stopped); }
+    return cleaned;
+  }
+
+  /** Persist a bounded-backoff recovery deadline before asking the SDK to schedule it. */
+  planCleanupRetry(sessionUuid: string, now = Date.now()): Promise<number | undefined> {
+    return this.run(async () => {
+      const handle = await this.read();
+      if (!handle || handle.sessionUuid !== sessionUuid) return undefined;
+      if (!handle.cleanupPending && !handle.providerMayExist) handle.cleanupPending = true;
+      if (!handle.cleanupPending) return undefined;
+      if (Number.isSafeInteger(handle.cleanupRetryAtMs) && (handle.cleanupRetryAtMs as number) > now) {
+        return handle.cleanupRetryAtMs;
+      }
+      const attempt = Math.min((handle.cleanupRetryAttempt ?? 0) + 1, 10);
+      const delayMs = Math.min(CLEANUP_RETRY_BASE_MS * 2 ** (attempt - 1), CLEANUP_RETRY_MAX_MS);
+      handle.cleanupRetryAttempt = attempt;
+      handle.cleanupRetryAtMs = now + delayMs;
+      await this.storage.put(DEVENV_CREDENTIAL_KEY, { ...handle });
+      return handle.cleanupRetryAtMs;
+    });
   }
 
   cleanup(providerStopped: boolean): Promise<boolean> {
@@ -172,8 +202,14 @@ export class DevenvCredentials {
           }
         })(),
       ]);
+      if (handle.providerMayExist || !handle.stashWiped || !handle.revoked) {
+        handle.cleanupPending = !handle.providerMayExist;
+        await this.storage.put(DEVENV_CREDENTIAL_KEY, { ...handle });
+        return false;
+      }
+      // Keep a retryable durable marker until deletion itself is confirmed.
+      handle.cleanupPending = true;
       await this.storage.put(DEVENV_CREDENTIAL_KEY, { ...handle });
-      if (handle.providerMayExist || !handle.stashWiped || !handle.revoked) return false;
       await this.storage.delete(DEVENV_CREDENTIAL_KEY);
       this.handle = undefined;
       return true;
@@ -193,6 +229,7 @@ interface DevenvLaunchHost {
   start(envVars: Record<string, string>): Promise<void>;
   destroy(): Promise<void>;
   schedule(when: Date, callback: string, payload: { sessionUuid: string }): Promise<unknown>;
+  scheduleCleanupRetry(sessionUuid: string): Promise<void>;
   noteActivity(): void;
 }
 
@@ -247,7 +284,9 @@ export async function launchAuthorizedDevenv(host: DevenvLaunchHost, payload: Au
       else if (failedState.status === "starting" || failedState.status === "running") {
         await host.transition({ ...failedState, status: "stopping" });
       }
-    } finally { await host.credentials.cleanup(stopped); }
+    } finally {
+      if (!await host.credentials.cleanup(stopped)) await host.scheduleCleanupRetry(grant.sessionUuid);
+    }
     throw new Error("DEVENV_AUTHORIZED_START_FAILED");
   }
 }

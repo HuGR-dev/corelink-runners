@@ -11,6 +11,8 @@ vi.mock("@cloudflare/containers", () => ({
     stop = vi.fn(async () => undefined);
     destroy = vi.fn(async () => undefined);
     schedule = vi.fn(async (_date: Date, _callback: string, _payload: unknown) => undefined);
+    listSchedules = vi.fn(async (_callback: string) => []);
+    alarm = vi.fn(async () => undefined);
     renewActivityTimeout() {}
     async containerFetch() { return new Response("unexpected proxy", { status: 502 }); }
   },
@@ -45,6 +47,7 @@ function fixture() {
       get: vi.fn(async (key: string) => structuredClone(stored.get(key))),
       put: vi.fn(async (key: string, value: unknown) => { stored.set(key, structuredClone(value)); }),
       delete: vi.fn(async (key: string) => { stored.delete(key); }),
+      setAlarm: vi.fn(async (_at: number) => undefined),
     },
     blockConcurrencyWhile: (fn: () => Promise<any>) => {
       const result = gate.then(fn);
@@ -196,6 +199,77 @@ describe("authorized DevEnv credential lifecycle", () => {
     await restarted.expireAuthorizedSession({ sessionUuid: first.grant.sessionUuid });
     expect(restarted.destroy).toHaveBeenCalledTimes(1);
     expect(f.stored.get(DEVENV_CREDENTIAL_KEY).sessionUuid).toBe(second.grant.sessionUuid);
+  });
+
+  it("re-arms incomplete expiry cleanup with bounded backoff and converges on the same session", async () => {
+    const f = fixture(); const instance = await f.restart(); const payload = grant();
+    await instance.startAuthorizedDevenv(payload);
+    f.wipe.mockRejectedValueOnce(new Error("stash offline"));
+    const initialSchedules = vi.mocked(instance.schedule).mock.calls.length;
+    await instance.expireAuthorizedSession({ sessionUuid: payload.grant.sessionUuid });
+    expect(f.stored.get(DEVENV_CREDENTIAL_KEY)).toMatchObject({
+      cleanupPending: true, cleanupRetryAttempt: 1, cleanupRetryAtMs: NOW + 60_000,
+      stashWiped: false, revoked: true, providerMayExist: false,
+    });
+    expect(instance.schedule).toHaveBeenCalledTimes(initialSchedules + 1);
+    expect(instance.schedule).toHaveBeenLastCalledWith(new Date(NOW + 60_000), "expireAuthorizedSession", {
+      sessionUuid: payload.grant.sessionUuid,
+    });
+
+    vi.mocked(Date.now).mockReturnValue(NOW + 60_000);
+    f.wipe.mockResolvedValue(undefined);
+    await instance.expireAuthorizedSession({ sessionUuid: payload.grant.sessionUuid });
+    expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
+    expect(f.wipe).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the cleanup handle and arms the DO alarm if retry schedule persistence fails", async () => {
+    const f = fixture(); const instance = await f.restart(); const payload = grant();
+    await instance.startAuthorizedDevenv(payload);
+    vi.mocked(instance.schedule).mockRejectedValueOnce(new Error("schedule storage unavailable"));
+    f.wipe.mockRejectedValueOnce(new Error("stash offline"));
+    await instance.expireAuthorizedSession({ sessionUuid: payload.grant.sessionUuid });
+    expect(f.stored.get(DEVENV_CREDENTIAL_KEY)).toMatchObject({ cleanupPending: true, cleanupRetryAtMs: NOW + 60_000 });
+    expect(f.ctx.storage.setAlarm).toHaveBeenCalledWith(NOW + 60_000);
+
+    vi.mocked(Date.now).mockReturnValue(NOW + 60_000);
+    f.wipe.mockResolvedValue(undefined);
+    await instance.alarm();
+    expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
+  });
+
+  it.each(["put", "delete"])("re-arms cleanup when credential storage %s fails", async (operation) => {
+    const f = fixture(); const instance = await f.restart(); const payload = grant();
+    await instance.startAuthorizedDevenv(payload);
+    const write = f.ctx.storage[operation];
+    let fail = true;
+    f.ctx.storage[operation] = vi.fn(async (...args: any[]) => {
+      if (fail && args[0] === DEVENV_CREDENTIAL_KEY) {
+        fail = false;
+        throw new Error(`credential ${operation} unavailable`);
+      }
+      return write(...args);
+    });
+    await instance.onStop();
+    expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(true);
+    expect(instance.schedule).toHaveBeenCalledWith(new Date(NOW + 60_000), "expireAuthorizedSession", {
+      sessionUuid: payload.grant.sessionUuid,
+    });
+    await instance.expireAuthorizedSession({ sessionUuid: payload.grant.sessionUuid });
+    expect(f.stored.has(DEVENV_CREDENTIAL_KEY)).toBe(false);
+  });
+
+  it("repairs a persisted incomplete cleanup obligation after DO restart", async () => {
+    const f = fixture(); const instance = await f.restart(); const payload = grant();
+    await instance.startAuthorizedDevenv(payload);
+    f.wipe.mockRejectedValueOnce(new Error("stash offline"));
+    await instance.onStop();
+    const retryAt = f.stored.get(DEVENV_CREDENTIAL_KEY).cleanupRetryAtMs;
+    expect(retryAt).toBe(NOW + 60_000);
+    const restarted = await f.restart();
+    expect(restarted.schedule).toHaveBeenCalledWith(new Date(retryAt), "expireAuthorizedSession", {
+      sessionUuid: payload.grant.sessionUuid,
+    });
   });
 
   it("does not let a stopped session reuse its previous grant", async () => {
