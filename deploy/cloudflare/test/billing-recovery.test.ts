@@ -152,7 +152,10 @@ describe("durable billing recovery", () => {
     expect(kv.store.has("usage:conflict")).toBe(false);
     const quarantined = [...kv.store.entries()].filter(([key]) => key.startsWith("usage:quarantine:")).map(([, value]) => JSON.parse(value));
     expect(quarantined.map((item) => item.source_key)).toEqual(["usage:rejected", "usage:conflict"]);
-    expect(quarantined.map((item) => item.reason)).toEqual(["billing_ingest_rejected", "billing_ingest_conflict"]);
+    expect(quarantined.map((item) => item.reason)).toEqual([
+      "billing_ingest_rejected:invalid_record",
+      "billing_ingest_conflict:payload_mismatch",
+    ]);
   });
 
   it("retains the whole chunk when the acknowledgement is incomplete or reordered", async () => {
