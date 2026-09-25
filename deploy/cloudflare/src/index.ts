@@ -630,6 +630,10 @@ export class ContainmentDO extends DurableObject<Env> {
     return new NormalIntakeInbox(this.ctx.storage).inspect(eventId);
   }
 
+  async normalIntakeUncertainSummary(now = Date.now()): Promise<{ count: number; oldest_age_ms: number | null }> {
+    return new NormalIntakeInbox(this.ctx.storage).uncertainSummary(now);
+  }
+
   async normalIntakeEffectInspect(repo: string, jobId: string, eventId: string): Promise<ContainmentEffectReadback> {
     const effectId = `containment:v1:${eventId}`;
     let tuple: Awaited<ReturnType<typeof intakeOwnerTuple>>;
@@ -4945,6 +4949,63 @@ function parseNormalIntakeEffectReadback(
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
+
+    // Read-only uncertain-capacity summary. The indexed census is bounded by
+    // the 500-row inbox limit and intentionally carries no delivery identity,
+    // payload, label, or provider evidence.
+    if (request.method === "GET" && pathname === "/internal/v1/normal-intake/uncertain") {
+      const key = env.CONTAINMENT_ADMIN_KEY ?? "";
+      if (key.length === 0) return json({ error: "not found" }, 404);
+      if (!safeEqual(request.headers.get("x-corelink-internal-auth") ?? "", key)) return unauthorized();
+      if ([...url.searchParams].length !== 0) return json({ error: "invalid normal intake query" }, 400);
+      try {
+        const summary = await containmentAuthority(env).normalIntakeUncertainSummary(Date.now());
+        return json({ schema_version: 1, uncertain_count: summary.count, oldest_age_ms: summary.oldest_age_ms }, 200);
+      } catch {
+        return json({ error: "normal intake summary unavailable" }, 503);
+      }
+    }
+
+    // Reclaim uncertain capacity only when the canonical effect ledger proves
+    // a committed provider receipt. A missing or in-flight effect is not proof
+    // that repeating provider work would be safe.
+    if (request.method === "POST" && pathname === "/internal/v1/normal-intake/reconcile") {
+      const key = env.CONTAINMENT_ADMIN_KEY ?? "";
+      if (key.length === 0) return json({ error: "not found" }, 404);
+      if (!safeEqual(request.headers.get("x-corelink-internal-auth") ?? "", key)) return unauthorized();
+      let body: unknown;
+      try {
+        const raw = await request.text();
+        if (raw.length > 1024) return json({ error: "invalid normal intake reconciliation" }, 400);
+        body = JSON.parse(raw);
+      } catch { return json({ error: "invalid normal intake reconciliation" }, 400); }
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).sort().join(",") !== "event_id"
+        || !isNormalIntakeEventId((body as { event_id?: unknown }).event_id)) {
+        return json({ error: "invalid normal intake reconciliation" }, 400);
+      }
+      const eventId = (body as { event_id: string }).event_id;
+      const unavailable = (reason: NormalIntakeReadbackUnavailableReason) => json({ error: "normal intake reconciliation unavailable", reason }, 503);
+      try {
+        const authority = containmentAuthority(env);
+        const record = await authority.normalIntakeInspect(eventId);
+        if (!record) return json({ error: "not found" }, 404);
+        const effect = await authority.normalIntakeEffectInspect(record.repo, record.job_id, record.event_id);
+        const parsed = parseNormalIntakeEffectReadback(effect, new Set<NormalIntakeReadbackUnavailableReason>([
+          "owner_storage_unavailable", "orphan_sidecar", "owner_evidence", "permit", "proof",
+          "owner_kv_binding_unavailable", "owner_do_storage_unavailable", "owner_sidecar_storage_unavailable",
+          "binding_unavailable", "binding_divergent", "binding_invalid", "mirror_unavailable", "mirror_invalid",
+          "receipt", "tuple_unavailable", "ledger_unexpected", "effect_rpc_unavailable", "delivery_readback_unavailable",
+        ]));
+        if (parsed.kind === "unavailable") return unavailable(parsed.reason);
+        if (parsed.effect.kind !== "committed") return json({ error: "normal intake effect is not committed" }, 409);
+        if (record.state === "pending") return json({ error: "normal intake delivery is not uncertain" }, 409);
+        if (record.state === "uncertain") await authority.normalIntakeSettle(eventId, record.body_sha256, "complete");
+        return json({ schema_version: 1, reconciled: true }, 200);
+      } catch {
+        return unavailable("delivery_readback_unavailable");
+      }
+    }
 
     // Read-only normal-intake status. It uses the containment admin key because
     // the delivery snapshot is internal operational data; the returned fields

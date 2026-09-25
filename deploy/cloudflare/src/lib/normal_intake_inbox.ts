@@ -19,6 +19,7 @@ export class NormalIntakeConflictError extends Error {
 }
 const EVENT = "normal-inbox:v1:event:";
 const PENDING = "normal-inbox:v1:pending:";
+const UNCERTAIN = "normal-inbox:v1:uncertain:";
 const COUNT = "normal-inbox:v1:count";
 const MAX = 500;
 const MAX_TEXT = 256;
@@ -29,6 +30,7 @@ export const isNormalIntakeEventId = (value: unknown): value is string => text(v
 const safeTime = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const eventKey = (id: string) => `${EVENT}${encodeURIComponent(id)}`;
 const pendingKey = (record: NormalIntakeRecord) => `${PENDING}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
+const uncertainKey = (record: NormalIntakeRecord) => `${UNCERTAIN}${String(record.received_at_ms).padStart(16, "0")}:${encodeURIComponent(record.event_id)}`;
 const validCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX;
 
 function fail(message: string): never { throw new Error(`normal intake corruption: ${message}`); }
@@ -57,6 +59,60 @@ function validateBody(body: string): void { if (!SHA.test(body)) throw new Error
 
 export class NormalIntakeInbox {
   constructor(private readonly storage: AuthorityStorage) {}
+
+  async uncertainSummary(now = Date.now()): Promise<{ count: number; oldest_age_ms: number | null }> {
+    validateNow(now);
+    return this.storage.transaction(async tx => {
+      const countValue = await tx.get<unknown>(COUNT);
+      const pending = await tx.list<string>({ prefix: PENDING, limit: MAX + 1 });
+      const uncertain = await tx.list<string>({ prefix: UNCERTAIN, limit: MAX + 1 });
+      if (pending.size > MAX || uncertain.size > MAX) fail("active index exceeds capacity");
+      const count = countValue === undefined && pending.size === 0 && uncertain.size === 0 ? 0 : countValue;
+      if (!validCount(count)) fail("malformed active count");
+      if (count !== pending.size + uncertain.size) {
+        // Rows written before the uncertain index existed are still durable
+        // dedupe records. The active counter bounds their possible count, so a
+        // one-page scan can safely recover the legacy census without mutating
+        // storage. If historical dedupe data exceeds that bound, fail closed
+        // rather than report a partial age/count as authoritative.
+        const events = await tx.list<unknown>({ prefix: EVENT, limit: MAX + 1 });
+        if (events.size > MAX) fail("legacy uncertain scan exceeds active bound");
+        for (const [key, eventId] of pending) {
+          if (typeof eventId !== "string") fail("malformed pending index");
+          const record = await tx.get<unknown>(eventKey(eventId));
+          if (!validRecord(record, eventId) || record.state !== "pending" || key !== pendingKey(record)) fail("pending index/state mismatch");
+        }
+        for (const [key, eventId] of uncertain) {
+          if (typeof eventId !== "string") fail("malformed uncertain index");
+          const record = await tx.get<unknown>(eventKey(eventId));
+          if (!validRecord(record, eventId) || record.state !== "uncertain" || key !== uncertainKey(record)) fail("uncertain index/state mismatch");
+        }
+        let pendingCount = 0;
+        let uncertainCount = 0;
+        let legacyOldest: number | null = null;
+        for (const [key, value] of events) {
+          if (!validRecord(value) || key !== eventKey(value.event_id)) fail("malformed event record during legacy scan");
+          if (value.state === "pending") {
+            pendingCount++;
+            if (key !== eventKey(value.event_id) || !pending.has(pendingKey(value))) fail("pending index/state mismatch");
+          } else if (value.state === "uncertain") {
+            uncertainCount++;
+            if (legacyOldest === null || value.received_at_ms < legacyOldest) legacyOldest = value.received_at_ms;
+          }
+        }
+        if (count !== pendingCount + uncertainCount) fail("active count/event mismatch");
+        return { count: uncertainCount, oldest_age_ms: legacyOldest === null ? null : Math.max(0, now - legacyOldest) };
+      }
+      let oldestReceivedAt: number | null = null;
+      for (const [key, eventId] of uncertain) {
+        if (typeof eventId !== "string" || !key.startsWith(UNCERTAIN)) fail("malformed uncertain index");
+        const record = await tx.get<unknown>(eventKey(eventId));
+        if (!validRecord(record, eventId) || record.state !== "uncertain" || key !== uncertainKey(record)) fail("uncertain index/state mismatch");
+        if (oldestReceivedAt === null || record.received_at_ms < oldestReceivedAt) oldestReceivedAt = record.received_at_ms;
+      }
+      return { count: uncertain.size, oldest_age_ms: oldestReceivedAt === null ? null : Math.max(0, now - oldestReceivedAt) };
+    });
+  }
 
   async inspect(eventId: string): Promise<NormalIntakeRecord | null> {
     if (!isNormalIntakeEventId(eventId)) throw new Error("invalid normal intake event id");
@@ -134,8 +190,12 @@ export class NormalIntakeInbox {
       const countValue = await tx.get<unknown>(COUNT);
       if (!validCount(countValue)) fail("malformed active count");
       if (outcome === "complete") { if (countValue < 1) fail("active count underflow"); await tx.delete(pendingKey(value)); await tx.put(COUNT, countValue - 1); }
-      else if (outcome === "uncertain") await tx.delete(pendingKey(value));
+      else if (outcome === "uncertain") {
+        await tx.delete(pendingKey(value));
+        await tx.put(uncertainKey(next), next.event_id);
+      }
       else await tx.put(pendingKey(next), next.event_id);
+      if (outcome === "complete" && value.state === "uncertain") await tx.delete(uncertainKey(value));
       await tx.put(key, next);
       return;
     });
