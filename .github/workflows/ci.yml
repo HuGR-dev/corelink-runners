@@ -11,25 +11,9 @@ permissions:
 
 jobs:
   gates:
-    # The correctness gate (fmt/clippy/test/deny/audit) runs on the self-hosted
-    # `corelink` ephemeral fleet — $0 GitHub billing (zero-hosted mandate).
-    #
-    # Supersedes the 2026-07-19 "keep it on ubuntu-latest" rationale, which was
-    # about the self-hosted *builder-Mac* being a single point of failure (a
-    # pipeline-service brownout inflated its reconnect backoff to ~3h). That risk
-    # does NOT apply to `runs-on: corelink`: this is the ephemeral Firecracker
-    # FLEET (many boxes, the product itself), not the one Mac — and it serves
-    # these jobs live. It also sidesteps the shared-home `cargo install` race
-    # (os-error-2): each lease is a fresh microVM with its own $HOME/$CARGO_HOME,
-    # so the in-job setup actions below install with no cross-job contention. The
-    # gate's whole toolchain is still set up in-job by the pinned actions
-    # (rust-toolchain + rust-cache + install-action), so it runs identically on a
-    # clean lease. A self-hosted label does not bypass GitHub's workflow-start
-    # boundary: GitHub must create a job before a CoreLink runner can receive it.
-    # An organization Actions budget/payment block may therefore end the suite as
-    # a zero-job `startup_failure`; that is no CI evidence and must not be replaced
-    # by a local PASS.
-    runs-on: corelink
+    # Secretless, isolated correctness gate on a standard GitHub-hosted Linux VM.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:

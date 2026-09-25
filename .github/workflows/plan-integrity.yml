@@ -15,6 +15,7 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - '.github/ci/verify_actions_migration_contract.py'
   push:
     branches: [main]
     paths:
@@ -30,6 +31,7 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - '.github/ci/verify_actions_migration_contract.py'
 
 permissions:
   contents: read
@@ -42,10 +44,13 @@ concurrency:
 jobs:
   check:
     name: Coverage, WP, and AU structure
-    runs-on: corelink
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+        with:
+          # The PR SHA is a synthetic merge commit; retain both parents for binding below.
+          fetch-depth: 2
 
       - name: Bind checkout to triggering SHA
         shell: bash
@@ -87,6 +92,27 @@ jobs:
               ;;
           esac
 
+      - name: Install pinned actionlint 1.7.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='1.7.12'
+          sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+          archive="$RUNNER_TEMP/actionlint_${version}_linux_amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/actionlint"
+          [[ "$(uname -s)" == 'Linux' && "$(uname -m)" == 'x86_64' ]] || {
+            echo 'actionlint bootstrap supports only GitHub-hosted Linux x86_64' >&2
+            exit 1
+          }
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" actionlint
+          "$install_dir/actionlint" -version | grep -Fx "$version" >/dev/null
+          echo "$install_dir" >> "$GITHUB_PATH"
+
       - name: Lint workflow syntax
         shell: bash
         run: |
@@ -127,11 +153,14 @@ jobs:
             echo "actionlint: parsed optional configuration ${config_files[0]} (non-authoritative)"
           fi
 
-          # The authoritative checker pins the binary, invokes actionlint with
-          # -config-file /dev/null, and compares an exact (workflow,label)
-          # diagnostic multiset.  A regex allowlist would admit new labels or
-          # duplicate occurrences silently.
+          # The authoritative checker pins the binary, ignores optional repo
+          # config, disables ambient ShellCheck integration, and compares an
+          # exact (workflow,label) diagnostic multiset. A regex allowlist would
+          # admit new labels or duplicate occurrences silently.
           python3 docs/plan/actionlint-check.py
+
+      - name: Verify hosted CI and provider trigger boundaries
+        run: python3 .github/ci/verify_actions_migration_contract.py --self-test
 
       - name: Check audit finding coverage
         run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt
