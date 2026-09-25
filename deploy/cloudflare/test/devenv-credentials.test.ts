@@ -12,7 +12,7 @@ vi.mock("@cloudflare/containers", () => ({
     destroy = vi.fn(async () => undefined);
     schedule = vi.fn(async (_date: Date, _callback: string, _payload: unknown) => undefined);
     listSchedules = vi.fn(async (_callback: string) => []);
-    alarm = vi.fn(async () => undefined);
+    async alarm() {}
     renewActivityTimeout() {}
     async containerFetch() { return new Response("unexpected proxy", { status: 502 }); }
   },
