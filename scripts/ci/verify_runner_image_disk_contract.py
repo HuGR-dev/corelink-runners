@@ -64,7 +64,7 @@ def verify(workflow_path: Path, builder_path: Path) -> int:
 
     export = builder.find("--output \"type=oci")
     prune = builder.find("prune --all --force", export)
-    verify_archive = builder.find("verify_runner_image_oci_archive.py", prune)
+    verify_archive = builder.find('python3 "$archive_verifier"', prune)
     load = builder.find("docker load --input", verify_archive)
     if min(export, prune, verify_archive, load) < 0 or not (export < prune < verify_archive < load):
         return fail("required order is OCI export → BuildKit prune → digest/budget checks → import")
