@@ -255,6 +255,9 @@ pub struct AdmissionQueue {
     /// no pending work (mirrors the `rate_windows` idle-prune discipline so the
     /// map stays bounded by ACTIVE tenants, not every tenant ever seen).
     park_permits: Mutex<HashMap<TenantId, Arc<Semaphore>>>,
+    /// Unit-test synchronization point for observing a successful local enqueue.
+    #[cfg(test)]
+    enqueued: Arc<tokio::sync::Notify>,
     /// Per-tenant parked-waiter budget ([`DEFAULT_ADMISSION_PARK_CAP`]).
     park_cap: usize,
     /// DURABLE cross-instance fair queue (WP-CROSS-INSTANCE-QUEUE). **DEFAULT
@@ -287,6 +290,8 @@ impl AdmissionQueue {
             scheduler: Mutex::new(FairScheduler::new(tick_slots.max(1))),
             waiters: Mutex::new(HashMap::new()),
             park_permits: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            enqueued: Arc::new(tokio::sync::Notify::new()),
             park_cap: DEFAULT_ADMISSION_PARK_CAP,
             durable: None,
         }
@@ -312,6 +317,13 @@ impl AdmissionQueue {
     pub fn with_park_cap(mut self, park_cap: usize) -> Self {
         self.park_cap = park_cap.max(1);
         self
+    }
+
+    /// Notification for unit tests that need to establish queue insertion
+    /// before changing capacity or running the dispatcher.
+    #[cfg(test)]
+    pub(crate) fn enqueue_notification(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.enqueued)
     }
 
     /// This tenant's park-permit semaphore (lazily created at `park_cap`
@@ -539,6 +551,9 @@ pub(crate) async fn acquire_queued(
             );
         }
         drop(sched);
+
+        #[cfg(test)]
+        queue.enqueued.notify_one();
 
         // ── DURABLE cross-instance fair queue (WP-CROSS-INSTANCE-QUEUE).
         // DEFAULT-OFF: `durable` is `None` unless the composition root wired a
