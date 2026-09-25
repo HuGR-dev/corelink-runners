@@ -88,7 +88,7 @@ No redeploy needed — Worker secrets are read live.
 Open a log tail in one shell, dispatch a dogfood job in another:
 ```sh
 npx wrangler tail corelink-spawn-worker            # shell A — watch the spawn
-gh workflow run dogfood-smoke.yml --repo HuGR-Labs/corelink-runners   # shell B — queue a job
+gh workflow run dogfood-smoke.yml --repo HuGR-dev/corelink-runners   # shell B — queue a job
 ```
 - **WARM proof (positive):** the job spawns and there is **NO** `warm-mint failed, spawning COLD: …`
   line in the tail (that line is logged only on a mint failure). The mint POST to
@@ -112,7 +112,7 @@ npx wrangler secret delete CORELINK_RUNNER_MINT_AUTH_KEY
 | Secret | Purpose | State | Rotate |
 |---|---|---|---|
 | `CLOUDFLARE_SPAWN_AUTH_TOKEN` | bearer for `/v1/*` (fabric path) | set (rotated 2026-06-20) | `openssl rand -hex 32 \| npx wrangler secret put …` |
-| `GITHUB_WEBHOOK_SECRET` | `/webhook` HMAC | set (rotated+ping-verified) | rotate on BOTH sides — Worker + hook 644667520; **use canonical repo `HuGR-Labs/corelink-runners`** (the dead slugs `HumanGuardrail`/`humangr-labs` 301/307 and `gh api -X PATCH` silently no-ops) |
+| `GITHUB_WEBHOOK_SECRET` | `/webhook` HMAC | set (rotated+ping-verified) | rotate on BOTH sides — Worker + hook 644667520; **use canonical repo `HuGR-dev/corelink-runners`** (historical dead slugs `HumanGuardrail`/`humangr-labs` 301/307 and `gh api -X PATCH` silently no-ops) |
 | `GITHUB_MINT_TOKEN` | mint JIT (`generate-jitconfig`) | set (dogfood `gh auth token`) | swap for a dedicated fine-grained PAT (repo Administration:write) — **UI-only**, before non-dogfood |
 | `CORELINK_RUNNER_MINT_AUTH_KEY` | D-9 mint/revoke (`x-corelink-internal-auth`) | **NOT set** — the warm gate (§2) | a 401 on mint = drift signal → re-`put` the new value (no code change) |
 

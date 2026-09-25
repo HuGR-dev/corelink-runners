@@ -1,0 +1,48 @@
+name: Runner repository slug
+
+on:
+  pull_request:
+    paths:
+      - '.github/ci/verify_runner_repository_slug.py'
+      - '.github/workflows/runner-slug-verification.yml'
+      - 'actions/corelink-memoize/README.md'
+      - 'deploy/RUNBOOK.md'
+      - 'deploy/autoscaler-stage-b.md'
+      - 'deploy/cloudflare-fabricd/wrangler.jsonc'
+      - 'deploy/cloudflare/src/index.ts'
+      - 'deploy/cloudflare/wrangler.jsonc'
+      - 'deploy/northflank-service.json'
+      - 'docs/deploy/fabric-server.md'
+      - 'docs/runbook/cloudflare-go-live.md'
+      - 'docs/runbook/dogfood-go-live.md'
+      - 'docs/runbook/incident-playbook.md'
+      - 'docs/runbook/runner-image-rollout.md'
+      - 'docs/runbook/secret-inventory.md'
+      - 'integrations/buildkite/README.md'
+      - 'integrations/buildkite/plugin.yml'
+      - 'integrations/github-actions/README.md'
+      - 'integrations/github-actions/action.yml'
+      - 'integrations/github-actions/examples/ci.yml'
+      - 'sdk/python/pyproject.toml'
+      - 'sdk/typescript/package.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-slug-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: runner slug (exact PR head)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Verify runtime lookup and slug allowlist
+        run: python3 .github/ci/verify_runner_repository_slug.py

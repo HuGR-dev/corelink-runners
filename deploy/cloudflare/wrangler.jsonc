@@ -45,21 +45,22 @@
     // 150584374 covers corelink-server. Unmapped ⇒ COLD re-drive, which is the
     // documented fallback and is exactly the level corelink-server spawns run at
     // today via the webhook path — so this changes recovery, and nothing else.
-    "RECONCILER_REPOS": "HuGR-Labs/corelink-runners HuGR-Labs/corelink-server",
+    "RECONCILER_REPOS": "HuGR-dev/corelink-runners HuGR-Labs/corelink-server",
     "AUTOSCALER_REDRIVE_PAUSED": "1",
     "AUTOSCALER_INTAKE_PAUSED": "1",
     // Inject the known installation_id for first-party repos (the repo webhook has
     // none) so the server-derived mint (#283) runs WARM without an App webhook.
-    // dogfood: HuGR-Labs/corelink-runners → installation 150584374 → tenant
-    // d863fafb (verified read-only by the clw coordinator). Key MUST match the
-    // webhook payload's repository.full_name exactly.
+    // dogfood: HuGR-dev/corelink-runners → recorded installation 150584374 → tenant
+    // d863fafb. The key MUST match repository.full_name exactly. The installation
+    // ID is retained from the pre-transfer mapping; live App installation validation
+    // remains a separate owner action and is not proved by this static config.
     // NOTE: the server derivation is installation_id → tenant, 1:1 (runner_mint.ts:395);
     // the repo does NOT redirect the tenant (it's only an allowlist gate WITHIN that
-    // tenant). So a HuGR-Labs repo under install 150584374 ALWAYS resolves to
-    // d863fafb — you cannot map a second HuGR-Labs repo to a different tenant here.
+    // tenant). So a repo under install 150584374 ALWAYS resolves to d863fafb —
+    // you cannot map a second repo under this installation to a different tenant.
     // A cold-organic tenant's OWN box needs that tenant's OWN GitHub App install
     // (task #68 self-serve OAuth) — not a REPO_INSTALLATION_MAP entry under 150584374.
-    "REPO_INSTALLATION_MAP": "{\"HuGR-Labs/corelink-runners\":\"150584374\"}",
+    "REPO_INSTALLATION_MAP": "{\"HuGR-dev/corelink-runners\":\"150584374\"}",
     // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ──────
     // Maps a repo to the NAME of the secret holding that tenant's acquiring PAT. When
     // a workflow_job on this repo fires, the mint resolves the tenant by INTROSPECTING

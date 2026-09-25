@@ -19,7 +19,7 @@ requirements:
 # When a release is published the install step will download the binary
 # automatically. The release URL pattern will be:
 #
-#   https://github.com/HuGR-Labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+#   https://github.com/HuGR-dev/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
 #
 # Until then, add a command step before this plugin to build the CLI:
 #

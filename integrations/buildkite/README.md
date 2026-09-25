@@ -66,7 +66,7 @@ When a release is published, the plugin will download the binary automatically.
 The release URL pattern will be:
 
 ```
-https://github.com/HuGR-Labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+https://github.com/HuGR-dev/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
 ```
 
 ---

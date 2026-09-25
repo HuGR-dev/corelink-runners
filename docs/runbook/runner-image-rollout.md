@@ -15,7 +15,7 @@ action and stays a human decision).
 
 **Prerequisites**
 
-- `gh` authenticated against `HuGR-Labs/corelink-runners`.
+- `gh` authenticated against `HuGR-dev/corelink-runners`.
 - Repo secret `CLOUDFLARE_API_TOKEN` armed (both workflows guard on it and fail
   fast with an explicit message if it is absent).
 - For steps 4–5 you need a token with **Containers** scope. Note the split
