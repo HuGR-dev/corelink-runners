@@ -311,6 +311,7 @@ def run(root: Path) -> int:
             binary,
             "-config-file",
             "/dev/null",
+            "-shellcheck=",
             "-oneline",
             *(str(path) for path in workflow_files),
         ],

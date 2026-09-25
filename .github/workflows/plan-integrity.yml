@@ -153,10 +153,10 @@ jobs:
             echo "actionlint: parsed optional configuration ${config_files[0]} (non-authoritative)"
           fi
 
-          # The authoritative checker pins the binary, invokes actionlint with
-          # -config-file /dev/null, and compares an exact (workflow,label)
-          # diagnostic multiset.  A regex allowlist would admit new labels or
-          # duplicate occurrences silently.
+          # The authoritative checker pins the binary, ignores optional repo
+          # config, disables ambient ShellCheck integration, and compares an
+          # exact (workflow,label) diagnostic multiset. A regex allowlist would
+          # admit new labels or duplicate occurrences silently.
           python3 docs/plan/actionlint-check.py
 
       - name: Verify hosted CI and provider trigger boundaries
