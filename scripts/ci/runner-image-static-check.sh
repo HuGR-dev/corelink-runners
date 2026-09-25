@@ -9,6 +9,8 @@ validation_workflow="$repo/.github/workflows/image-build-impact.yml"
 fabricd_workflow="$repo/.github/workflows/build-fabricd-image.yml"
 shim="$repo/deploy/runner/docker-shim.sh"
 disk_guard="$repo/scripts/ci/container-build-disk-guard.sh"
+bounded_builder="$repo/scripts/ci/container-build-export-load.sh"
+disk_contract="$repo/scripts/ci/verify_runner_image_disk_contract.py"
 validation_script="$repo/scripts/ci/runner-image-build-validation.sh"
 build_only_checker="$repo/scripts/ci/verify_build_only_workflow.py"
 
@@ -29,6 +31,10 @@ if git -C "$repo" grep -nFi -- "$obsolete_command" -- .; then
   echo 'runner-image-static-check: obsolete Wrangler container-build command found' >&2
   exit 1
 fi
+[[ -x "$bounded_builder" && -f "$disk_contract" ]] || {
+  echo 'runner-image-static-check: bounded RunnerContainer build contract is missing' >&2
+  exit 1
+}
 
 # These labels had no runtime consumer. Keeping them would make a stale image
 # appear to carry a trustworthy toolchain version, so the metadata contract is
@@ -60,6 +66,14 @@ if ! grep -q 'docker build' "$build_workflow" ||
    ! grep -q 'container-build-disk-guard.sh' "$build_workflow" ||
    ! grep -q 'container-build-disk-guard.sh' "$fabricd_workflow"; then
   echo 'runner-image-static-check: bounded local build/push path is missing' >&2
+  exit 1
+fi
+if ! grep -q 'container-build-export-load.sh' "$build_workflow"; then
+  echo 'runner-image-static-check: RunnerContainer bypasses the bounded export/import path' >&2
+  exit 1
+fi
+if ! python3 "$disk_contract" --workflow "$build_workflow" --builder "$bounded_builder"; then
+  echo 'runner-image-static-check: RunnerContainer disk contract failed' >&2
   exit 1
 fi
 if grep -q 'type=image,name=' "$shim" || grep -q '^ *--push)' "$shim"; then

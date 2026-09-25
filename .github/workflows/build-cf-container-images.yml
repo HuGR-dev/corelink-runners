@@ -19,13 +19,15 @@
 # not support. Under the zero-hosted billing block that lane is DEAD (it fails at
 # "Set up job", so the runner image could never be rebuilt). It now runs on the
 # ephemeral `corelink` fleet, DAEMONLESS, using the proven chain:
-#   1. `docker build` — the baked docker-shim runs nerdctl/buildkit into the
-#      containerd image store. Wrangler's locked build command uses this local
-#      image path, so the workflow deliberately builds then pushes it.
-#   2. `wrangler containers push <tag>` — Wrangler mints the short-lived CF
+#   1. RunnerContainer is exported by buildctl as an OCI archive. BuildKit cache
+#      is pruned before importing it into containerd, after checking the
+#      measured layer-unpack budget and reserved free disk.
+#   2. CheckHostContainer and RunnerDevEnvDO still use the docker-shim build
+#      path. Wrangler's locked push command consumes each resulting local image.
+#   3. `wrangler containers push <tag>` — Wrangler mints the short-lived CF
 #      registry credential and pushes via the docker binary. Each image is
 #      removed and the unreferenced store is pruned immediately after its push,
-#      keeping the 20 GB lease disk bounded.
+#      keeping each ephemeral lease disk bounded.
 # The manifest digest is parsed from wrangler's push output for an immutable X4
 # pin; resolution fails closed if the push transcript has no valid digest.
 #
@@ -151,7 +153,7 @@ jobs:
           # Context = deploy/runner (Dockerfile + action-archive-pins.txt live
           # there). The locked Wrangler build path is local-image based, so
           # publish it with Wrangler then reclaim all unreferenced layers.
-          docker build -t "${IMAGE}:${TAG}" deploy/runner
+          bash scripts/ci/container-build-export-load.sh "${IMAGE}" "${TAG}" deploy/runner
           ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" 2>&1 | tee /tmp/runner-push.out )
           REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" /tmp/runner-push.out)"
           echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
@@ -274,6 +276,8 @@ jobs:
             echo '```'
             echo "${{ steps.runner.outputs.ref }}"
             echo '```'
+            echo "BuildKit manifest: `${{ steps.runner.outputs.build_digest }}`; config: `${{ steps.runner.outputs.config_digest }}`."
+            echo "Disk budget: filesystem `${{ steps.runner.outputs.disk_filesystem_bytes }}` bytes; archive `${{ steps.runner.outputs.disk_archive_bytes }}` bytes; uncompressed layers `${{ steps.runner.outputs.disk_uncompressed_layer_bytes }}` bytes; post-prune BuildKit `${{ steps.runner.outputs.disk_buildkit_bytes }}` bytes; free before import `${{ steps.runner.outputs.disk_free_before_import_bytes }}` bytes."
             echo ""
             echo "**CheckHostContainer** (first push — then flip wrangler.jsonc off the Dockerfile)"
             echo '```'
