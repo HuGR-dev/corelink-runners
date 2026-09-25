@@ -298,7 +298,7 @@ impl<B: BoxExec> ClwBoxDrive<B> {
         let run_result = self.boxx.run(&argv);
         let receipt = state_path.as_deref().and_then(|path| {
             let out = self.boxx.run(&["cat", path]).ok()?;
-            (out.code == Some(0)).then(|| out.stdout)
+            (out.code == Some(0)).then_some(out.stdout)
         });
         if let Some(path) = state_path.as_deref() {
             let _ = self.boxx.run(&["rm", "-f", "--", path]);
