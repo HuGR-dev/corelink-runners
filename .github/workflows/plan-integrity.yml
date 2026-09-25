@@ -15,6 +15,7 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - 'scripts/ci/verify_actions_migration_contract.py'
   push:
     branches: [main]
     paths:
@@ -30,6 +31,7 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - 'scripts/ci/verify_actions_migration_contract.py'
 
 permissions:
   contents: read
@@ -42,7 +44,7 @@ concurrency:
 jobs:
   check:
     name: Coverage, WP, and AU structure
-    runs-on: corelink
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
@@ -132,6 +134,9 @@ jobs:
           # diagnostic multiset.  A regex allowlist would admit new labels or
           # duplicate occurrences silently.
           python3 docs/plan/actionlint-check.py
+
+      - name: Verify hosted CI and provider trigger boundaries
+        run: python3 scripts/ci/verify_actions_migration_contract.py --self-test
 
       - name: Check audit finding coverage
         run: python3 docs/plan/plan-check.py docs/plan/audit-2026-08-30-finding-ids.txt

@@ -43,9 +43,8 @@ concurrency:
 jobs:
   test:
     name: spawn-Worker typecheck + vitest
-    # Self-hosted corelink fleet — zero GitHub-hosted spend (the hosted lane was
-    # billing-blocked, silently failing this gate on any deploy/cloudflare/** PR).
-    runs-on: corelink
+    # Secretless Node typecheck/tests on a standard GitHub-hosted Linux VM.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:

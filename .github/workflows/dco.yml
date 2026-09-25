@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   dco:
-    # Self-hosted fleet (same label as corelink-server) — never GitHub-hosted.
-    # Just git + grep; runs on an ephemeral corelink lease at $0 GitHub billing.
-    runs-on: corelink
+    # Read-only commit metadata check; no product runner or credentials needed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3 (Node 24; v4 is Node 20, forced off runners 2026-06-16)
         with:
