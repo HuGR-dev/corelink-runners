@@ -22,6 +22,8 @@ MANUAL_PROVIDER = (
     "build-fabricd-image.yml",
     "deploy-spawn-worker.yml",
 )
+ACTIONLINT_VERSION = "1.7.12"
+ACTIONLINT_SHA256 = "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 
 def workflow_path(name: str) -> Path:
@@ -107,6 +109,27 @@ def has_no_secret_path(text: str) -> bool:
     return not any(re.search(pattern, non_comment_lines) for pattern in forbidden)
 
 
+def has_pinned_actionlint_bootstrap(text: str) -> bool:
+    required = (
+        f"- name: Install pinned actionlint {ACTIONLINT_VERSION}",
+        f"version='{ACTIONLINT_VERSION}'",
+        f"sha256='{ACTIONLINT_SHA256}'",
+        '[[ "$(uname -s)" == \'Linux\' && "$(uname -m)" == \'x86_64\' ]]',
+        "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz",
+        "printf '%s  %s\\n' \"$sha256\" \"$archive\" | sha256sum --check --status",
+        'tar -xzf "$archive" -C "$install_dir" actionlint',
+        '"$install_dir/actionlint" -version | grep -Fx "$version" >/dev/null',
+        'echo "$install_dir" >> "$GITHUB_PATH"',
+    )
+    positions = [text.find(fragment) for fragment in required]
+    lint_position = text.find("- name: Lint workflow syntax")
+    return all(position >= 0 for position in positions) and (
+        positions[0] < lint_position and all(
+            left < right for left, right in zip(positions, positions[1:])
+        )
+    ) and lint_position >= 0
+
+
 def validate(documents: dict[str, str]) -> list[str]:
     errors: list[str] = []
     for name in HOSTED:
@@ -123,6 +146,12 @@ def validate(documents: dict[str, str]) -> list[str]:
         for block in jobs.values():
             if not re.search(r"(?m)^    timeout-minutes:\s*[1-9][0-9]*\s*$", block):
                 errors.append(f"{name}: each job must declare a finite timeout")
+
+    if not has_pinned_actionlint_bootstrap(documents["plan-integrity.yml"]):
+        errors.append(
+            "plan-integrity.yml: actionlint must be installed before use from the "
+            "pinned v1.7.12 Linux x86_64 release and verified by SHA-256"
+        )
 
     for name in MANUAL_PROVIDER:
         events, _ = top_level_events(documents[name])
@@ -170,6 +199,8 @@ def negative_controls(documents: dict[str, str]) -> None:
          lambda s: s.replace("  gates:\n", "  gates:\n    environment: production\n", 1)),
         ("partial provider runner migration", "deploy-spawn-worker.yml",
          lambda s: re.sub(r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1)),
+        ("actionlint checksum changed", "plan-integrity.yml",
+         lambda s: s.replace(ACTIONLINT_SHA256, "0" + ACTIONLINT_SHA256[1:], 1)),
     )
     for label, path, mutate in mutations:
         case = dict(documents)
@@ -191,7 +222,7 @@ def main() -> int:
         return 1
     if args.self_test:
         negative_controls(documents)
-        print("workflow migration contract and 11 negative controls passed")
+        print("workflow migration contract and 12 negative controls passed")
     else:
         print("workflow migration contract passed")
     return 0

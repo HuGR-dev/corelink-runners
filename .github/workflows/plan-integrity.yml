@@ -92,6 +92,27 @@ jobs:
               ;;
           esac
 
+      - name: Install pinned actionlint 1.7.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='1.7.12'
+          sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+          archive="$RUNNER_TEMP/actionlint_${version}_linux_amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/actionlint"
+          [[ "$(uname -s)" == 'Linux' && "$(uname -m)" == 'x86_64' ]] || {
+            echo 'actionlint bootstrap supports only GitHub-hosted Linux x86_64' >&2
+            exit 1
+          }
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" -C "$install_dir" actionlint
+          "$install_dir/actionlint" -version | grep -Fx "$version" >/dev/null
+          echo "$install_dir" >> "$GITHUB_PATH"
+
       - name: Lint workflow syntax
         shell: bash
         run: |
