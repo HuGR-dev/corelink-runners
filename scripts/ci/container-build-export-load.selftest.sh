@@ -96,5 +96,9 @@ echo 'PASS disk contract rejects inline pull_request trigger'
 # production workflow manual-only and lint its YAML from that hosted job.
 if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
   go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-  "$(go env GOPATH)/bin/actionlint" "$workflow"
+  # Tell actionlint about the repository's custom runner label without
+  # weakening any workflow or shell checks or adding repository-wide config.
+  actionlint_config="$fixture/actionlint.yaml"
+  printf 'self-hosted-runner:\n  labels:\n    - corelink\n' > "$actionlint_config"
+  "$(go env GOPATH)/bin/actionlint" -config-file "$actionlint_config" "$workflow"
 fi
