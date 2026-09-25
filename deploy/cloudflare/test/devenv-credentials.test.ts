@@ -227,7 +227,7 @@ describe("authorized DevEnv credential lifecycle", () => {
     const f = fixture(); const instance = await f.restart(); const payload = grant();
     await instance.startAuthorizedDevenv(payload);
     vi.mocked(instance.schedule).mockRejectedValueOnce(new Error("schedule storage unavailable"));
-    f.wipe.mockRejectedValueOnce(new Error("stash offline"));
+    f.wipe.mockRejectedValue(new Error("stash offline"));
     await instance.expireAuthorizedSession({ sessionUuid: payload.grant.sessionUuid });
     expect(f.stored.get(DEVENV_CREDENTIAL_KEY)).toMatchObject({ cleanupPending: true, cleanupRetryAtMs: NOW + 60_000 });
     expect(f.ctx.storage.setAlarm).toHaveBeenCalledWith(NOW + 60_000);
@@ -262,10 +262,11 @@ describe("authorized DevEnv credential lifecycle", () => {
   it("repairs a persisted incomplete cleanup obligation after DO restart", async () => {
     const f = fixture(); const instance = await f.restart(); const payload = grant();
     await instance.startAuthorizedDevenv(payload);
-    f.wipe.mockRejectedValueOnce(new Error("stash offline"));
+    f.wipe.mockRejectedValue(new Error("stash offline"));
     await instance.onStop();
     const retryAt = f.stored.get(DEVENV_CREDENTIAL_KEY).cleanupRetryAtMs;
     expect(retryAt).toBe(NOW + 60_000);
+    f.wipe.mockResolvedValue(undefined);
     const restarted = await f.restart();
     expect(restarted.schedule).toHaveBeenCalledWith(new Date(retryAt), "expireAuthorizedSession", {
       sessionUuid: payload.grant.sessionUuid,

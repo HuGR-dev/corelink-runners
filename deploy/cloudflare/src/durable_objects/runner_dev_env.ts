@@ -146,7 +146,7 @@ export class RunnerDevEnvDO extends Container<any> {
   private async cleanupCredentials(providerStopped: boolean): Promise<boolean> {
     const owner = await this.credentials.current();
     const complete = await this.credentials.cleanup(providerStopped);
-    if (!complete && owner && !owner.providerMayExist) await this.armCredentialCleanupRetry(owner.sessionUuid);
+    if (!complete && owner) await this.armCredentialCleanupRetry(owner.sessionUuid);
     return complete;
   }
 
