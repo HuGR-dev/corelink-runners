@@ -159,7 +159,7 @@ export class RunnerDevEnvDO extends Container<any> {
       (typeof owner.cleanupRetryAtMs !== "number" || owner.cleanupRetryAtMs <= Date.now());
     if (due) {
       await this.expireAuthorizedSession({ sessionUuid: owner.sessionUuid });
-    } else if (this.cleanupRetryScheduleFailed) {
+    } else if (this.cleanupRetryScheduleFailed && typeof owner.cleanupRetryAtMs === "number") {
       try { await this.ctx.storage.setAlarm(owner.cleanupRetryAtMs); } catch { /* durable handle remains for the next DO activation */ }
     }
   }
