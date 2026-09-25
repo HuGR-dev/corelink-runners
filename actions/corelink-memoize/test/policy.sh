@@ -18,6 +18,17 @@ printf '%s\n' "${__CL_TOOLVERS:-}" > "$FAKE_CLW_TOOLVERS"
 case "${FAKE_CLW_MODE:-config78}" in
   cached0) printf 'cached stdout\n'; printf 'cached stderr\n' >&2; exit 0 ;;
   cached125) printf 'cached stderr\n' >&2; exit 125 ;;
+  preexec125) printf 'NOT_STARTED\n' > "$CLW_RUN_STATE_FILE"; exit 125 ;;
+  dispatching125) printf 'DISPATCHING\n' > "$CLW_RUN_STATE_FILE"; exit 125 ;;
+  malformed125) printf 'NOT_STARTED\nextra\n' > "$CLW_RUN_STATE_FILE"; exit 125 ;;
+  executed-child)
+    printf 'EXECUTED\n' > "$CLW_RUN_STATE_FILE"
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+    [ "$#" -gt 0 ] && shift
+    unset CLW_RUN_STATE_FILE
+    "$@"
+    exit "$?"
+    ;;
   miss78|config78) exit 78 ;;
   unsupported) exit 2 ;;
   *) exit 125 ;;
@@ -30,7 +41,8 @@ run_case() {
   local marker="$tmp/$name.marker" out="$tmp/$name.out" err="$tmp/$name.err"
   rm -f "$marker"; set +e
   (
-    export CL_RUN="printf '%s' ran > '$marker'"
+    export CL_RUN="printf x >> '$marker'"
+    if [ "$mode" = executed-child ]; then export CL_RUN="printf x >> '$marker'; exit 125"; fi
     export CL_INPUTS="fixture second" CL_ENVNAMES="CACHE_KEY" CACHE_KEY="cache-value"
     export CL_TOOLS="node" CL_CACHE_POLICY="$policy"
     export FAKE_CLW_VERSION="$version" FAKE_CLW_MODE="$mode"
@@ -55,9 +67,18 @@ assert_marker() {
   if [ "$expected" = yes ]; then [ -s "$marker" ] || { echo "FAIL $name: wrapped command did not run" >&2; exit 1; }; else [ ! -e "$marker" ] || { echo "FAIL $name: wrapped command ran unexpectedly" >&2; exit 1; }; fi
 }
 
-run_case optional-cold optional 0 absent "clw 0.1.12" config78; assert_marker optional-cold yes
-run_case optional-internal-fallback optional 0 present "clw 0.1.5" cached125; assert_marker optional-internal-fallback yes
-run_case optional-old-fallback optional 0 present "clw 0.1.5" cached125; assert_marker optional-old-fallback yes
+assert_count() {
+  local name="$1" expected="$2" marker="$tmp/$1.marker" actual=0
+  if [ -f "$marker" ]; then actual="$(wc -c < "$marker" | tr -d ' ')"; fi
+  if [ "$actual" -ne "$expected" ]; then echo "FAIL $name: expected executions=$expected got=$actual" >&2; exit 1; fi
+}
+
+run_case optional-cold optional 0 absent "clw 0.1.12" config78; assert_count optional-cold 1
+run_case optional-internal-fallback optional 0 present "clw 0.1.12" preexec125; assert_count optional-internal-fallback 1
+run_case optional-child-125-once optional 125 present "clw 0.1.12" executed-child; assert_count optional-child-125-once 1
+run_case optional-ambiguous-no-retry optional 125 present "clw 0.1.12" dispatching125; assert_count optional-ambiguous-no-retry 0
+run_case optional-malformed-no-retry optional 125 present "clw 0.1.12" malformed125; assert_count optional-malformed-no-retry 0
+run_case optional-old-cli-no-proof optional 125 present "clw 0.1.5" cached125; assert_count optional-old-cli-no-proof 0
 run_case required-cached-zero required-hit 0 present "clw 0.1.12" cached0; assert_marker required-cached-zero no
 run_case required-cached-nonzero required-hit 125 present "clw 0.1.12" cached125; assert_marker required-cached-nonzero no
 run_case required-miss required-hit 78 present "clw 0.1.12" miss78; assert_marker required-miss no

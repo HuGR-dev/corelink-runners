@@ -1026,19 +1026,12 @@ async fn a8_nonzero_child_exit_is_transparent_and_not_cached() {
 
 /// A8 (part 3): a `clw`-internal exit is a DISTINCT outcome from a child verdict.
 ///
-/// Drives the REAL `ClwBoxDrive<MockBoxExec>`. A programmed `run` exit of `125`
-/// is — per the clw v0.1.1 CLI contract — reserved for `clw` itself (ALWAYS AND
-/// ONLY a clw-internal error), so the drive maps `Some(125)` ⇒
-/// `ClwFailed { clw_exit_code: 125, .. }`.
-///
-/// CONTRACT NOTE (not a bug): a child CANNOT surface as `Child(125)` through
-/// `clw run` — exit `125` is the clw-reserved code, so the impl maps `Some(125)`
-/// to `ClwFailed`, never `Child(125)`. To show the two outcome KINDS are
-/// distinct, we compare the `ClwFailed{125}` against a child verdict drive
-/// (`run` exit 7 ⇒ `Ran { Child(7) }`): different `ClwDriveOutcome` discriminants.
+/// Drives the REAL `ClwBoxDrive<MockBoxExec>`. Equal numeric exits are classified
+/// with the out-of-band receipt: `NOT_STARTED` makes 125 a wrapper failure, while
+/// `EXECUTED` preserves it as the child's verdict.
 #[tokio::test]
 async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
-    // clw-internal exit: run exits 125 ⇒ ClwFailed (clw owns code 125).
+    // Proven pre-execution failure: the wrapper returns 125 with NOT_STARTED.
     let clw_fail_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(125), a8_run_spec());
     let clw_outcome = clw_fail_driver
         .drive("lease-clw-fail")
@@ -1053,10 +1046,27 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
                 ..
             }
         ),
-        "A8: run exit 125 is clw-reserved ⇒ ClwFailed{{125}} (NEVER Child(125)); got: {clw_outcome:?}"
+        "A8: run exit 125 with NOT_STARTED must be ClwFailed; got: {clw_outcome:?}"
     );
 
-    // A child verdict: run exits 7 ⇒ Ran { Child(7) } (a non-reserved code).
+    // A real child may return the same 125; EXECUTED preserves that verdict.
+    let child_125_driver = ClwBoxDrive::new(
+        MockBoxExec::with_run_code_and_state(125, "EXECUTED\n"),
+        a8_run_spec(),
+    );
+    let child_125 = child_125_driver
+        .drive("lease-child-125")
+        .await
+        .expect("A8: drive must preserve an executed child exit 125");
+    assert_eq!(
+        child_125,
+        ClwDriveOutcome::Ran {
+            exit: ClwExitTransparency::Child(125),
+            wrote_back: false,
+        }
+    );
+
+    // Another child verdict: run exits 7 ⇒ Ran { Child(7) }.
     let child_driver = ClwBoxDrive::new(MockBoxExec::with_run_code(7), a8_run_spec());
     let child_outcome = child_driver
         .drive("lease-child-7")
@@ -1071,7 +1081,7 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
                 wrote_back: false,
             }
         ),
-        "A8: a non-reserved child exit (7) must be Ran{{Child(7)}} — \
+        "A8: child exit 7 must be Ran{{Child(7)}} — \
          a DISTINCT outcome kind from ClwFailed; got: {child_outcome:?}"
     );
 
@@ -1087,7 +1097,7 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
 /// A8 (part 4): a clw-internal failure means NO write-back.
 ///
 /// Drives the REAL `ClwBoxDrive<MockBoxExec>` with a programmed `run` exit of
-/// `125` (clw-internal). The outcome is `ClwFailed`, which carries NO
+/// `125` and a `NOT_STARTED` receipt (clw-internal). The outcome is `ClwFailed`, which carries NO
 /// `wrote_back` field at all — when clw itself fails, neither the child result
 /// nor any bytes are cached, and the drive (which never PUTs anyway) reports no
 /// write-back.

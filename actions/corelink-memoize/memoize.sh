@@ -53,6 +53,11 @@ if [ -n "${CL_TOOLS:-}" ]; then
 fi
 
 run_cold() { bash -c "$CL_RUN"; }
+state_dir=""
+cleanup_run_state() {
+  if [ -n "$state_dir" ]; then rm -rf -- "$state_dir"; fi
+}
+trap cleanup_run_state EXIT
 
 # Moat present? (CLW_* injected by the CoreLink autoscaler + clw on PATH).
 # Two credential shapes are accepted:
@@ -66,13 +71,29 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
     clw run --require-hit "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
     exit "$?"
   else
-    clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
+    state_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink-memoize-state.XXXXXX")" || {
+      echo "corelink-memoize: cannot create private execution-state receipt; running cold once"
+      run_cold; exit "$?"
+    }
+    state_file="$state_dir/state"
+    CLW_RUN_STATE_FILE="$state_file" clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
     rc=$?
-    # clw exit contract: 125 = clw-INTERNAL error (NOT the command's verdict).
-    # Any other code is the wrapped command's real exit (cached or fresh).
-    if [ "$rc" -eq 125 ]; then
-      echo "::warning title=corelink-memoize::clw internal error (125) — falling back to a COLD run (north star)"
+    execution_state="UNKNOWN"
+    if [ -f "$state_file" ]; then
+      state_bytes="$(wc -c < "$state_file" | tr -d ' ')"
+      state_line="$(cat "$state_file" 2>/dev/null)"
+      if { [ "$state_bytes" = 12 ] && [ "$state_line" = "NOT_STARTED" ]; } || \
+         { [ "$state_bytes" = 12 ] && [ "$state_line" = "DISPATCHING" ]; } || \
+         { [ "$state_bytes" = 9 ] && [ "$state_line" = "EXECUTED" ]; }; then
+        execution_state="$state_line"
+      fi
+    fi
+    if [ "$rc" -ne 0 ] && [ "$execution_state" = "NOT_STARTED" ]; then
+      echo "::warning title=corelink-memoize::clw proved the child was not started; falling back to a COLD run once"
+      unset CLW_RUN_STATE_FILE
       run_cold; rc=$?
+    elif [ "$rc" -ne 0 ] && [ "$execution_state" != "EXECUTED" ]; then
+      echo "::warning title=corelink-memoize::execution state is unknown; not retrying the command"
     fi
     exit "$rc"
   fi

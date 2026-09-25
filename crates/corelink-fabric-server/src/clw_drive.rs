@@ -3,8 +3,8 @@
 //! The runner invokes `clw snapshot → hydrate → run` on the box.  The `clw`
 //! child's exit code passes through transparently (exit-code transparency).
 //! A non-zero exit code must NOT be cached (the AC write-back is suppressed).
-//! The reserved code [`CLW_INTERNAL_EXIT_CODE`] (`125`) from `clw` itself is
-//! distinct from a child exiting with that same code.
+//! The wrapper and child may both return `125`; the execution receipt distinguishes
+//! those outcomes because the numeric value alone is ambiguous.
 //!
 //! This is the MINIMAL COMPILING STUB for the moat acceptance suite (WP-1) to
 //! test A8 against the `ClwDrive` trait interface.  Real logic is WP-6.
@@ -22,21 +22,18 @@ use corelink_runner::lease::{BoxExec, CmdOutput};
 
 /// The reserved `clw`-internal exit code, frozen by the `clw` v0.1.1 CLI
 /// contract (`clw-releases` `CLI-CONTRACT.md` / `CLI-SURFACE-EXIT-FREEZE.md`):
-/// a `clw`-internal failure where the child NEVER ran exits **`125`**. THE RULE
-/// the drive applies to `clw run`: `125 ⇒ ClwFailed` (clw-internal, ALWAYS AND
-/// ONLY); any other code ⇒ the child's verdict `Child(n)`. (Updated from the
-/// earlier interim `2` once `clw` shipped v0.1.1 and froze `125`, docker/shell
-/// convention — a child's `2` is now a normal child verdict, never clw-internal.)
+/// a `clw`-internal failure where the child NEVER ran exits **`125`**. A child
+/// may also exit 125; the driver distinguishes those outcomes with the receipt,
+/// not the numeric value alone.
 pub const CLW_INTERNAL_EXIT_CODE: i32 = 125;
 
 // ── ClwExitTransparency ───────────────────────────────────────────────────────
 
 /// Whether an exit code is the child's or `clw`-internal (A8 invariant).
 ///
-/// The reserved [`CLW_INTERNAL_EXIT_CODE`] (`125`) from `clw` itself (e.g. bad
-/// CLI args, substrate unreachable, child never ran) is distinct from the child
-/// job exiting with code `125`.  The runner must surface both correctly to the
-/// outer GitHub Actions runtime and to the billing layer.
+/// The wrapper and child may both produce numeric exit 125. The driver reports a
+/// child verdict only when the receipt proves the child started; absent or
+/// ambiguous receipt state is a wrapper failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClwExitTransparency {
     /// The child process exited with this code (pass-through).
@@ -201,14 +198,14 @@ pub struct ClwRunSpec {
 ///   2. `clw hydrate <dest> --name <name>`
 ///   3. `clw run -- <command…>`
 ///
-/// Exit-code interpretation follows the FROZEN `clw` CLI contract (§4):
+/// Exit interpretation follows the additive `clw` execution-receipt contract:
 /// - **snapshot / hydrate** never produce a child verdict — any non-`Some(0)`
 ///   exit is a `clw`-internal error ⇒ [`ClwDriveOutcome::ClwFailed`].
-/// - **run** propagates the wrapped command's exit code, EXCEPT the reserved
-///   [`CLW_INTERNAL_EXIT_CODE`] (`125`), which is `clw` itself (ALWAYS AND ONLY
-///   a `clw`-internal error — clw v0.1.1 CLI contract):
-///     - `Some(125)`          ⇒ `ClwFailed { clw_exit_code: 125, .. }`.
-///     - `Some(n)`, `n != 125`⇒ `Ran { exit: Child(n), wrote_back: n == 0 }`.
+/// - **run** distinguishes the wrapped verdict from internal failure using the receipt:
+///     - `Some(125)` + `EXECUTED` ⇒ `Ran { exit: Child(125), wrote_back: false }`.
+///     - `Some(125)` + `NOT_STARTED` ⇒ `ClwFailed { clw_exit_code: 125, .. }`.
+///     - `Some(125)` + unknown state ⇒ `ClwFailed` (fail closed).
+///     - `Some(n)`, `n != 125` ⇒ `Ran { exit: Child(n), wrote_back: n == 0 }`.
 ///     - `None` (the `clw` PROCESS itself killed by signal at the transport —
 ///       distinct from a signal-killed CHILD, which `clw` reports as `128+sig`
 ///       i.e. `Some(n)`) ⇒ `ClwFailed { clw_exit_code: -1, .. }`.
@@ -271,19 +268,56 @@ impl<B: BoxExec> ClwBoxDrive<B> {
             return Ok(Self::clw_failed("hydrate", &hyd));
         }
 
-        // 3. clw run -- <command…> — interpret per THE RULE.
-        let mut argv: Vec<&str> = vec!["clw", "run", "--"];
+        // Keep execution proof out of child stdout/stderr. A separate BoxExec call
+        // reads the private receipt after `clw run` returns, so child text cannot
+        // forge a status line.
+        let state_dir_out = self
+            .boxx
+            .run(&["mktemp", "-d", "/tmp/corelink-run-state.XXXXXX"])?;
+        let state_dir = state_dir_out.stdout.trim();
+        let valid_state_dir = state_dir_out.code == Some(0)
+            && state_dir.starts_with("/tmp/corelink-run-state.")
+            && state_dir
+                .strip_prefix("/tmp/corelink-run-state.")
+                .is_some_and(|suffix| {
+                    !suffix.is_empty()
+                        && suffix
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                });
+        let state_path = valid_state_dir.then(|| format!("{state_dir}/state"));
+        let state_env = state_path
+            .as_ref()
+            .map(|path| format!("CLW_RUN_STATE_FILE={path}"));
+        let mut argv: Vec<&str> = Vec::new();
+        if let Some(value) = state_env.as_deref() {
+            argv.extend(["env", value]);
+        }
+        argv.extend(["clw", "run", "--"]);
         argv.extend(self.run.command.iter().map(String::as_str));
-        let run = self.boxx.run(&argv)?;
+        let run_result = self.boxx.run(&argv);
+        let receipt = state_path.as_deref().and_then(|path| {
+            let out = self.boxx.run(&["cat", path]).ok()?;
+            (out.code == Some(0)).then(|| out.stdout)
+        });
+        if let Some(path) = state_path.as_deref() {
+            let _ = self.boxx.run(&["rm", "-f", "--", path]);
+            let _ = self.boxx.run(&["rmdir", "--", state_dir]);
+        }
+        let run = run_result?;
         Ok(match run.code {
-            // 125 is reserved for clw itself (ALWAYS AND ONLY a clw error,
-            // clw v0.1.1 CLI contract). A child's 125 never reaches here as a
-            // child verdict — by contract clw exits 125 only when it failed
-            // before/around the child.
+            // A receipt is the only discriminator when child and wrapper both
+            // return 125. Unknown/malformed states fail closed.
+            Some(CLW_INTERNAL_EXIT_CODE) if receipt.as_deref() == Some("EXECUTED\n") => {
+                ClwDriveOutcome::Ran {
+                    exit: ClwExitTransparency::Child(CLW_INTERNAL_EXIT_CODE),
+                    wrote_back: false,
+                }
+            }
             Some(CLW_INTERNAL_EXIT_CODE) => {
                 let stderr = run.stderr.trim();
                 let reason = if stderr.is_empty() {
-                    format!("clw run: internal error (exit {CLW_INTERNAL_EXIT_CODE})")
+                    format!("clw run: internal or unknown execution state (exit {CLW_INTERNAL_EXIT_CODE})")
                 } else {
                     stderr.to_string()
                 };
@@ -357,7 +391,7 @@ impl<B: BoxExec + Clone + Send + Sync + 'static> ClwDrive for ClwBoxDrive<B> {
 // ── MockBoxExec ───────────────────────────────────────────────────────────────
 
 /// A [`BoxExec`](corelink_runner::lease::BoxExec) test double returning
-/// programmed [`CmdOutput`]s, keyed by the `clw` verb (`argv[1]`).
+/// programmed [`CmdOutput`]s for the drive commands and receipt operations.
 ///
 /// `snapshot` and `hydrate` succeed (exit 0) by default; `run` returns the
 /// test-specified `CmdOutput`. Override `snapshot_out` / `hydrate_out` to drive
@@ -373,6 +407,9 @@ pub struct MockBoxExec {
     pub hydrate_out: CmdOutput,
     /// Programmed output for `clw run -- …` (the verb under test).
     pub run_out: CmdOutput,
+    /// Contents returned by the separate receipt read. Defaults to a state
+    /// consistent with a pre-execution 125 or an executed child otherwise.
+    pub run_state_out: CmdOutput,
 }
 
 impl MockBoxExec {
@@ -387,10 +424,20 @@ impl MockBoxExec {
     /// A mock whose `snapshot`/`hydrate` succeed and whose `run` returns
     /// `run_out` (the common a8 case).
     pub fn with_run(run_out: CmdOutput) -> Self {
+        let state = if run_out.code == Some(CLW_INTERNAL_EXIT_CODE) {
+            "NOT_STARTED\n"
+        } else {
+            "EXECUTED\n"
+        };
         Self {
             snapshot_out: Self::ok_out(),
             hydrate_out: Self::ok_out(),
             run_out,
+            run_state_out: CmdOutput {
+                code: Some(0),
+                stdout: state.to_string(),
+                stderr: String::new(),
+            },
         }
     }
 
@@ -402,16 +449,42 @@ impl MockBoxExec {
             stderr: String::new(),
         })
     }
+
+    /// A mock `clw run` result paired with an explicit execution receipt.
+    pub fn with_run_code_and_state(code: i32, state: &str) -> Self {
+        let mut mock = Self::with_run_code(code);
+        mock.run_state_out.stdout = state.to_string();
+        mock
+    }
 }
 
 impl BoxExec for MockBoxExec {
     fn run(&self, argv: &[&str]) -> anyhow::Result<CmdOutput> {
-        // argv[0] == "clw"; argv[1] is the verb.
-        match argv.get(1).copied() {
+        if argv.first().copied() == Some("mktemp") {
+            return Ok(CmdOutput {
+                code: Some(0),
+                stdout: "/tmp/corelink-run-state.test\n".to_string(),
+                stderr: String::new(),
+            });
+        }
+        if argv.first().copied() == Some("cat") {
+            return Ok(self.run_state_out.clone());
+        }
+        if matches!(argv.first().copied(), Some("rm" | "rmdir")) {
+            return Ok(Self::ok_out());
+        }
+        let verb = if argv.first().copied() == Some("clw") {
+            argv.get(1).copied()
+        } else {
+            argv.windows(2)
+                .find(|pair| pair[0] == "clw")
+                .map(|pair| pair[1])
+        };
+        match verb {
             Some("snapshot") => Ok(self.snapshot_out.clone()),
             Some("hydrate") => Ok(self.hydrate_out.clone()),
             Some("run") => Ok(self.run_out.clone()),
-            other => anyhow::bail!("MockBoxExec: unexpected clw verb: {other:?}"),
+            other => anyhow::bail!("MockBoxExec: unexpected command: {other:?}"),
         }
     }
 }
@@ -553,8 +626,8 @@ mod tests {
 
     #[tokio::test]
     async fn drive_run_exit_125_is_clw_failed_not_child() {
-        // clw v0.1.1 CLI contract: 125 is reserved for clw itself (child never
-        // ran) ⇒ ClwFailed, never a Child verdict.
+        // The mock's default state for 125 is NOT_STARTED: positive proof that
+        // the wrapper did not dispatch the child.
         let outcome = drive_with(MockBoxExec::with_run_code(125)).await;
         assert!(
             matches!(
@@ -564,7 +637,7 @@ mod tests {
                     ..
                 }
             ),
-            "run exit 125 is reserved for clw itself ⇒ ClwFailed, never Child(125); got {outcome:?}"
+            "run exit 125 with NOT_STARTED is a wrapper failure; got {outcome:?}"
         );
     }
 
@@ -572,8 +645,8 @@ mod tests {
     async fn drive_run_exit_2_is_child_not_clw_failed() {
         // REGRESSION GUARD for the 2026-06-19 contract correction: under clw
         // v0.1.1, a child exit 2 is an ORDINARY child verdict (Child(2),
-        // non-zero ⇒ not cached), NOT a clw-internal failure. Only 125 is
-        // clw-internal. (Pre-v0.1.1 we wrongly treated 2 as the sentinel.)
+        // non-zero ⇒ not cached), NOT a clw-internal failure. (Pre-v0.1.1 we
+        // wrongly treated 2 as the sentinel.)
         let outcome = drive_with(MockBoxExec::with_run_code(2)).await;
         assert_eq!(
             outcome,
@@ -583,6 +656,27 @@ mod tests {
             },
             "child exit 2 must be Child(2) (not cached), never ClwFailed; got {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn drive_run_child_exit_125_uses_executed_receipt() {
+        let outcome = drive_with(MockBoxExec::with_run_code_and_state(125, "EXECUTED\n")).await;
+        assert_eq!(
+            outcome,
+            ClwDriveOutcome::Ran {
+                exit: ClwExitTransparency::Child(125),
+                wrote_back: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_run_125_without_preexecution_proof_fails_closed() {
+        let outcome = drive_with(MockBoxExec::with_run_code_and_state(125, "DISPATCHING\n")).await;
+        assert!(matches!(
+            outcome,
+            ClwDriveOutcome::ClwFailed { clw_exit_code: 125, .. }
+        ));
     }
 
     #[tokio::test]
@@ -628,6 +722,11 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            run_state_out: CmdOutput {
+                code: Some(0),
+                stdout: "EXECUTED\n".to_string(),
+                stderr: String::new(),
+            },
         };
         let outcome = drive_with(boxx).await;
         assert!(
@@ -657,6 +756,11 @@ mod tests {
             run_out: CmdOutput {
                 code: Some(0),
                 stdout: String::new(),
+                stderr: String::new(),
+            },
+            run_state_out: CmdOutput {
+                code: Some(0),
+                stdout: "EXECUTED\n".to_string(),
                 stderr: String::new(),
             },
         };
