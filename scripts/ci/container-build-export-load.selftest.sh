@@ -82,6 +82,16 @@ if python3 "$contract" --workflow "$workflow" --builder "$mutated"; then
 fi
 echo 'PASS disk contract mutation rejects missing cache eviction'
 
+mutated_workflow="$fixture/workflow-with-inline-pull-request.yml"
+sed '/^  workflow_dispatch:/a\
+  pull_request: {}
+' "$workflow" > "$mutated_workflow"
+if python3 "$contract" --workflow "$mutated_workflow" --builder "$builder"; then
+  echo 'disk contract accepted an inline pull_request trigger' >&2
+  exit 1
+fi
+echo 'PASS disk contract rejects inline pull_request trigger'
+
 # The caller is the existing pull_request workflow on ubuntu-latest. Keep the
 # production workflow manual-only and lint its YAML from that hosted job.
 if [[ "${GITHUB_ACTIONS:-}" == true ]]; then

@@ -20,9 +20,9 @@ def verify(workflow_path: Path, builder_path: Path) -> int:
     workflow = workflow_path.read_text(encoding="utf-8")
     builder = builder_path.read_text(encoding="utf-8")
 
-    if not re.search(r"(?m)^  workflow_dispatch:\s*$", workflow):
+    if not re.search(r"(?m)^  workflow_dispatch:[ \t]*(?:\{\})?[ \t]*(?:#.*)?$", workflow):
         return fail("production image workflow must remain manual-only")
-    if re.search(r"(?m)^  pull_request:\s*$", workflow):
+    if re.search(r"(?m)^  pull_request:[^\n]*$", workflow):
         return fail("production image workflow must not become a pull_request self-hosted lane")
 
     runner_start = workflow.find("- name: Build + push RunnerContainer image")
