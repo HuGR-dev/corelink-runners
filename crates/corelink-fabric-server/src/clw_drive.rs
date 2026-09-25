@@ -317,7 +317,9 @@ impl<B: BoxExec> ClwBoxDrive<B> {
             Some(CLW_INTERNAL_EXIT_CODE) => {
                 let stderr = run.stderr.trim();
                 let reason = if stderr.is_empty() {
-                    format!("clw run: internal or unknown execution state (exit {CLW_INTERNAL_EXIT_CODE})")
+                    format!(
+                        "clw run: internal or unknown execution state (exit {CLW_INTERNAL_EXIT_CODE})"
+                    )
                 } else {
                     stderr.to_string()
                 };
@@ -675,7 +677,10 @@ mod tests {
         let outcome = drive_with(MockBoxExec::with_run_code_and_state(125, "DISPATCHING\n")).await;
         assert!(matches!(
             outcome,
-            ClwDriveOutcome::ClwFailed { clw_exit_code: 125, .. }
+            ClwDriveOutcome::ClwFailed {
+                clw_exit_code: 125,
+                ..
+            }
         ));
     }
 
