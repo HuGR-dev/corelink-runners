@@ -84,7 +84,13 @@ def require_reconciler_repos(value: str) -> None:
 
 def lookup_installation(mapping: dict[str, object], repository: str) -> str:
     value = mapping.get(repository, "")
-    return value if isinstance(value, str) else str(value)
+    if isinstance(value, str):
+        return value
+    # Match the deployed JS lookup: numeric IDs are stringified, while objects,
+    # booleans, null, and other values resolve to an empty ID.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
 
 
 def tracked_paths(root: Path, own_path: str) -> set[str]:
@@ -140,8 +146,9 @@ def verify(root: Path) -> None:
         fail(f"REPO_INSTALLATION_MAP is not valid encoded JSON: {error}")
     if not isinstance(mapping, dict):
         fail("REPO_INSTALLATION_MAP must decode to an object")
-    if not lookup_installation(mapping, CANONICAL):
-        fail("canonical runner slug does not resolve to a recorded installation ID")
+    canonical_installation = lookup_installation(mapping, CANONICAL)
+    if canonical_installation != "150584374":
+        fail("canonical runner slug does not resolve to the recorded pre-transfer installation ID")
     if lookup_installation(mapping, LEGACY):
         fail("legacy runner slug still resolves through REPO_INSTALLATION_MAP")
 
@@ -154,6 +161,10 @@ def verify(root: Path) -> None:
         fail("RECONCILER_REPOS negative control accepted the legacy runner slug")
     if lookup_installation({LEGACY: "old-installation"}, CANONICAL):
         fail("installation-map negative control accepted a legacy-only key")
+    if lookup_installation({CANONICAL: {"unexpected": 1}}, CANONICAL):
+        fail("installation-map negative control accepted an object value")
+    if lookup_installation({CANONICAL: 150584374}, CANONICAL) != "150584374":
+        fail("installation-map positive control rejected the runtime-supported numeric ID")
 
     allowed_legacy_paths = FIXTURE_FILES | HISTORY_FILES | {own_path}
     actual_legacy_paths = {

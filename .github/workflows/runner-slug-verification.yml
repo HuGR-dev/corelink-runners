@@ -10,6 +10,7 @@ on:
       - 'deploy/autoscaler-stage-b.md'
       - 'deploy/cloudflare-fabricd/wrangler.jsonc'
       - 'deploy/cloudflare/src/index.ts'
+      - 'deploy/cloudflare/test/reconciler-allowlist.test.ts'
       - 'deploy/cloudflare/wrangler.jsonc'
       - 'deploy/northflank-service.json'
       - 'docs/deploy/fabric-server.md'
