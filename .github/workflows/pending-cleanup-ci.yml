@@ -1,0 +1,60 @@
+name: Pending cleanup focused CI
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/corelink-fabric-server/Cargo.toml'
+      - 'crates/corelink-fabric-server/src/admission.rs'
+      - 'crates/corelink-fabric-server/src/app.rs'
+      - 'crates/corelink-fabric-server/src/handlers/leases.rs'
+      - 'crates/corelink-fabric-server/src/pending_cleanup.rs'
+      - 'crates/corelink-fabric-server/src/pending_cleanup/**'
+      - '.github/workflows/pending-cleanup-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/corelink-fabric-server/Cargo.toml'
+      - 'crates/corelink-fabric-server/src/admission.rs'
+      - 'crates/corelink-fabric-server/src/app.rs'
+      - 'crates/corelink-fabric-server/src/handlers/leases.rs'
+      - 'crates/corelink-fabric-server/src/pending_cleanup.rs'
+      - 'crates/corelink-fabric-server/src/pending_cleanup/**'
+      - '.github/workflows/pending-cleanup-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pending-cleanup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  retryable-cleanup:
+    name: Retryable cleanup ordering (20 repetitions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.96.0'
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: . -> target
+
+      - name: Repeat the exact ordering regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for iteration in {1..20}; do
+            echo "pending-cleanup regression repetition ${iteration}/20"
+            cargo test --locked -p corelink-fabric-server --lib \
+              pending_cleanup::capacity_tests::capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_once \
+              -- --exact
+          done

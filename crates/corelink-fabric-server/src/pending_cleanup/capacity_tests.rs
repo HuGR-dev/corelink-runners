@@ -178,6 +178,8 @@ async fn capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_o
     let state = Arc::new(state);
     ledger.try_admit(pending("held", 1), 1).unwrap();
     ledger.transition("held", RunnerState::Held, 1).unwrap();
+    let queue = state.admission_queue.as_ref().unwrap();
+    let enqueued = queue.enqueue_notification();
     let task_state = Arc::clone(&state);
     let response = tokio::spawn(async move {
         app(
@@ -188,13 +190,9 @@ async fn capacity_with_retryable_cleanup_503s_without_requeue_then_sweep_frees_o
         .await
         .unwrap()
     });
-    let queue = state.admission_queue.as_ref().unwrap();
-    for _ in 0..100 {
-        if queue.pending(&acme()) == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(Duration::from_secs(5), enqueued.notified())
+        .await
+        .expect("acquire request must signal its completed queue insertion");
     assert_eq!(
         queue.pending(&acme()),
         1,
