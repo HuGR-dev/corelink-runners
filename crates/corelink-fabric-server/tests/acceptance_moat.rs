@@ -1049,6 +1049,27 @@ async fn a8_clw_internal_exit_is_distinct_from_child_exit() {
         "A8: run exit 125 with NOT_STARTED must be ClwFailed; got: {clw_outcome:?}"
     );
 
+    // A 125 with DISPATCHING is still ambiguous: spawn may have happened, but
+    // clw did not provide a completed child verdict, so it must not be passed on.
+    let ambiguous_125_driver = ClwBoxDrive::new(
+        MockBoxExec::with_run_code_and_state(125, "DISPATCHING\n"),
+        a8_run_spec(),
+    );
+    let ambiguous_125 = ambiguous_125_driver
+        .drive("lease-ambiguous-125")
+        .await
+        .expect("A8: ambiguous run exit 125 must be classified, not retried");
+    assert!(
+        matches!(
+            ambiguous_125,
+            ClwDriveOutcome::ClwFailed {
+                clw_exit_code: 125,
+                ..
+            }
+        ),
+        "A8: DISPATCHING cannot prove a child exit 125; got: {ambiguous_125:?}"
+    );
+
     // A real child may return the same 125; EXECUTED preserves that verdict.
     let child_125_driver = ClwBoxDrive::new(
         MockBoxExec::with_run_code_and_state(125, "EXECUTED\n"),

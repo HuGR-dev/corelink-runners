@@ -72,8 +72,8 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
     exit "$?"
   else
     state_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink-memoize-state.XXXXXX")" || {
-      echo "corelink-memoize: cannot create private execution-state receipt; running cold once"
-      run_cold; exit "$?"
+      echo "::error title=corelink-memoize::cannot create private execution-state receipt; refusing to dispatch without it" >&2
+      exit 125
     }
     state_file="$state_dir/state"
     CLW_RUN_STATE_FILE="$state_file" clw run "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"

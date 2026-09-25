@@ -41,10 +41,13 @@ memoizes it for next time.
 
 For optional fallback, the action gives `clw run` a private
 `CLW_RUN_STATE_FILE`. `clw` atomically records `NOT_STARTED`, `DISPATCHING`, or
-`EXECUTED` there and removes the variable before launching the child. The action
-never parses stderr, cache HIT text, or an exit number to infer whether execution
-happened. Older CLIs that do not implement this receipt cannot authorize a cold
-retry after a failed memoized invocation.
+`EXECUTED` there and removes the variable before launching the child. `EXECUTED`
+means the direct child's exit status was observed and bounded output capture
+completed; failures after dispatch leave `DISPATCHING`. If the action cannot
+create its private receipt directory, it fails closed without dispatching the
+command. The action never parses stderr, cache HIT text, or an exit number to
+infer whether execution happened. Older CLIs that do not implement this receipt
+cannot authorize a cold retry after a failed memoized invocation.
 
 ## Inputs
 

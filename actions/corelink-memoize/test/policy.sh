@@ -36,6 +36,13 @@ esac
 FAKE_CLW
 chmod +x "$bin/clw"
 
+cat >"$bin/mktemp" <<'FAKE_MKTEMP'
+#!/bin/bash
+if [ "${FAIL_MKTEMP:-}" = 1 ]; then exit 1; fi
+exec /usr/bin/mktemp "$@"
+FAKE_MKTEMP
+chmod +x "$bin/mktemp"
+
 run_case() {
   local name="$1" policy="$2" expected_rc="$3" moat="$4" version="$5" mode="$6"
   local marker="$tmp/$name.marker" out="$tmp/$name.out" err="$tmp/$name.err"
@@ -47,6 +54,7 @@ run_case() {
     export CL_TOOLS="node" CL_CACHE_POLICY="$policy"
     export FAKE_CLW_VERSION="$version" FAKE_CLW_MODE="$mode"
     if [ "$mode" = version-fails ]; then export FAKE_CLW_VERSION_RC=1; fi
+    if [ "$mode" = receipt-dir-failure ]; then export FAIL_MKTEMP=1; fi
     export FAKE_CLW_ARGS="$tmp/$name.args" FAKE_CLW_TOOLVERS="$tmp/$name.toolvers"
     case "$moat" in
       present) export CLW_ENDPOINT=fake CLW_TOKEN=fake PATH="$bin:$system_path" ;;
@@ -74,6 +82,8 @@ assert_count() {
 }
 
 run_case optional-cold optional 0 absent "clw 0.1.12" config78; assert_count optional-cold 1
+run_case optional-receipt-dir-failure optional 125 present "clw 0.1.12" receipt-dir-failure; assert_count optional-receipt-dir-failure 0
+test ! -e "$tmp/optional-receipt-dir-failure.args" || { echo "FAIL receipt-dir-failure: clw must not be dispatched without a receipt" >&2; exit 1; }
 run_case optional-internal-fallback optional 0 present "clw 0.1.12" preexec125; assert_count optional-internal-fallback 1
 run_case optional-child-125-once optional 125 present "clw 0.1.12" executed-child; assert_count optional-child-125-once 1
 run_case optional-ambiguous-no-retry optional 125 present "clw 0.1.12" dispatching125; assert_count optional-ambiguous-no-retry 0
