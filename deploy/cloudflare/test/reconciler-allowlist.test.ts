@@ -34,7 +34,8 @@ import { describe, expect, it } from "vitest";
 import { parseReconcilerRepos } from "../src/lib.js";
 
 /** Every first-party repo that dispatches jobs to the `corelink` fabric. */
-const FABRIC_CONSUMERS = ["HuGR-Labs/corelink-runners", "HuGR-Labs/corelink-server"] as const;
+const FABRIC_CONSUMERS = ["HuGR-dev/corelink-runners", "HuGR-Labs/corelink-server"] as const;
+const FIRST_PARTY_ORGS = ["HuGR-dev", "HuGR-Labs"] as const;
 
 /**
  * Read `RECONCILER_REPOS` out of the deployed config.
@@ -69,6 +70,12 @@ describe("re-drive reconciler allowlist (config-drift guard)", () => {
     }
   });
 
+  it("accepts the canonical runner slug and rejects the transferred-away slug", () => {
+    const repos = parseReconcilerRepos(reconcilerReposFromWrangler());
+    expect(repos).toContain("HuGR-dev/corelink-runners");
+    expect(repos).not.toContain("HuGR-Labs/corelink-runners");
+  });
+
   it("parses to well-formed owner/repo entries only", () => {
     const raw = reconcilerReposFromWrangler();
     const repos = parseReconcilerRepos(raw);
@@ -90,13 +97,12 @@ describe("re-drive reconciler allowlist (config-drift guard)", () => {
 
   it("stays first-party — a cold re-drive skips per-job authz", () => {
     // The allowlist grants an authz-skipping cold re-spawn, so a third-party repo
-    // landing here would be a privilege hole, not a convenience. Pin the owner.
+    // landing here would be a privilege hole, not a convenience. Pin the owners
+    // of the two explicitly trusted first-party repositories.
     for (const repo of parseReconcilerRepos(reconcilerReposFromWrangler())) {
-      expect(
+      expect(FIRST_PARTY_ORGS, `${repo} is not under a first-party organization.`).toContain(
         repo.split("/")[0],
-        `${repo} is not under HuGR-Labs. RECONCILER_REPOS grants an authz-skipping ` +
-          "cold re-spawn; only first-party repos belong here.",
-      ).toBe("HuGR-Labs");
+      );
     }
   });
 });

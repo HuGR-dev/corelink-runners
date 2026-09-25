@@ -19,12 +19,13 @@ provider — one plane, no cross-provider egress for the hot path.
 
 **1a. Connect GitHub to Northflank (owner step — do once).**
 
-`HuGR-Labs/corelink-runners` is a private repo. Northflank must be granted
-read access before it can pull source and build.
+`HuGR-dev/corelink-runners` is the canonical source repository. Link the
+HuGR-dev GitHub organization in Northflank and grant the service's VCS link
+read access before it pulls source and builds.
 
 1. Log in to the Northflank dashboard as the `humangr` org owner.
 2. Navigate to **Account settings → Integrations → GitHub**.
-3. Click **Link GitHub account** and authorise `HuGR-Labs`.
+3. Click **Link GitHub account** and authorize `HuGR-dev`.
 4. Note the resulting **VCS link ID** (a UUID shown in the integration list).
    You will need it in step 3.
 

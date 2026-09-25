@@ -36,7 +36,7 @@ allowance"). Before running anything:
 ## 2. Step 1 — dispatch the smoke
 
 `dogfood-smoke.yml` exists for exactly this (`workflow_dispatch`, `runs-on:
-corelink-dogfood`). In the `HuGR-Labs/corelink-runners` repo:
+corelink-dogfood`). In the `HuGR-dev/corelink-runners` repo:
 
 - Actions → **dogfood-smoke** → Run workflow (on `main`).
 

@@ -37,7 +37,7 @@ jobs:
 
       - name: Run tests on CoreLink
         id: run-tests
-        uses: HuGR-Labs/corelink-runners/integrations/github-actions@v0.1.0
+        uses: HuGR-dev/corelink-runners/integrations/github-actions@v0.1.0
         with:
           url:      ${{ vars.CORELINK_URL }}
           pat:      ${{ secrets.CORELINK_PAT }}
@@ -77,7 +77,7 @@ When a release is published, the `version` input will download the binary
 automatically (Linux/macOS, amd64/arm64).  The release URL pattern will be:
 
 ```
-https://github.com/HuGR-Labs/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
+https://github.com/HuGR-dev/corelink-runners/releases/download/v<version>/corelink-<os>-<arch>
 ```
 
 ---

@@ -290,7 +290,7 @@ Walk it in this order:
    presence per [`secret-inventory.md`](./secret-inventory.md).
 4. **Right label + allowlisted repo?** The job must carry the managed label
    (default `corelink-dogfood`) and, for the reconciler re-drive, its repo must be
-   in `RECONCILER_REPOS` (`HuGR-Labs/corelink-runners`). A stranger repo's
+   in `RECONCILER_REPOS` (`HuGR-dev/corelink-runners`). A stranger repo's
    job with no App installation mints **COLD** or not at all.
 5. **At ceiling?** §3d.
 
@@ -327,9 +327,11 @@ Walk it in this order:
   2. `installationToken(...)` — exchanges the JWT for a per-installation token via
      `POST /app/installations/{id}/access_tokens`, cached in KV at
      `ghtok:<installationId>`.
-- The live GitHub App is installation **150584374** (dogfood
-  `HuGR-Labs/corelink-runners`). The App already exists — reuse it, do not
-  create a new one.
+- The repository's recorded pre-transfer GitHub App installation ID is
+  **150584374** (`HuGR-dev/corelink-runners`). Confirm the live installation
+  with the owner before relying on this mapping; static config does not prove
+  the post-transfer App installation. Do not create or change an App as part of
+  the slug migration.
 
 ### 4b. Verify the App credential is healthy (App-JWT → installation-token probe)
 
@@ -387,9 +389,10 @@ curl -s -X PATCH -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.git
 ```
 
 **Known good-path detail:** a plain *repo* webhook payload has no
-`installation.id`, so first-party repos are given one via the
-`REPO_INSTALLATION_MAP` var (`{"HuGR-Labs/corelink-runners":"150584374"}`)
-so the server-derived mint runs **WARM** (cache-warm) without an App webhook.
+`installation.id`, so the dogfood repo is given the recorded ID via the
+`REPO_INSTALLATION_MAP` var (`{"HuGR-dev/corelink-runners":"150584374"}`).
+Confirm the post-transfer ID with the owner before claiming that the
+server-derived mint runs **WARM** (cache-warm) without an App webhook.
 If dogfood suddenly spawns COLD, check that map matches
 `repository.full_name` exactly.
 

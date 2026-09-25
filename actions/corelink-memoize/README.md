@@ -20,7 +20,7 @@ jobs:
     runs-on: corelink-dogfood
     steps:
       - uses: actions/checkout@v4
-      - uses: HuGR-Labs/corelink-runners/actions/corelink-memoize@main
+      - uses: HuGR-dev/corelink-runners/actions/corelink-memoize@main
         with:
           run: cargo test --all
           # paths that determine the result (the cache key). Exclude build dirs

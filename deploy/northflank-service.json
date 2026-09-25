@@ -15,7 +15,7 @@
   "buildSource": "git",
 
   "vcsData": {
-    "projectUrl": "https://github.com/HuGR-Labs/corelink-runners",
+    "projectUrl": "https://github.com/HuGR-dev/corelink-runners",
     "projectType": "github",
     "projectBranch": "main",
     "vcsLinkId": "<FILL: github vcs link id>"

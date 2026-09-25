@@ -355,7 +355,7 @@ export interface Env {
   // mint (#283) can't derive the tenant and the runner spawns COLD. For known
   // first-party repos we inject the installation_id from this map so the mint runs
   // WARM (server derives the tenant) without requiring an App webhook. e.g.
-  // {"HuGR-Labs/corelink-runners":"150584374"}. Absent/unmatched ⇒ COLD.
+  // {"HuGR-dev/corelink-runners":"150584374"}. Absent/unmatched ⇒ COLD.
   REPO_INSTALLATION_MAP?: string;
   // ── Option-C per-tenant-PAT dispatch (server-confirmed live 2026-07-21) ───────
   // JSON `{ "<owner/repo>": "<SECRET_ENV_NAME>" }` mapping a repo to the NAME of the
