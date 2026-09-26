@@ -6,8 +6,10 @@ its keep). Measured on the dogfood runner: a ~10.8 s `cargo build` re-run drops 
 ~3.7 s on a hit (**2.7×**, hit/miss confirmed by clw; see
 `docs/handoff/2026-06-21-moat-benchmark-result-first-warm-signal.md`).
 
-**Fail-open (north star):** if the moat is absent (`CLW_*` not injected) or `clw`
-errors internally (exit 125), the command runs **COLD** — a job ALWAYS runs.
+**Optional mode:** if the moat is absent (`CLW_*` not injected), the command runs
+**COLD**. If `clw run` fails with a fresh receipt proving `NOT_STARTED`, the
+command gets one cold fallback. A missing, malformed, `DISPATCHING`, or
+`EXECUTED` receipt never authorizes a retry; a child's exit 125 is preserved.
 
 ## Usage
 
@@ -36,6 +38,16 @@ jobs:
 
 A HIT returns the prior verdict+output instantly; a MISS runs the command and
 memoizes it for next time.
+
+For optional fallback, the action gives `clw run` a private
+`CLW_RUN_STATE_FILE`. `clw` atomically records `NOT_STARTED`, `DISPATCHING`, or
+`EXECUTED` there and removes the variable before launching the child. `EXECUTED`
+means the direct child's exit status was observed and bounded output capture
+completed; failures after dispatch leave `DISPATCHING`. If the action cannot
+create its private receipt directory, it fails closed without dispatching the
+command. The action never parses stderr, cache HIT text, or an exit number to
+infer whether execution happened. Older CLIs that do not implement this receipt
+cannot authorize a cold retry after a failed memoized invocation.
 
 ## Inputs
 

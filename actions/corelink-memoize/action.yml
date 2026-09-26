@@ -2,8 +2,9 @@ name: "CoreLink Memoize"
 description: >-
   Run a command with CoreLink cache memoization (clw run). On a cache HIT the
   memoized result is returned WITHOUT re-running (re-runs ≈ 0). The default
-  `optional` policy is fail-open: if the CoreLink moat is absent or clw errors
-  internally, the command runs COLD. `required-hit` is fail-closed and requires
+  `optional` policy runs COLD if the moat is absent; after an internal error it
+  retries once only with a proven NOT_STARTED receipt. Ambiguous state never retries.
+  `required-hit` is fail-closed and requires
   the exact clw 0.1.12 verified no-exec HIT API; absent, older, or unknown clw
   returns exit 78. Use on a CoreLink ephemeral runner.
 
@@ -33,7 +34,8 @@ inputs:
     default: ""
   cache-policy:
     description: >-
-      Cache availability policy: `optional` (default, fail-open COLD) or
+      Cache availability policy: `optional` (default; absent moat runs COLD and a failed clw call
+      falls back only with a proven NOT_STARTED receipt) or
       `required-hit` (requires the exact clw 0.1.12 verified no-exec HIT
       contract; unavailable, older, or unknown clw returns exit 78).
     required: false

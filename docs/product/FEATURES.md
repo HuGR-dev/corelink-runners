@@ -941,10 +941,11 @@ coded server-side.
 
 ### F-9.3 — `corelink-memoize` composite action  🟢
 
-**What** Wraps `clw run` for cache memoization, fail-open by design.
+**What** Wraps `clw run` for cache memoization with receipt-gated optional fallback.
 **Where** `actions/corelink-memoize/action.yml`.
-**Status** 🟢 LIVE (fail-open by design).
-**Details** `--input`/`--env`/tool-version fold into the key; moat absent / clw exit 125 ⇒ COLD run; accepts
+**Status** 🟢 LIVE (optional fallback requires proof of pre-execution failure).
+**Details** `--input`/`--env`/tool-version fold into the key; moat absent ⇒ COLD run; a failed `clw run`
+falls back once only when the `CLW_RUN_STATE_FILE` receipt is exactly `NOT_STARTED`; accepts
 `CLW_TOKEN` or `CLW_CRED_TICKET`.
 **Exercised by** S2.1.1.
 **Validated by** GAP — no live memo-hit smoke (⚪ X4).
