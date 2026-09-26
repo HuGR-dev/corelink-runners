@@ -117,7 +117,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: HuGR-dev/corelink-server
-          ref: 64db73fb4fd60fb80ab44cdf5bd487121148d8e2
+          ref: f1aa4803a03b0b72db61cb0fda384e59cb4455c6
           path: server
           persist-credentials: false
           fetch-depth: 1
@@ -146,7 +146,7 @@ jobs:
 
       - name: Build exact Rust ingest fixture
         env:
-          SERVER_EXPECTED_SHA: 64db73fb4fd60fb80ab44cdf5bd487121148d8e2
+          SERVER_EXPECTED_SHA: f1aa4803a03b0b72db61cb0fda384e59cb4455c6
         run: |
           set -euo pipefail
           server_sha="$(git -C server rev-parse HEAD)"
