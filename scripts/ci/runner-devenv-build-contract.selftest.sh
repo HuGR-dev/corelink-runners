@@ -105,7 +105,7 @@ mutations = (
     ("self-hosted DevEnv build", "devenv-build-only", "runs-on: ubuntu-latest", "runs-on: corelink"),
     ("missing provenance", "devenv-build-only", "--provenance=mode=max", "--provenance=disabled"),
     ("missing exact-SHA bind", "devenv-build-only", 'test \"${EXPECTED_SOURCE_SHA}\" = \"${GITHUB_SHA}\"', "true"),
-    ("hosted registry publication", "devenv-build-only", "# BuildKit exports a local OCI", "wrangler containers push"),
+    ("hosted registry publication", "devenv-build-only", 'type=oci,name=${IMAGE_REF},dest=${ARCHIVE}', "docker push"),
     ("missing workflow selftest", "devenv-build-only", "runner-devenv-build-contract.selftest.sh", "runner-devenv-contract-missing.sh"),
 )
 for label, job, before, after in mutations:
