@@ -4,16 +4,20 @@
 # wrangler.jsonc` references them by tag/digest and a local `wrangler deploy` no
 # longer needs a Docker daemon.
 #
-# Two images are built + pushed (both are Container-DO classes in wrangler.jsonc):
+# Production mode builds + pushes the RunnerContainer and CheckHostContainer.
+# It also pushes RunnerDevEnvDO for a later reviewed, manual pin. The separate
+# DevEnv build-only mode below runs on GitHub-hosted Linux without credentials,
+# publication, or a production config change.
 #   - RunnerContainer   (build context: deploy/runner)      -> corelink-spawn-worker-runnercontainer
 #   - CheckHostContainer(build context: deploy/check-host)  -> corelink-spawn-worker-checkhostcontainer
+#   - RunnerDevEnvDO    (minimal context assembled below)    -> corelink-runner-devenv
 #
 # NOTE: the check-host image has NEVER been pushed to the CF registry. THIS
 # workflow creates it on its first run; only after that first push can
 # wrangler.jsonc's CheckHostContainer be flipped off its Dockerfile (see the
 # comment there).
 #
-# ── SELF-HOSTED, DAEMONLESS (2026-08-17) ──────────────────────────────────────
+# ── PRODUCTION PUBLISH PATH (2026-08-17) ──────────────────────────────────────
 # This job used to run on GitHub-hosted `ubuntu-latest` because `wrangler
 # containers build` shells to `docker buildx`, which the fleet's docker-shim does
 # not support. Under the zero-hosted billing block that lane is DEAD (it fails at
@@ -49,19 +53,308 @@
 name: build-cf-container-images
 
 on:
-  # MANUAL-ONLY: a heavy image build should not fire on every merge. Dispatch it
-  # explicitly when the runner/check-host Dockerfile (or a baked pin) changes:
-  #   gh workflow run build-cf-container-images.yml
-  workflow_dispatch: {}
+  # Manual-only: production publishing and the isolated DevEnv build proof are
+  # explicit operations. The production path is accepted only from main.
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Select a credentialed production publish or a secretless hosted DevEnv build proof.
+        type: choice
+        required: true
+        default: production-publish
+        options:
+          - production-publish
+          - devenv-build-only
+      expected_source_sha:
+        description: Required full commit SHA for devenv-build-only; must equal this dispatch ref's SHA.
+        type: string
+        required: false
 
 permissions:
   contents: read
 
-env:
-  CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
-
 jobs:
+  validate-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Bind the requested operation to this dispatch ref
+        env:
+          OPERATION: ${{ inputs.operation }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          case "${OPERATION}" in
+            production-publish)
+              if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+                echo "::error::Production image publication may only be dispatched from refs/heads/main."
+                exit 1
+              fi
+              ;;
+            devenv-build-only)
+              if [[ ! "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+                 [[ "${EXPECTED_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
+                echo "::error::DevEnv proof requires expected_source_sha to match this dispatch commit exactly."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Unknown image workflow operation."
+              exit 1
+              ;;
+          esac
+
+  # Secretless exact-ref proof. This never runs a registry login, Wrangler, or
+  # the self-hosted `corelink` production job. BuildKit exports a local OCI
+  # archive with its immutable manifest digest and attached SLSA provenance.
+  devenv-build-only:
+    needs: validate-dispatch
+    if: ${{ needs.validate-dispatch.result == 'success' && inputs.operation == 'devenv-build-only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact dispatch commit
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Run focused DevEnv image build contract tests
+        run: bash scripts/ci/runner-devenv-build-contract.selftest.sh
+
+      - name: Build DevEnv image and verify OCI digest + provenance
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "${EXPECTED_SOURCE_SHA}" = "${GITHUB_SHA}"
+          docker buildx version
+
+          IMAGE="corelink-runner-devenv"
+          IMAGE_REF="${IMAGE}:${GITHUB_SHA}"
+          WORK="$(mktemp -d "${RUNNER_TEMP}/runner-devenv-build.XXXXXX")"
+          ARCHIVE="${WORK}/image.oci.tar"
+          METADATA="${WORK}/metadata.json"
+          BUILDER="runner-devenv-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker buildx rm --force "${BUILDER}" >/dev/null 2>&1 || true
+            rm -rf -- "${WORK}"
+          }
+          trap cleanup EXIT
+
+          mkdir -p "${WORK}/context"
+          cp Cargo.toml Cargo.lock "${WORK}/context/"
+          cp -R crates "${WORK}/context/"
+          cp deploy/cloudflare/entrypoint.sh deploy/cloudflare/supervisord.conf "${WORK}/context/"
+          cp deploy/cloudflare/Dockerfile.runner-devenv "${WORK}/context/Dockerfile"
+
+          python3 - "${WORK}/context/Dockerfile" "${WORK}/context" <<'PY'
+          import shlex
+          import sys
+          from pathlib import Path
+
+          dockerfile, context = Path(sys.argv[1]), Path(sys.argv[2])
+          checked, missing = [], []
+          for number, raw in enumerate(dockerfile.read_text(encoding="utf-8").splitlines(), 1):
+              if not raw.lstrip().upper().startswith("COPY "):
+                  continue
+              tokens = shlex.split(raw, comments=True)
+              if any(token.startswith("--from=") for token in tokens[1:]):
+                  continue
+              for source in tokens[1:-1]:
+                  checked.append(source)
+                  if not (context / source).exists():
+                      missing.append(f"line {number}: {source}")
+          if not checked or missing:
+              raise SystemExit("Invalid DevEnv COPY context: " + ", ".join(missing or ["empty scan"]))
+          print(f"DevEnv context guard: checked {len(checked)} COPY source(s)")
+          PY
+
+          docker buildx create --name "${BUILDER}" --driver docker-container --use
+          docker buildx inspect --bootstrap "${BUILDER}"
+          docker buildx build \
+            --file "${WORK}/context/Dockerfile" \
+            --tag "${IMAGE_REF}" \
+            --label "org.opencontainers.image.source=https://github.com/HuGR-dev/corelink-runners" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --provenance=mode=max \
+            --output "type=oci,name=${IMAGE_REF},dest=${ARCHIVE},compression=gzip" \
+            --metadata-file "${METADATA}" \
+            "${WORK}/context"
+
+          python3 - "${ARCHIVE}" "${METADATA}" "${IMAGE_REF}" "${GITHUB_SHA}" <<'PY'
+          import gzip
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          import tarfile
+
+          archive_path, metadata_path, image_ref, source_sha = sys.argv[1:]
+          digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def read_member(archive, name):
+              stream = archive.extractfile(name)
+              if stream is None:
+                  fail(f"OCI archive member is not a file: {name}")
+              return stream.read()
+
+          def verify_blob(archive, digest):
+              name = blob_path(digest)
+              stream = archive.extractfile(name)
+              if stream is None:
+                  fail(f"OCI blob is missing: {digest}")
+              hasher = hashlib.sha256()
+              while chunk := stream.read(1024 * 1024):
+                  hasher.update(chunk)
+              actual = "sha256:" + hasher.hexdigest()
+              if actual != digest:
+                  fail(f"OCI blob digest mismatch: {digest}")
+
+          def verified_json(archive, digest):
+              raw = read_member(archive, blob_path(digest))
+              if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+                  fail(f"OCI JSON blob digest mismatch: {digest}")
+              return json.loads(raw)
+
+          def blob_path(digest):
+              algorithm, separator, value = digest.partition(":")
+              if algorithm != "sha256" or not separator or len(value) != 64:
+                  fail(f"malformed OCI digest: {digest}")
+              return f"blobs/{algorithm}/{value}"
+
+          metadata = json.load(open(metadata_path, encoding="utf-8"))
+          manifest_digest = metadata.get("containerimage.digest", "")
+          config_digest = metadata.get("containerimage.config.digest", "")
+          if not digest_re.fullmatch(manifest_digest) or not digest_re.fullmatch(config_digest):
+              fail("BuildKit did not return valid immutable manifest/config digests")
+          if metadata.get("containerimage.descriptor", {}).get("digest") != manifest_digest:
+              fail("BuildKit digest and descriptor metadata disagree")
+
+          provenance_found = False
+          with tarfile.open(archive_path, "r:*") as archive:
+              layout = json.loads(read_member(archive, "oci-layout"))
+              if layout.get("imageLayoutVersion") != "1.0.0":
+                  fail("unsupported OCI image layout version")
+              index = json.loads(read_member(archive, "index.json"))
+              root_descriptors = index.get("manifests", [])
+              ref_names = {
+                  item.get("annotations", {}).get("org.opencontainers.image.ref.name")
+                  for item in root_descriptors
+              }
+              if image_ref not in ref_names:
+                  fail("OCI index does not preserve the exact requested image ref")
+
+              pending = list(root_descriptors)
+              seen = set()
+              image_manifest_digest = ""
+              config = None
+              attestation_manifests = []
+              output_descriptor_found = False
+              while pending:
+                  descriptor = pending.pop()
+                  digest = descriptor.get("digest", "")
+                  if digest in seen:
+                      continue
+                  seen.add(digest)
+                  verify_blob(archive, digest)
+                  document = verified_json(archive, digest)
+                  if digest == manifest_digest:
+                      output_descriptor_found = True
+                  children = document.get("manifests")
+                  if isinstance(children, list):
+                      pending.extend(children)
+                      continue
+
+                  if document.get("config", {}).get("digest") == config_digest:
+                      image_manifest_digest = digest
+                      for layer in document.get("layers", []):
+                          verify_blob(archive, layer.get("digest", ""))
+                      config = verified_json(archive, config_digest)
+
+                  annotations = descriptor.get("annotations", {})
+                  if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
+                      attestation_manifests.append((descriptor, document))
+
+              if not output_descriptor_found:
+                  fail("BuildKit output digest is absent from the OCI archive descriptor graph")
+              if not image_manifest_digest or config is None:
+                  fail("OCI archive lacks the configured runnable image manifest")
+              labels = config.get("config", {}).get("Labels", {}) or {}
+              if labels.get("org.opencontainers.image.revision") != source_sha:
+                  fail("OCI config revision label does not match the dispatch source SHA")
+              if labels.get("org.opencontainers.image.source") != "https://github.com/HuGR-dev/corelink-runners":
+                  fail("OCI config source label does not match this repository")
+
+              bound_digests = {
+                  manifest_digest.removeprefix("sha256:"),
+                  image_manifest_digest.removeprefix("sha256:"),
+                  config_digest.removeprefix("sha256:"),
+              }
+              for descriptor, attestation in attestation_manifests:
+                  annotations = descriptor.get("annotations", {})
+                  if annotations.get("vnd.docker.reference.digest", "").removeprefix("sha256:") not in bound_digests:
+                      continue
+                  subject = attestation.get("subject", {})
+                  if subject and subject.get("digest", {}).get("sha256") not in bound_digests:
+                      continue
+                  for layer in attestation.get("layers", []):
+                      payload = read_member(archive, blob_path(layer["digest"]))
+                      if "sha256:" + hashlib.sha256(payload).hexdigest() != layer["digest"]:
+                          fail(f"provenance blob digest mismatch: {layer['digest']}")
+                      if layer.get("mediaType", "").endswith("+gzip"):
+                          payload = gzip.decompress(payload)
+                      try:
+                          statement = json.loads(payload)
+                      except json.JSONDecodeError:
+                          continue
+                      predicate = statement.get("predicateType", "")
+                      subjects = statement.get("subject", [])
+                      digest_bound = any(
+                          item.get("digest", {}).get("sha256") in bound_digests
+                          for item in subjects
+                      )
+                      if predicate.startswith("https://slsa.dev/provenance/") and digest_bound:
+                          provenance_found = True
+                          print(f"Verified provenance predicate: {predicate}")
+                          break
+                  if provenance_found:
+                      break
+
+          if not provenance_found:
+              fail("OCI archive has no SLSA provenance attestation bound to the image digest")
+          result = {
+              "source_sha": source_sha,
+              "image_ref": image_ref,
+              "manifest_digest": manifest_digest,
+              "config_digest": config_digest,
+              "provenance": "verified",
+          }
+          print(json.dumps(result, sort_keys=True))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### GitHub-hosted DevEnv build-only proof\n\n")
+              summary.write(f"- Source commit: `{source_sha}`\n")
+              summary.write(f"- Local OCI image ref: `{image_ref}`\n")
+              summary.write(f"- Immutable manifest digest: `{manifest_digest}`\n")
+              summary.write(f"- Config digest: `{config_digest}`\n")
+              summary.write("- SLSA provenance: verified and bound to the image digest\n")
+              summary.write("- Publication/config pin changes: none\n")
+          PY
+
   build-and-push:
+    needs: validate-dispatch
+    if: ${{ needs.validate-dispatch.result == 'success' && inputs.operation == 'production-publish' && github.ref == 'refs/heads/main' }}
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 6a1fc1c626fc2628823e60b9db01f5cd
     # Ephemeral CoreLink fleet — amd64-native (fast) + baked nerdctl/buildkit +
     # docker-shim + Node + Rust. Zero GitHub-hosted spend.
     runs-on: corelink
