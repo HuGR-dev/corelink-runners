@@ -69,6 +69,15 @@ type DevenvUsageOutcome =
   | { readonly outcome: "sent" | "disabled" | "pending" | "no_session" }
   | { readonly outcome: "invalid"; readonly code: string };
 
+interface SnapshotOwner {
+  readonly tenantId: string;
+  readonly sessionUuid: string;
+  readonly generationId: number;
+  readonly containerHandle: string;
+  readonly workspaceName: string;
+  readonly profileName: string;
+}
+
 export class RunnerDevEnvDO extends Container<any> {
   override defaultPort = 6080;
   override sleepAfter = "30m";
@@ -503,17 +512,24 @@ export class RunnerDevEnvDO extends Container<any> {
   }
 
   async snapshot(payload: SnapshotRequest): Promise<SnapshotResponse> {
-    const traceId = crypto.randomUUID();
-    const isRunning = this.devenvState.status === "running";
-    if (!isRunning) {
+    const state = this.devenvState;
+    if (state.status !== "running") {
       throw new Error("CANNOT_SNAPSHOT_STOPPED_CONTAINER");
     }
-    const wsName = (this.devenvState as any).workspaceName;
-    const profName = (this.devenvState as any).profileName;
-    const genId = (this.devenvState as any).generationId ?? 1;
+    const owner: SnapshotOwner = {
+      tenantId: state.tenantId,
+      sessionUuid: state.sessionUuid,
+      generationId: state.generationId,
+      containerHandle: state.containerHandle,
+      workspaceName: state.workspaceName,
+      profileName: state.profileName,
+    };
+    this.assertSnapshotOwner(owner);
 
-    const profileSnap = await this.execClwSnapshot("/data/chrome", profName, payload.force, genId, traceId);
-    const workspaceSnap = await this.execClwSnapshot("/data/workspace", wsName, payload.force, genId, traceId);
+    const profileSnap = await this.execClwSnapshot("/data/chrome", owner.profileName, payload.force, owner);
+    this.assertSnapshotOwner(owner);
+    const workspaceSnap = await this.execClwSnapshot("/data/workspace", owner.workspaceName, payload.force, owner);
+    this.assertSnapshotOwner(owner);
 
     return {
       ok: true,
@@ -623,24 +639,49 @@ export class RunnerDevEnvDO extends Container<any> {
 
   // ── In-Container Exec Client ─────────────────────────────────────
 
-  private async containerExec(argv: readonly string[]): Promise<ClwExecResult> {
+  private assertSnapshotOwner(owner: SnapshotOwner): void {
+    const current = this.devenvState;
+    if (!owner.tenantId || !owner.sessionUuid || !Number.isSafeInteger(owner.generationId) || owner.generationId <= 0 ||
+        !owner.containerHandle || !/^[A-Za-z0-9_-]{1,128}$/.test(owner.workspaceName) ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(owner.profileName) ||
+        current.status !== "running" ||
+        current.tenantId !== owner.tenantId ||
+        current.sessionUuid !== owner.sessionUuid ||
+        current.generationId !== owner.generationId ||
+        current.containerHandle !== owner.containerHandle ||
+        current.workspaceName !== owner.workspaceName ||
+        current.profileName !== owner.profileName) {
+      throw new Error("DEVENV_SNAPSHOT_SESSION_CHANGED");
+    }
+  }
+
+  private async containerExec(argv: readonly string[], owner?: SnapshotOwner): Promise<ClwExecResult> {
+    if (owner) this.assertSnapshotOwner(owner);
     const req = new Request(`http://localhost:${EXEC_SERVER_PORT}/clw`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Exec-Token": this.execToken,
       },
-      body: JSON.stringify({ argv }),
+      body: JSON.stringify(owner ? {
+        argv,
+        expected_session_uuid: owner.sessionUuid,
+        expected_generation_id: owner.generationId,
+      } : { argv }),
       signal: AbortSignal.timeout(EXEC_RPC_TIMEOUT_MS),
     });
     const resp = await this.containerFetch(req, EXEC_SERVER_PORT);
     if (!resp.ok) {
-      throw new Error(`EXEC_RPC_FAILED: ${resp.status} ${await resp.text()}`);
+      const details = await resp.text();
+      if (owner) this.assertSnapshotOwner(owner);
+      throw new Error(`EXEC_RPC_FAILED: ${resp.status} ${details}`);
     }
-    return parseClwExecResponse(resp);
+    const result = await parseClwExecResponse(resp);
+    if (owner) this.assertSnapshotOwner(owner);
+    return result;
   }
 
-  private async execClwSnapshot(dir: string, name: string, force: boolean, generationId: number, traceId: string) {
+  private async execClwSnapshot(dir: string, name: string, force: boolean, owner: SnapshotOwner) {
     // DevEnv snapshots are confined to these normalized absolute container roots.
     // The report.root returned by clw is a content digest, not a filesystem path.
     if ((dir !== "/data/chrome" && dir !== "/data/workspace") || !/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
@@ -654,7 +695,8 @@ export class RunnerDevEnvDO extends Container<any> {
     ];
     if (force) args.push("--force");
 
-    const res = await this.containerExec(args);
+    const res = await this.containerExec(args, owner);
+    this.assertSnapshotOwner(owner);
     if (res.exitCode !== 0) {
       throw new Error(`clw snapshot failed: ${res.stderr}`);
     }

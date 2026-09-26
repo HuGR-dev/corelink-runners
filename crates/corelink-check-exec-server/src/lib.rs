@@ -32,7 +32,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Json, Request};
+use axum::extract::{Json, Request, State};
 use axum::http::{StatusCode, header::AUTHORIZATION};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -56,10 +56,68 @@ pub const AUTH_TOKEN_ENV: &str = "EXEC_SERVER_AUTH_TOKEN";
 /// Path to the regular mode-0400 file containing the bearer token. The token
 /// environment variable above is intentionally not accepted as a credential.
 pub const AUTH_TOKEN_FILE_ENV: &str = "EXEC_SERVER_AUTH_TOKEN_FILE";
+/// Immutable DevEnv session identity injected when the provider starts a container.
+pub const DEVENV_SESSION_ENV: &str = "SESSION_UUID";
+/// Monotonic DevEnv generation paired with [`DEVENV_SESSION_ENV`].
+pub const DEVENV_GENERATION_ENV: &str = "DEVENV_GENERATION_ID";
 
 /// Historical unauthenticated opt-in name. It is retained for source
 /// compatibility but is no longer honored.
 pub const ALLOW_UNAUTH_ENV: &str = "CHECK_EXEC_ALLOW_UNAUTH";
+
+/// The immutable owner identity of this exec-server process, when it runs in a DevEnv.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClwServerIdentity {
+    session_uuid: Option<String>,
+    generation_id: Option<u64>,
+}
+
+impl ClwServerIdentity {
+    /// Capture the identity injected before the container's exec-server starts.
+    pub fn from_env() -> Self {
+        let session_uuid = std::env::var(DEVENV_SESSION_ENV)
+            .ok()
+            .filter(|value| !value.is_empty());
+        let generation_id = std::env::var(DEVENV_GENERATION_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0);
+        Self {
+            session_uuid,
+            generation_id,
+        }
+    }
+
+    /// Build a fixed identity for an explicitly owned DevEnv container.
+    pub fn new(session_uuid: impl Into<String>, generation_id: u64) -> Self {
+        Self {
+            session_uuid: Some(session_uuid.into()),
+            generation_id: Some(generation_id),
+        }
+    }
+
+    fn matches(
+        &self,
+        expected_session_uuid: Option<&str>,
+        expected_generation_id: Option<u64>,
+    ) -> bool {
+        match (
+            self.session_uuid.as_deref(),
+            self.generation_id,
+            expected_session_uuid,
+            expected_generation_id,
+        ) {
+            (None, None, None, None) => true,
+            (
+                Some(session),
+                Some(generation),
+                Some(expected_session),
+                Some(expected_generation),
+            ) => session == expected_session && generation == expected_generation,
+            _ => false,
+        }
+    }
+}
 
 /// Per-stream capture cap. stdout and stderr are each bounded to this many
 /// bytes to keep a runaway command from OOM-ing the container; output past the
@@ -246,12 +304,18 @@ pub fn app() -> Result<Router, ExecAuthError> {
 /// `Authorization: Bearer <token>` or `X-Exec-Token: <token>`; anything else is
 /// a `401`. The unauthenticated posture is not constructible.
 pub fn app_with_auth(auth: ExecAuth) -> Router {
+    app_with_auth_and_identity(auth, ClwServerIdentity::from_env())
+}
+
+/// Build the authenticated router with the immutable identity of its container.
+pub fn app_with_auth_and_identity(auth: ExecAuth, identity: ClwServerIdentity) -> Router {
     let router = Router::new()
         .route("/exec", post(exec_handler))
         .route("/clw", post(clw_handler))
         .route("/ping", axum::routing::get(ping_handler))
         .route("/port-check/:port", axum::routing::get(port_check_handler))
-        .route("/mkdir", post(mkdir_handler));
+        .route("/mkdir", post(mkdir_handler))
+        .with_state(identity);
 
     match auth.0 {
         AuthMode::Bearer(token) => {
@@ -337,9 +401,26 @@ async fn mkdir_handler(Json(req): Json<MkdirRequest>) -> Response {
 #[derive(Debug, Deserialize)]
 pub struct ClwRequest {
     pub argv: Vec<String>,
+    #[serde(default)]
+    pub expected_session_uuid: Option<String>,
+    #[serde(default)]
+    pub expected_generation_id: Option<u64>,
 }
 
-async fn clw_handler(Json(req): Json<ClwRequest>) -> Response {
+async fn clw_handler(
+    State(identity): State<ClwServerIdentity>,
+    Json(req): Json<ClwRequest>,
+) -> Response {
+    if !identity.matches(
+        req.expected_session_uuid.as_deref(),
+        req.expected_generation_id,
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "devenv_session_identity_mismatch" })),
+        )
+            .into_response();
+    }
     let mut full_argv = vec!["/usr/local/bin/clw".to_string()];
     full_argv.extend(req.argv);
     let exec_req = ExecRequest {

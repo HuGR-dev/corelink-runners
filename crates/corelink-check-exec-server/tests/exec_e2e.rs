@@ -27,8 +27,8 @@ use axum::http::Request;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use corelink_check_exec_server::{
-    ALLOW_UNAUTH_ENV, AUTH_TOKEN_ENV, AUTH_TOKEN_FILE_ENV, ExecAuth, ExecAuthError, ExecRequest,
-    ExecResponse, app, app_with_auth, run_captured,
+    ALLOW_UNAUTH_ENV, AUTH_TOKEN_ENV, AUTH_TOKEN_FILE_ENV, ClwServerIdentity, ExecAuth,
+    ExecAuthError, ExecRequest, ExecResponse, app, app_with_auth, run_captured,
 };
 use serde_json::{Value, json};
 
@@ -249,6 +249,35 @@ fn router_empty_argv_is_400() {
             .status()
     });
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn clw_rejects_stale_or_incomplete_devenv_identity_before_exec() {
+    let statuses = block_on(|| async {
+        let app = corelink_check_exec_server::app_with_auth_and_identity(
+            ExecAuth::bearer(WIRE_TOK).expect("non-empty token"),
+            ClwServerIdentity::new("session-current", 7),
+        );
+        let bodies = [
+            json!({"argv": ["snapshot"], "expected_session_uuid": "session-old", "expected_generation_id": 6}),
+            json!({"argv": ["snapshot"], "expected_session_uuid": "session-current", "expected_generation_id": 6}),
+            json!({"argv": ["snapshot"], "expected_session_uuid": "session-current"}),
+            json!({"argv": ["snapshot"]}),
+        ];
+        let mut statuses = Vec::new();
+        for body in bodies {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/clw")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {WIRE_TOK}"))
+                .body(Body::from(serde_json::to_vec(&body).expect("serializable")))
+                .expect("valid request");
+            statuses.push(app.clone().oneshot(request).await.unwrap().status());
+        }
+        statuses
+    });
+    assert_eq!(statuses, vec![StatusCode::CONFLICT; 4]);
 }
 
 // ─── Track-C C2b: exec-server bearer auth (defense-in-depth) ─────────────────
