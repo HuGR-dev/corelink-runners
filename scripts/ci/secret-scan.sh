@@ -37,6 +37,10 @@ printf '[extend]\nuseDefault = true\n' >"$config"
 # The #571 synthetic fixture finding below was replaced at 6dd47e88 in
 # deploy/cloudflare/test/devenv-do.test.ts with a generated placeholder.
 # Fingerprints are exact: changed value, commit, path, or detector remains visible.
+# #604's shared billing ACK fixture uses a synthetic repeated-character
+# idempotency key; its exact findings are fixture data, not credentials.
+# The #604 devenv test fixture has separately reviewed synthetic findings.
+# Its synced-main merge resolution repeats the same synthetic fixture.
 cat >"$ignore_file" <<'EOF'
 1400ebbc5c3f0e95d0d813e412bdf15757fccc92:deploy/cloudflare/test/compute-terminal-test-helpers.ts:generic-api-key:3
 014c07ce43b51c9a17b88bf9f915faeb4a499cc3:docs/handoff/2026-09-06-compaction-checkpoint.md:generic-api-key:43
@@ -59,6 +63,11 @@ d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.t
 d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:330
 91af0ac8a08ae8199bf9ed7f57a6bbdb8d7bd3e0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:234
 c5044c0a62389c7d9ca4b7c3d62008a70142026e:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:367
+982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:11
+982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:20
+982f5300a5005689f0ded5026f2e80a282981b3b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
+a6173dd9b2a6d415d31cffda3ac11fa0e67409d0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
+cc936edea8a34815b80fa76184668a29c4d8af5f:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:438
 EOF
 install_scanner() {
   local archive checksum_tool

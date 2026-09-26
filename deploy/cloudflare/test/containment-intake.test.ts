@@ -24,6 +24,7 @@ import { containmentEventKey, containmentJobIndexKey, containmentJobIndexMarkerK
 import { COUNTER_NAMES } from "../src/metrics";
 import { canonicalWorkflowJobIdFromRaw } from "../src/workflow_job_id";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
+import { acceptedBillingResponse } from "./helpers/billing-ack";
 
 const T0 = 1_750_000_000_000;
 const SECRET = "containment-webhook-secret";
@@ -384,7 +385,9 @@ describe("durable intake authority and delivery identity", () => {
 
   it("seeds containment, then observes completion cleanup while intake remains paused", async () => {
     const d = makeDO(); const kv = makeKv(); const metrics = makeMetrics(); const seams = externalSeams();
-    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchSpy);
+    const fetchSpy = vi.fn(async (url: string | URL | Request, init?: RequestInit) =>
+      String(url) === "https://billing.test" ? acceptedBillingResponse(init) : new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
     const metricBump = vi.spyOn(metrics.instance, "bump");
     // The bare jobId projection is the legacy PAT lookup and remains TTL-bound;
     // durable credential authority state is the revocation source of truth.
