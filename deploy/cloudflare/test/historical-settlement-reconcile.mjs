@@ -439,6 +439,10 @@ if (process.env.NODE_TEST_CONTEXT) {
   const { NODE_TEST_CONTEXT: _nodeTestContext, ...childEnv } = process.env;
   const command = (args) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], { encoding: "utf8", env: childEnv });
   const parseReceipt = (result) => { assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout); };
+  const writeFixtureFile = async (target, bytes, flags = "wx") => {
+    const handle = await open(target, flags, 0o600);
+    try { await handle.chmod(0o600); await handle.writeFile(bytes); } finally { await handle.close(); }
+  };
 
   test("classifies exact ACK outcomes with explicit tenant binding and redacted deterministic counts", () => {
     const bytes = bytesFor();
@@ -467,7 +471,7 @@ if (process.env.NODE_TEST_CONTEXT) {
   test("separate CLI processes stage, resume idempotently, rollback durably, and never mutate markers", async () => {
     const root = await import("node:fs/promises").then(({ mkdtemp }) => mkdtemp(path.join(tmpdir(), "i603-")));
     const snapshot = path.join(root, "snapshot.json"); const journal = path.join(root, "journal.json");
-    await (await open(snapshot, "wx", 0o600)).then(async (h) => { await h.writeFile(bytesFor()); await h.close(); });
+    await writeFixtureFile(snapshot, bytesFor());
     try {
       const stageReceipt = parseReceipt(command(["--stage", snapshot, "--journal", journal]));
       assert.equal(stageReceipt.state, "staged");
@@ -500,12 +504,12 @@ if (process.env.NODE_TEST_CONTEXT) {
   test("ignores an interrupted private temp write while preserving the last atomic journal", async () => {
     const root = await import("node:fs/promises").then(({ mkdtemp }) => mkdtemp(path.join(tmpdir(), "i603-")));
     const snapshot = path.join(root, "snapshot.json"); const journal = path.join(root, "journal.json");
-    await (await open(snapshot, "wx", 0o600)).then(async (h) => { await h.writeFile(bytesFor()); await h.close(); });
+    await writeFixtureFile(snapshot, bytesFor());
     try {
       parseReceipt(command(["--stage", snapshot, "--journal", journal]));
       const prior = await readFile(journal);
       const temp = path.join(root, `.issue-603-journal-${processUid()}-interrupted.tmp`);
-      await (await open(temp, "wx", 0o600)).then(async (h) => { await h.writeFile("{"); await h.close(); });
+      await writeFixtureFile(temp, "{");
       parseReceipt(command(["--resume", snapshot, "--journal", journal]));
       assert.equal(JSON.parse(await readFile(journal, "utf8")).state, "complete");
       assert.notDeepEqual(await readFile(journal), prior);
@@ -515,14 +519,14 @@ if (process.env.NODE_TEST_CONTEXT) {
   test("fails closed on tampered or mismatched journal and unsafe symlink path", async () => {
     const root = await import("node:fs/promises").then(({ mkdtemp }) => mkdtemp(path.join(tmpdir(), "i603-")));
     const snapshot = path.join(root, "snapshot.json"); const journal = path.join(root, "journal.json");
-    await (await open(snapshot, "wx", 0o600)).then(async (h) => { await h.writeFile(bytesFor()); await h.close(); });
+    await writeFixtureFile(snapshot, bytesFor());
     try {
       parseReceipt(command(["--stage", snapshot, "--journal", journal]));
       const valid = JSON.parse(await readFile(journal, "utf8"));
       valid.candidate_sha256 = "0".repeat(64);
-      await (await open(journal, "w", 0o600)).then(async (h) => { await h.writeFile(JSON.stringify(valid)); await h.close(); });
+      await writeFixtureFile(journal, JSON.stringify(valid), "w");
       assert.notEqual(command(["--resume", snapshot, "--journal", journal]).status, 0);
-      const real = path.join(root, "real.json"); await (await open(real, "wx", 0o600)).then(async (h) => { await h.writeFile("{}"); await h.close(); });
+      const real = path.join(root, "real.json"); await writeFixtureFile(real, "{}");
       const link = path.join(root, "link.json"); await (await import("node:fs/promises")).symlink(real, link);
       assert.notEqual(command(["--stage", snapshot, "--journal", link]).status, 0);
       const hardlink = path.join(root, "hardlink.json"); await (await import("node:fs/promises")).link(real, hardlink);
@@ -532,7 +536,7 @@ if (process.env.NODE_TEST_CONTEXT) {
       const changed = structuredClone(matrix);
       changed.candidates[0].marker_value = "changed-input";
       const changedSnapshot = path.join(root, "changed.json");
-      await (await open(changedSnapshot, "wx", 0o600)).then(async (h) => { await h.writeFile(bytesFor(changed)); await h.close(); });
+      await writeFixtureFile(changedSnapshot, bytesFor(changed));
       const bindingJournal = path.join(root, "binding.json");
       parseReceipt(command(["--stage", snapshot, "--journal", bindingJournal]));
       assert.notEqual(command(["--resume", changedSnapshot, "--journal", bindingJournal]).status, 0);
@@ -546,10 +550,10 @@ if (process.env.NODE_TEST_CONTEXT) {
         return value;
       });
       const otherTenantSnapshot = path.join(root, "other-tenant.json");
-      await (await open(otherTenantSnapshot, "wx", 0o600)).then(async (h) => { await h.writeFile(bytesFor(otherTenant)); await h.close(); });
+      await writeFixtureFile(otherTenantSnapshot, bytesFor(otherTenant));
       assert.notEqual(command(["--resume", otherTenantSnapshot, "--journal", bindingJournal]).status, 0);
       const oversized = path.join(root, "oversized-journal.json");
-      await (await open(oversized, "wx", 0o600)).then(async (h) => { await h.writeFile(Buffer.alloc(MAX_JOURNAL_BYTES + 1)); await h.close(); });
+      await writeFixtureFile(oversized, Buffer.alloc(MAX_JOURNAL_BYTES + 1));
       assert.notEqual(command(["--resume", snapshot, "--journal", oversized]).status, 0);
     } finally { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }); }
   });
@@ -557,7 +561,9 @@ if (process.env.NODE_TEST_CONTEXT) {
   test("fails closed for incomplete, oversized, malformed ACK and conflicting duplicate input", () => {
     assert.throws(() => classifySnapshot(bytesFor({ ...matrix, scan_complete: false })));
     assert.throws(() => classifySnapshot(Buffer.alloc(MAX_INPUT_BYTES + 1)));
-    const malformed = structuredClone(matrix); malformed.candidates[0].acknowledgement.body.outcomes[0].index = 1;
+    const malformed = structuredClone(matrix);
+    malformed.candidates[0].acknowledgement.body.outcomes[0].index = 1;
+    malformed.candidates[6].acknowledgement.body.outcomes[0].index = 1;
     assert.equal(classifySnapshot(bytesFor(malformed)).counts.unresolved, 3);
     const conflicting = structuredClone(matrix); conflicting.candidates[5].marker_value = "different";
     assert.throws(() => classifySnapshot(bytesFor(conflicting)));
