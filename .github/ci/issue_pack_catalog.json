@@ -91,5 +91,18 @@
       ["npm", "run", "typecheck"],
       ["npx", "vitest", "run", "test/billing-recovery.test.ts"]
     ]
+  },
+  "issue-603": {
+    "issue": 603,
+    "pull_request": 626,
+    "exact_paths": true,
+    "paths": [
+      "deploy/cloudflare/test/fixtures/issue-603/recovery-matrix.json",
+      "deploy/cloudflare/test/historical-settlement-reconcile.mjs",
+      "docs/historical-settlement-recovery.md"
+    ],
+    "commands": [
+      ["node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs"]
+    ]
   }
 }

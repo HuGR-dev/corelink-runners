@@ -34,6 +34,7 @@ are removed before candidate commands run.
 | `issue-580` | `Cargo.toml`; `Cargo.lock` | `cargo deny check`; `cargo audit --deny warnings`; `cargo check --workspace --all-targets --locked`; `cargo test -p corelink-fabric-server --test server_bin config_pg_tls --locked` |
 | `issue-586` | The eleven explicit containment and normal-intake source/test paths listed in `issue_pack_catalog.json` | `npm ci`; `npm run typecheck`; `npm run test:coverage` |
 | `issue-602` | `.github/workflows/spawn-worker-ci.yml`; `deploy/cloudflare/src/billing_recovery.ts`; `deploy/cloudflare/test/billing-recovery.test.ts` | `npm ci`; `npm run typecheck`; `npx vitest run test/billing-recovery.test.ts` |
+| `issue-603` | `deploy/cloudflare/test/fixtures/issue-603/recovery-matrix.json`; `deploy/cloudflare/test/historical-settlement-reconcile.mjs`; `docs/historical-settlement-recovery.md` (all three required; bound to PR #626) | `node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs` using Node 22.19.0 from the candidate repository root |
 
 For #575, the selftest uses stubs/fixtures and never invokes the manual image
 builder. Its receipt is authored-head code evidence only; it does not satisfy
@@ -67,6 +68,7 @@ failing step.
 | #578 (`README.md`) | `ci.yml`, `dco.yml`, `secret-scan.yml` | README diff failure is candidate-owned. Unrelated Rust/security results remain with their owners; DCO and actual secret findings remain blocking under normal repository policy. |
 | #580 (`Cargo.toml`, `Cargo.lock`) | `ci.yml`, `pg-suite.yml`, `pending-cleanup-ci.yml`, `dco.yml`, `secret-scan.yml` | Dependency resolution, deny/audit, workspace compilation, and TLS-owner test failures are candidate-owned. A failure isolated to unrelated Worker or documentation coverage remains with its owner issue. Security findings are never suppressed. |
 | #602 (`billing_recovery.ts`, its focused test, and `spawn-worker-ci.yml`) | `spawn-worker-ci.yml`, `ci.yml`, `dco.yml`, `secret-scan.yml` | Billing recovery typecheck and focused test failures are candidate-owned. An automatic run that tests the synthetic PR merge SHA does not prove the authored head; use this exact-head pack for #602. DCO and security findings remain blocking. |
+| #603 (historical settlement fixture, focused reconciliation test, and operator documentation) | `ci.yml`, `dco.yml`, `secret-scan.yml` | The exact-head Node fixture command is candidate-owned. The trusted catalog binds this pack to issue #603 and PR #626, checks live PR metadata for the dispatch-time head and base, and requires all three declared paths. DCO and security findings remain blocking. |
 
 The listed PR workflows are triggered by the current `on.pull_request` path
 rules at the protected-main baseline. The pack does not disable or weaken those
