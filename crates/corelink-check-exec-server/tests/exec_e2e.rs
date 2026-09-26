@@ -262,6 +262,7 @@ fn clw_rejects_stale_or_incomplete_devenv_identity_before_exec() {
             json!({"argv": ["snapshot"], "expected_session_uuid": "session-old", "expected_generation_id": 6}),
             json!({"argv": ["snapshot"], "expected_session_uuid": "session-current", "expected_generation_id": 6}),
             json!({"argv": ["snapshot"], "expected_session_uuid": "session-current"}),
+            json!({"argv": ["snapshot"]}),
         ];
         let mut statuses = Vec::new();
         for body in bodies {
@@ -276,7 +277,7 @@ fn clw_rejects_stale_or_incomplete_devenv_identity_before_exec() {
         }
         statuses
     });
-    assert_eq!(statuses, vec![StatusCode::CONFLICT; 3]);
+    assert_eq!(statuses, vec![StatusCode::CONFLICT; 4]);
 }
 
 // ─── Track-C C2b: exec-server bearer auth (defense-in-depth) ─────────────────

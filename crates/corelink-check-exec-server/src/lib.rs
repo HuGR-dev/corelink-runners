@@ -89,10 +89,15 @@ impl ClwServerIdentity {
     }
 
     fn matches(&self, expected_session_uuid: Option<&str>, expected_generation_id: Option<u64>) -> bool {
-        match (expected_session_uuid, expected_generation_id) {
-            (None, None) => true,
-            (Some(session), Some(generation)) => {
-                self.session_uuid.as_deref() == Some(session) && self.generation_id == Some(generation)
+        match (
+            self.session_uuid.as_deref(),
+            self.generation_id,
+            expected_session_uuid,
+            expected_generation_id,
+        ) {
+            (None, None, None, None) => true,
+            (Some(session), Some(generation), Some(expected_session), Some(expected_generation)) => {
+                session == expected_session && generation == expected_generation
             }
             _ => false,
         }
