@@ -75,20 +75,32 @@ pub struct ClwServerIdentity {
 impl ClwServerIdentity {
     /// Capture the identity injected before the container's exec-server starts.
     pub fn from_env() -> Self {
-        let session_uuid = std::env::var(DEVENV_SESSION_ENV).ok().filter(|value| !value.is_empty());
+        let session_uuid = std::env::var(DEVENV_SESSION_ENV)
+            .ok()
+            .filter(|value| !value.is_empty());
         let generation_id = std::env::var(DEVENV_GENERATION_ENV)
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
-        Self { session_uuid, generation_id }
+        Self {
+            session_uuid,
+            generation_id,
+        }
     }
 
     /// Build a fixed identity for an explicitly owned DevEnv container.
     pub fn new(session_uuid: impl Into<String>, generation_id: u64) -> Self {
-        Self { session_uuid: Some(session_uuid.into()), generation_id: Some(generation_id) }
+        Self {
+            session_uuid: Some(session_uuid.into()),
+            generation_id: Some(generation_id),
+        }
     }
 
-    fn matches(&self, expected_session_uuid: Option<&str>, expected_generation_id: Option<u64>) -> bool {
+    fn matches(
+        &self,
+        expected_session_uuid: Option<&str>,
+        expected_generation_id: Option<u64>,
+    ) -> bool {
         match (
             self.session_uuid.as_deref(),
             self.generation_id,
@@ -96,9 +108,12 @@ impl ClwServerIdentity {
             expected_generation_id,
         ) {
             (None, None, None, None) => true,
-            (Some(session), Some(generation), Some(expected_session), Some(expected_generation)) => {
-                session == expected_session && generation == expected_generation
-            }
+            (
+                Some(session),
+                Some(generation),
+                Some(expected_session),
+                Some(expected_generation),
+            ) => session == expected_session && generation == expected_generation,
             _ => false,
         }
     }
@@ -392,12 +407,19 @@ pub struct ClwRequest {
     pub expected_generation_id: Option<u64>,
 }
 
-async fn clw_handler(State(identity): State<ClwServerIdentity>, Json(req): Json<ClwRequest>) -> Response {
-    if !identity.matches(req.expected_session_uuid.as_deref(), req.expected_generation_id) {
+async fn clw_handler(
+    State(identity): State<ClwServerIdentity>,
+    Json(req): Json<ClwRequest>,
+) -> Response {
+    if !identity.matches(
+        req.expected_session_uuid.as_deref(),
+        req.expected_generation_id,
+    ) {
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "devenv_session_identity_mismatch" })),
-        ).into_response();
+        )
+            .into_response();
     }
     let mut full_argv = vec!["/usr/local/bin/clw".to_string()];
     full_argv.extend(req.argv);
