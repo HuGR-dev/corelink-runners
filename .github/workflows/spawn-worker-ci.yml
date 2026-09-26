@@ -94,3 +94,123 @@ jobs:
                  "A suite that stops collecting passes vacuously; that is the failure this gate exists to catch."
             exit 1
           fi
+
+  issue-605-cross-repo:
+    name: issue #605 Rust ingest + TypeScript flusher
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, 'Closes') && contains(github.event.pull_request.body, '605') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact runners PR head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check out pinned server fixture SHA
+        id: server_checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: HuGR-dev/corelink-server
+          ref: f1aa4803a03b0b72db61cb0fda384e59cb4455c6
+          path: server
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: candidate/deploy/cloudflare/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.91.1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+
+      - name: Cache Cargo
+        if: runner.environment == 'github-hosted'
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: 'server -> server/target'
+          shared-key: issue-605-cross-repo
+
+      - name: Build exact Rust ingest fixture
+        env:
+          SERVER_EXPECTED_SHA: f1aa4803a03b0b72db61cb0fda384e59cb4455c6
+        run: |
+          set -euo pipefail
+          server_sha="$(git -C server rev-parse HEAD)"
+          test "$server_sha" = "$SERVER_EXPECTED_SHA"
+          cargo build --locked --manifest-path server/crates/corelink-container/Cargo.toml \
+            --bin issue-605-billing-ingest-fixture
+
+      - name: Install runner Worker dependencies
+        working-directory: candidate/deploy/cloudflare
+        run: npm ci
+
+      - name: Run real Rust-to-TypeScript recovery integration
+        working-directory: candidate/deploy/cloudflare
+        env:
+          CORELINK_SERVER_BIN: ${{ github.workspace }}/server/target/debug/issue-605-billing-ingest-fixture
+          CORELINK_SERVER_SHA: ${{ steps.server_checkout.outputs.commit }}
+          CORELINK_RUNNERS_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          tested_runners_sha="$(git -C "$GITHUB_WORKSPACE/candidate" rev-parse HEAD)"
+          tested_server_sha="$(git -C "$GITHUB_WORKSPACE/server" rev-parse HEAD)"
+          test "$tested_runners_sha" = "$CORELINK_RUNNERS_SHA"
+          test "$tested_server_sha" = "$CORELINK_SERVER_SHA"
+          echo "CORELINK_TESTED_RUNNERS_SHA=$tested_runners_sha" >> "$GITHUB_ENV"
+          npx vitest run test/issue-605-billing-integration.test.ts
+
+      - name: Write exact-SHA cross-repo receipt
+        env:
+          SERVER_SHA: ${{ steps.server_checkout.outputs.commit }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RECEIPT_PATH: ${{ runner.temp }}/issue-605-cross-repo-receipt.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = {
+              "issue": 605,
+              "runner_repository": "HuGR-dev/corelink-runners",
+              "runner_pr_number": int(os.environ["PR_NUMBER"]),
+              "runner_sha": os.environ["CORELINK_TESTED_RUNNERS_SHA"],
+              "server_repository": "HuGR-dev/corelink-server",
+              "server_sha": os.environ["SERVER_SHA"],
+              "result": "PASS",
+              "scenarios": [
+                  "mixed accepted/deduped/rejected/conflict",
+                  "worker restart and retry after lost acknowledgement",
+                  "settlement write failure and retry",
+                  "quarantine write failure and retry",
+                  "ambiguous acknowledgement retains source",
+                  "server persistence failure is retryable",
+              ],
+              "provider_credentials_used": False,
+              "run_url": os.environ["RUN_URL"],
+          }
+          Path(os.environ["RECEIPT_PATH"]).write_text(json.dumps(receipt, sort_keys=True) + "\n")
+          PY
+
+      - name: Upload cross-repo receipt artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-605-cross-repo-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-605-cross-repo-receipt.json
+          if-no-files-found: ignore
+          retention-days: 30

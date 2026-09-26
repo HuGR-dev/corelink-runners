@@ -107,6 +107,17 @@ export const COUNTER_NAMES = [
   "revoke_failed", // a PAT revoke failed and was retained for cron retry
   "revoke_missing_tenant", // revoke refused because server-derived tenant was absent
   "billing_pushed", // runner_slot_seconds usage event emitted
+  // ── Durable billing ingest acknowledgement ──────────────────────────────
+  // These are bounded outcome totals. Never add tenant, event, idem-key, or
+  // payload dimensions to this metric surface.
+  "billing_ingest_accepted",
+  "billing_ingest_deduped",
+  "billing_ingest_rejected",
+  "billing_ingest_conflict",
+  "billing_ingest_ambiguous",
+  "billing_ingest_transport_failed",
+  "billing_settlement_write_failed",
+  "billing_quarantine_write_failed",
   // ── Registered late (2026-08-03) ─────────────────────────────────────────
   // These four were BUMPED at their seams but never listed here, so `snapshot()`
   // 0-filled the fixed set without them and a dashboard reading the documented

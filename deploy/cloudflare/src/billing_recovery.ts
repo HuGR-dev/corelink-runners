@@ -8,6 +8,7 @@ import {
   type UsageLedgerRecord,
   USAGE_LEDGER_TTL_S,
 } from "./lib.js";
+import { bumpMetrics } from "./metrics.js";
 
 /** The ingest cap is deliberately below the server's 1024-event limit. */
 export const BILLING_FLUSH_CHUNK_SIZE = 100;
@@ -25,6 +26,24 @@ export interface BillingFlushResult {
   quarantined: number;
   failed: number;
   pages: number;
+  accepted: number;
+  deduped: number;
+  rejected: number;
+  conflicts: number;
+  ambiguous: number;
+  transportFailed: number;
+  settlementWriteFailed: number;
+  quarantineWriteFailed: number;
+}
+
+class BillingFlushError extends Error {
+  constructor(readonly kind: "ambiguous" | "transport", message: string) {
+    super(message);
+  }
+}
+
+function invalidAcknowledgement(message: string): never {
+  throw new BillingFlushError("ambiguous", message);
 }
 
 interface UsageListPage {
@@ -117,48 +136,54 @@ async function readBoundedResponseBody(response: Response): Promise<string> {
 }
 
 async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSignal): Promise<BillingBatchAcknowledgement> {
-  const response = await fetch(env.BILLING_INGEST_URL ?? "", {
-    method: "POST",
-    headers: {
-      ...cfAccessHeaders(env),
-      "x-corelink-internal-auth": env.BILLING_INGEST_AUTH_KEY ?? "",
-      "content-type": "application/json",
-      "user-agent": "corelink-spawn-worker",
-    },
-    body: JSON.stringify(events),
-    ...(signal ? { signal } : {}),
-  });
+  let response: Response;
+  try {
+    response = await fetch(env.BILLING_INGEST_URL ?? "", {
+      method: "POST",
+      headers: {
+        ...cfAccessHeaders(env),
+        "x-corelink-internal-auth": env.BILLING_INGEST_AUTH_KEY ?? "",
+        "content-type": "application/json",
+        "user-agent": "corelink-spawn-worker",
+      },
+      body: JSON.stringify(events),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    throw new BillingFlushError("transport", (error as Error).message);
+  }
   // The server uses 409 for a batch containing a durable conflict and 422 for
   // an entirely rejected batch. Both responses carry useful per-record
   // outcomes and must be parsed; every other non-202 is a transport/batch
   // failure whose records remain retryable.
   if (response.status !== 202 && response.status !== 409 && response.status !== 422) {
-    throw new Error(`billing usage-push ${response.status}`);
+    throw new BillingFlushError("transport", `billing usage-push ${response.status}`);
   }
   const contentLength = response.headers.get("content-length");
   if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > BILLING_ACK_MAX_BYTES)) {
-    throw new Error("billing usage acknowledgement too large");
+    return invalidAcknowledgement("billing usage acknowledgement too large");
   }
-  const body = await readBoundedResponseBody(response);
-  let value: unknown;
+  const body = await readBoundedResponseBody(response).catch((error: unknown) =>
+    invalidAcknowledgement((error as Error).message));
+  let value: unknown = null;
   try {
     value = JSON.parse(body);
   } catch {
-    throw new Error("billing usage acknowledgement invalid JSON");
+    return invalidAcknowledgement("billing usage acknowledgement invalid JSON");
   }
   if (!isRecord(value) || !hasExactKeys(value, ["outcomes", "accepted", "deduped", "rejected", "total"])
     || !Array.isArray(value.outcomes)) {
-    throw new Error("billing usage acknowledgement missing outcomes");
+    return invalidAcknowledgement("billing usage acknowledgement missing outcomes");
   }
   if (value.outcomes.length !== events.length) {
-    throw new Error("billing usage acknowledgement outcome length mismatch");
+    return invalidAcknowledgement("billing usage acknowledgement outcome length mismatch");
   }
   const accepted = nonNegativeCount(value.accepted, events.length);
   const deduped = nonNegativeCount(value.deduped, events.length);
   const rejected = nonNegativeCount(value.rejected, events.length);
   const total = nonNegativeCount(value.total, events.length);
   if (accepted === null || deduped === null || rejected === null || total === null) {
-    throw new Error("billing usage acknowledgement counts invalid");
+    return invalidAcknowledgement("billing usage acknowledgement counts invalid");
   }
   const outcomes: BillingRecordOutcome[] = [];
   let actualAccepted = 0;
@@ -171,22 +196,22 @@ async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSi
       || item.index !== index
       || (item.outcome !== "accepted" && item.outcome !== "deduped"
         && item.outcome !== "rejected" && item.outcome !== "conflict")) {
-      throw new Error("billing usage acknowledgement outcome ordering invalid");
+      return invalidAcknowledgement("billing usage acknowledgement outcome ordering invalid");
     }
     const idemKey = item.idem_key;
     if (idemKey !== null && typeof idemKey !== "string") {
-      throw new Error("billing usage acknowledgement idem key invalid");
+      return invalidAcknowledgement("billing usage acknowledgement idem key invalid");
     }
     if (idemKey !== events[index].idem_key) {
       // This worker only sends valid events. A missing or mismatched key would
       // make settlement attribution ambiguous, so retain the complete chunk.
-      throw new Error("billing usage acknowledgement idem key mismatch");
+      return invalidAcknowledgement("billing usage acknowledgement idem key mismatch");
     }
     const rawReason: unknown = item.reason;
     const hasReason = rawReason !== undefined;
     if ((hasReason && (typeof rawReason !== "string" || rawReason.length === 0))
       || ((item.outcome === "rejected" || item.outcome === "conflict") !== hasReason)) {
-      throw new Error("billing usage acknowledgement reason invalid");
+      return invalidAcknowledgement("billing usage acknowledgement reason invalid");
     }
     const reason = typeof rawReason === "string" ? rawReason : undefined;
     const outcome = item.outcome as BillingRecordOutcomeKind;
@@ -198,16 +223,16 @@ async function postBatch(env: BillingEnv, events: UsageEvent[], signal?: AbortSi
   }
   if (accepted !== actualAccepted || deduped !== actualDeduped || rejected !== actualRejected
     || total !== accepted + deduped) {
-    throw new Error("billing usage acknowledgement counts mismatch");
+    return invalidAcknowledgement("billing usage acknowledgement counts mismatch");
   }
   if (actualConflicts > 0 && response.status !== 409) {
-    throw new Error("billing usage acknowledgement conflict status mismatch");
+    return invalidAcknowledgement("billing usage acknowledgement conflict status mismatch");
   }
   if (actualConflicts === 0 && actualRejected === events.length && response.status !== 422) {
-    throw new Error("billing usage acknowledgement rejection status mismatch");
+    return invalidAcknowledgement("billing usage acknowledgement rejection status mismatch");
   }
   if (actualConflicts === 0 && actualRejected !== events.length && response.status !== 202) {
-    throw new Error("billing usage acknowledgement success status mismatch");
+    return invalidAcknowledgement("billing usage acknowledgement success status mismatch");
   }
   return { outcomes, accepted, deduped, rejected, total };
 }
@@ -222,7 +247,21 @@ export async function flushBillingUsageBacklog(
   env: BillingEnv & { RUNNER_JOB_PATS?: KvLike },
   options: { maxPages?: number; chunkSize?: number } = {},
 ): Promise<BillingFlushResult> {
-  const result: BillingFlushResult = { scanned: 0, pushed: 0, quarantined: 0, failed: 0, pages: 0 };
+  const result: BillingFlushResult = {
+    scanned: 0,
+    pushed: 0,
+    quarantined: 0,
+    failed: 0,
+    pages: 0,
+    accepted: 0,
+    deduped: 0,
+    rejected: 0,
+    conflicts: 0,
+    ambiguous: 0,
+    transportFailed: 0,
+    settlementWriteFailed: 0,
+    quarantineWriteFailed: 0,
+  };
   const kv = env.RUNNER_JOB_PATS;
   if (!kv || !env.BILLING_INGEST_URL || !env.BILLING_INGEST_AUTH_KEY || !kv.list) return result;
   const maxPages = Math.max(1, options.maxPages ?? 100);
@@ -293,10 +332,16 @@ export async function flushBillingUsageBacklog(
       const chunk = events.slice(i, i + chunkSize);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5_000);
+      let acknowledgementParsed = false;
       try {
         const acknowledgement = await postBatch(env, chunk.map((item) => item.event), controller.signal);
+        acknowledgementParsed = true;
         const settled = acknowledgement.outcomes.filter((item) => item.outcome === "accepted" || item.outcome === "deduped");
         const explicitFailures = acknowledgement.outcomes.filter((item) => item.outcome === "rejected" || item.outcome === "conflict");
+        result.accepted += acknowledgement.accepted;
+        result.deduped += acknowledgement.deduped;
+        result.rejected += acknowledgement.rejected;
+        result.conflicts += acknowledgement.outcomes.filter((item) => item.outcome === "conflict").length;
         await Promise.all(settled.map((item) => kv.put(settledKey(chunk[item.index].event.idem_key), String(Date.now()), {
           expirationTtl: BILLING_SETTLEMENT_TTL_S,
         })));
@@ -311,6 +356,15 @@ export async function flushBillingUsageBacklog(
       } catch (error) {
         // Keep every source record. The same idem keys make the retry safe.
         result.failed += chunk.length;
+        if (error instanceof BillingFlushError && error.kind === "ambiguous") {
+          result.ambiguous += chunk.length;
+        } else if (error instanceof BillingFlushError && error.kind === "transport") {
+          result.transportFailed += chunk.length;
+        } else if (acknowledgementParsed) {
+          // The acknowledgement parsed, so an exception here is a settlement
+          // write failure. Keep all sources; already written markers are safe.
+          result.settlementWriteFailed += 1;
+        }
         pageFailed = true;
         logEvent("error", "billing_flush_push_failed", { count: chunk.length, error: (error as Error).message });
       } finally {
@@ -334,8 +388,22 @@ export async function flushBillingUsageBacklog(
       result.quarantined += 1;
     } catch (error) {
       result.failed += 1;
+      result.quarantineWriteFailed += 1;
       logEvent("error", "billing_usage_quarantine_failed", { key: item.key, error: (error as Error).message });
     }
+  }
+  const metricCounts: [string, number][] = [
+    ["billing_ingest_accepted", result.accepted],
+    ["billing_ingest_deduped", result.deduped],
+    ["billing_ingest_rejected", result.rejected],
+    ["billing_ingest_conflict", result.conflicts],
+    ["billing_ingest_ambiguous", result.ambiguous],
+    ["billing_ingest_transport_failed", result.transportFailed],
+    ["billing_settlement_write_failed", result.settlementWriteFailed],
+    ["billing_quarantine_write_failed", result.quarantineWriteFailed],
+  ];
+  for (const [name, count] of metricCounts) {
+    if (count > 0) await bumpMetrics(env as Parameters<typeof bumpMetrics>[0], ...Array.from({ length: count }, () => name));
   }
   return result;
 }
