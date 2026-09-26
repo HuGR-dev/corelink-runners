@@ -87,6 +87,13 @@ workflow = Path(".github/workflows/deploy-spawn-worker.yml").read_text()
 guard_at = workflow.index("scripts/ci/check-repo-tenant-pat-map.mjs")
 deploy_at = workflow.index("npx wrangler deploy")
 assert guard_at < deploy_at
-print("check-repo-tenant-pat-map selftest: 7 scenarios passed; workflow ordering passed")
+
+selftests_workflow = Path(".github/workflows/selftests.yml").read_text()
+dependency_setup_at = selftests_workflow.index(
+    "npm ci --ignore-scripts --no-audit --no-fund --prefix deploy/cloudflare"
+)
+discovery_at = selftests_workflow.index("- name: Discover and run every tracked selftest")
+assert dependency_setup_at < discovery_at
+print("check-repo-tenant-pat-map selftest: scenarios and workflow ordering passed")
 server.shutdown()
 PY

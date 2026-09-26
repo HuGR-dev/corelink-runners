@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0  # v6.0.3
 
+      - name: Install locked Cloudflare dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix deploy/cloudflare
+
       - name: Discover and run every tracked selftest
         shell: bash
         run: |
