@@ -235,3 +235,9 @@ expect_step_rejected 'explicit-indent run publisher' '      - name: Forbidden ex
         run: |2-
           docker manifest push registry.example/image:tag'
 echo 'PASS workflow trust and publisher mutations are rejected'
+
+# This file is already run by the GitHub-hosted pull_request image contract
+# workflow when the production image workflow changes. Keep the bounded
+# RunnerContainer archive/import and its actionlint check in that same hosted
+# receipt; do not dispatch the manual publisher from this selftest.
+bash "$script_dir/container-build-export-load.selftest.sh"
