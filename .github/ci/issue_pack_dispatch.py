@@ -32,6 +32,13 @@ FIXED_COMMANDS = {
     ("npm", "run", "test:coverage"),
     ("npx", "vitest", "run", "test/billing-recovery.test.ts"),
     ("node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs"),
+    ("npx", "vitest", "run", "test/index.test.ts", "test/containment-intake.test.ts",
+     "test/devenv-do.test.ts", "test/billing-recovery.test.ts",
+     "test/usage-ledger-backfill.test.ts", "test/usage-event-conformance.test.ts"),
+    ("cargo", "test", "--locked", "--lib", "-p", "corelink-fabric-server",
+     "corelink_billing::tests"),
+    ("cargo", "test", "--locked", "--lib", "-p", "corelink-runners-contracts",
+     "conformance_"),
     ("actionlint", "-config-file", ".github/ci/actionlint-runner.yaml",
      ".github/workflows/build-cf-container-images.yml"),
     ("bash", "scripts/ci/runner-image-static-check.selftest.sh"),
@@ -550,6 +557,123 @@ class DispatcherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_commands([["node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs", "&&", "curl"]])
 
+    def test_issue_604_binds_exact_issue_pr_surface_and_commands(self) -> None:
+        pack = catalog()["issue-604"]
+        expected_paths = [
+            "conformance/billing-ingest-ack-v1.json",
+            "conformance/manifest.sha256",
+            "crates/corelink-fabric-server/src/corelink_billing.rs",
+            "deploy/cloudflare/src/lib.ts",
+            "deploy/cloudflare/test/billing-recovery.test.ts",
+            "deploy/cloudflare/test/containment-intake.test.ts",
+            "deploy/cloudflare/test/devenv-do.test.ts",
+            "deploy/cloudflare/test/helpers/billing-ack.ts",
+            "deploy/cloudflare/test/index.test.ts",
+            "deploy/cloudflare/test/usage-event-conformance.test.ts",
+            "deploy/cloudflare/test/usage-ledger-backfill.test.ts",
+            "docs/contracts/billing-ingest-ack-v1.md",
+            "scripts/ci/secret-scan.sh",
+        ]
+        expected_commands = [
+            ["npm", "ci"],
+            ["npm", "run", "typecheck"],
+            ["npx", "vitest", "run", "test/index.test.ts", "test/containment-intake.test.ts",
+             "test/devenv-do.test.ts", "test/billing-recovery.test.ts",
+             "test/usage-ledger-backfill.test.ts", "test/usage-event-conformance.test.ts"],
+            ["cargo", "test", "--locked", "--lib", "-p", "corelink-fabric-server",
+             "corelink_billing::tests"],
+            ["cargo", "test", "--locked", "--lib", "-p", "corelink-runners-contracts",
+             "conformance_"],
+        ]
+        self.assertEqual(pack["issue"], 604)
+        self.assertEqual(pack["pull_request"], 634)
+        self.assertTrue(pack["exact_paths"])
+        self.assertEqual(pack["paths"], expected_paths)
+        self.assertEqual(pack["commands"], expected_commands)
+        accepted = validate_inputs(
+            "issue-604", "a" * 40, "b" * 40, "634", "refs/heads/main", REPO,
+            "main", "a" * 40, "b" * 40,
+        )
+        self.assertEqual(accepted, pack)
+        validate_changed_paths(pack, expected_paths)
+        with self.assertRaises(ValueError):
+            validate_pack_definition("issue-604", {**pack, "issue": 603})
+        with self.assertRaises(ValueError):
+            validate_pack_definition("issue-604", {**pack, "pull_request": True})
+        for wrong_pr in ("633", "635"):
+            with self.subTest(pr=wrong_pr), self.assertRaises(ValueError):
+                validate_inputs(
+                    "issue-604", "a" * 40, "b" * 40, wrong_pr, "refs/heads/main", REPO,
+                    "main", "a" * 40, "b" * 40,
+                )
+        for wrong_paths in (
+            [*expected_paths, "deploy/cloudflare/src/index.ts"],
+            expected_paths[:-1],
+        ):
+            with self.subTest(paths=wrong_paths), self.assertRaises(ValueError):
+                validate_changed_paths(pack, wrong_paths)
+        for wrong_head, wrong_base, wrong_pr_head, wrong_pr_base in (
+            ("c" * 40, "b" * 40, "a" * 40, "b" * 40),
+            ("a" * 40, "c" * 40, "a" * 40, "b" * 40),
+            ("a" * 40, "b" * 40, "c" * 40, "b" * 40),
+            ("a" * 40, "b" * 40, "a" * 40, "c" * 40),
+        ):
+            with self.subTest(head=wrong_head, base=wrong_base,
+                              pr_head=wrong_pr_head, pr_base=wrong_pr_base), self.assertRaises(ValueError):
+                validate_inputs(
+                    "issue-604", wrong_head, wrong_base, "634", "refs/heads/main", REPO,
+                    "main", wrong_pr_head, wrong_pr_base,
+                )
+        with self.assertRaises(ValueError):
+            validate_inputs(
+                "issue-604", "a" * 40, "b" * 40, "634", "refs/heads/main",
+                "attacker/corelink-runners", "main", "a" * 40, "b" * 40,
+            )
+        with self.assertRaises(ValueError):
+            validate_inputs(
+                "issue-604", "a" * 40, "b" * 40, "634", "refs/heads/feature", REPO,
+                "main", "a" * 40, "b" * 40,
+            )
+        with self.assertRaises(ValueError):
+            validate_commands([["cargo", "test", "--workspace"]])
+        with self.assertRaises(ValueError):
+            validate_commands([expected_commands[2] + ["&&", "curl"]])
+
+    def test_dispatch_concurrency_serializes_duplicate_identity(self) -> None:
+        workflow = (ROOT / ".github/workflows/issue-pack-dispatch.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("\nconcurrency:\n"), 1)
+        match = re.search(
+            r"(?m)^concurrency:\n  group: (?P<group>[^\n]+)\n  cancel-in-progress: false$",
+            workflow,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        group = match.group("group")
+        dimensions = {
+            "${{ github.repository }}": "HuGR-dev/corelink-runners",
+            "${{ inputs.pack_id }}": "issue-604",
+            "${{ inputs.pr_number }}": "634",
+            "${{ inputs.candidate_sha }}": "a" * 40,
+            "${{ inputs.target_base_sha }}": "b" * 40,
+        }
+        for expression in dimensions:
+            with self.subTest(dimension=expression):
+                self.assertEqual(group.count(expression), 1)
+
+        def render(identity: dict[str, str]) -> str:
+            value = group
+            for expression, part in identity.items():
+                value = value.replace(expression, part)
+            return value
+
+        baseline = render(dimensions)
+        self.assertEqual(baseline, render(dict(dimensions)))
+        for expression in dimensions:
+            changed = dict(dimensions)
+            changed[expression] += "-other"
+            with self.subTest(changed=expression):
+                self.assertNotEqual(baseline, render(changed))
+
     def test_issue_575_actionlint_uses_trusted_minimal_config(self) -> None:
         command = catalog()["issue-575"]["commands"][0]
         self.assertEqual(
@@ -667,6 +791,45 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["candidate_job_result"], "failure")
         self.assertTrue(all(row["exit_code"] is None for row in receipt["commands"]))
+
+    def test_issue_604_passing_receipt_binds_trusted_and_candidate_metadata(self) -> None:
+        pack = catalog()["issue-604"]
+        env = {
+            "PACK_ID": "issue-604",
+            "CANDIDATE_SHA": "a" * 40,
+            "TARGET_BASE_SHA": "b" * 40,
+            "PR_NUMBER": "634",
+            "PR_BASE_REF": "main",
+            "PR_BINDING_OK": "true",
+            "TRUSTED_SHA": "c" * 40,
+            "TRUSTED_REF": "refs/heads/main",
+            "RUN_URL": "https://github.com/HuGR-dev/corelink-runners/actions/runs/123",
+            "PREPARE_JOB_RESULT": "success",
+            "CANDIDATE_JOB_RESULT": "success",
+            "PREFLIGHT_OK": "true",
+            "CANDIDATE_PATHS": json.dumps(pack["paths"]),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            with mock.patch.dict(os.environ, {**env, "RECEIPT_PATH": str(receipt_path)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(finalize_receipt(), 0)
+            receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt["status"], "passed")
+        self.assertEqual(receipt["issue"], 604)
+        self.assertEqual(receipt["pr_number"], "634")
+        self.assertEqual(receipt["candidate_sha"], "a" * 40)
+        self.assertEqual(receipt["base_sha"], "b" * 40)
+        self.assertEqual(receipt["pr_base_ref"], "main")
+        self.assertTrue(receipt["metadata_binding"])
+        self.assertEqual(receipt["trusted_controls_sha"], "c" * 40)
+        self.assertEqual(receipt["trusted_ref"], "refs/heads/main")
+        self.assertEqual(receipt["changed_paths"], pack["paths"])
+        self.assertEqual(
+            receipt["commands"],
+            [{"command": command, "status": "passed", "exit_code": 0}
+             for command in pack["commands"]],
+        )
 
     def test_readme_pack_requires_the_exact_latest_successful_run_and_date(self) -> None:
         readme = (
