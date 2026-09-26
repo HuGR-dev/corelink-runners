@@ -3,7 +3,8 @@
     "issue": 566,
     "paths": [
       "deploy/cloudflare/src/lib.ts",
-      "deploy/cloudflare/test/index.test.ts"
+      "deploy/cloudflare/test/index.test.ts",
+      "deploy/cloudflare/test/containment-redrive-reservation.test.ts"
     ],
     "commands": [
       ["npm", "ci"],
@@ -64,6 +65,7 @@
     "issue": 575,
     "paths": [
       ".github/workflows/build-cf-container-images.yml",
+      ".github/ci/actionlint-runner.yaml",
       "scripts/ci/container-build-export-load.selftest.sh",
       "scripts/ci/container-build-export-load.sh",
       "scripts/ci/runner-image-build-validation.selftest.sh",
@@ -72,7 +74,7 @@
       "scripts/ci/verify_runner_image_oci_archive.py"
     ],
     "commands": [
-      ["actionlint", ".github/workflows/build-cf-container-images.yml"],
+      ["actionlint", "-config-file", ".github/ci/actionlint-runner.yaml", ".github/workflows/build-cf-container-images.yml"],
       ["bash", "scripts/ci/runner-image-static-check.selftest.sh"],
       ["bash", "scripts/ci/runner-image-build-validation.selftest.sh"]
     ]

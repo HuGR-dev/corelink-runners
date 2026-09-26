@@ -31,7 +31,8 @@ FIXED_COMMANDS = {
     ("npm", "test", "--", "--run", "test/devenv-credentials.test.ts"),
     ("npm", "run", "test:coverage"),
     ("npx", "vitest", "run", "test/billing-recovery.test.ts"),
-    ("actionlint", ".github/workflows/build-cf-container-images.yml"),
+    ("actionlint", "-config-file", ".github/ci/actionlint-runner.yaml",
+     ".github/workflows/build-cf-container-images.yml"),
     ("bash", "scripts/ci/runner-image-static-check.selftest.sh"),
     ("bash", "scripts/ci/runner-image-build-validation.selftest.sh"),
     ("cargo", "deny", "check"),
@@ -160,14 +161,11 @@ def bind_pr_metadata() -> int:
             if not runs:
                 raise ValueError("no successful main CI run is recorded")
             latest = runs[0]
-            if (latest.get("status") != "completed" or latest.get("conclusion") != "success"
-                    or latest.get("head_branch") != "main" or not latest.get("completed_at")):
-                raise ValueError("latest successful main CI run metadata is incomplete")
-            completed = datetime.fromisoformat(latest["completed_at"].replace("Z", "+00:00"))
+            updated_date = workflow_run_date(latest)
             values.update({
                 "latest_ci_run_id": str(latest["id"]),
                 "latest_ci_run_number": str(latest["run_number"]),
-                "latest_ci_date": completed.date().isoformat(),
+                "latest_ci_date": updated_date,
             })
     except Exception as exc:
         # Do not put API error text in outputs; it can contain untrusted PR data.
@@ -272,8 +270,41 @@ def run_catalog_command(command: list[str], candidate_dir: Path,
             os.environ.get("LATEST_CI_RUN_ID", ""), os.environ.get("LATEST_CI_DATE", ""),
         )
         return (0 if ok else 1, "README latest successful main CI run and non-enforcement statement verified")
+    if command[0] == "actionlint":
+        trusted_command = actionlint_invocation(command, candidate_dir)
+        return bounded_process(trusted_command, ROOT, candidate_env())
     cwd = candidate_dir / "deploy/cloudflare" if command[0] in {"npm", "npx"} else candidate_dir
     return bounded_process(command, cwd, candidate_env())
+
+
+def actionlint_invocation(command: list[str], candidate_dir: Path) -> list[str]:
+    """Lint candidate workflow data with the dispatcher's trusted label config."""
+    expected = [
+        "actionlint", "-config-file", ".github/ci/actionlint-runner.yaml",
+        ".github/workflows/build-cf-container-images.yml",
+    ]
+    if command != expected:
+        raise ValueError("actionlint command is not the fixed trusted invocation")
+    config = ROOT / ".github/ci/actionlint-runner.yaml"
+    workflow = candidate_dir / ".github/workflows/build-cf-container-images.yml"
+    return ["actionlint", "-config-file", str(config), str(workflow)]
+
+
+def workflow_run_date(run: dict[str, Any]) -> str:
+    """Validate a successful main workflow run and return its updated_at date."""
+    if (run.get("status") != "completed" or run.get("conclusion") != "success"
+            or run.get("head_branch") != "main"):
+        raise ValueError("latest workflow run is not a completed successful main run")
+    updated_at = run.get("updated_at")
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        raise ValueError("latest workflow run has no update timestamp")
+    try:
+        updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("latest workflow run has an invalid update timestamp") from exc
+    if "T" not in updated_at or updated.tzinfo is None:
+        raise ValueError("latest workflow run update timestamp must include time and timezone")
+    return updated.date().isoformat()
 
 
 def validate_readme_truth(readme: str, latest_run_number: str,
@@ -431,6 +462,64 @@ class DispatcherTests(unittest.TestCase):
                 self.assertEqual(accepted["paths"], pack["paths"])
                 validate_commands(accepted["commands"])
                 validate_changed_paths(pack, [pack["paths"][0]])
+
+    def test_issue_566_allows_containment_redrive_reservation_test(self) -> None:
+        path = "deploy/cloudflare/test/containment-redrive-reservation.test.ts"
+        pack = catalog()["issue-566"]
+        self.assertIn(path, pack["paths"])
+        validate_changed_paths(pack, [path])
+
+    def test_issue_575_actionlint_uses_trusted_minimal_config(self) -> None:
+        command = catalog()["issue-575"]["commands"][0]
+        self.assertEqual(
+            (ROOT / ".github/ci/actionlint-runner.yaml").read_text(encoding="utf-8"),
+            "---\nself-hosted-runner:\n  labels:\n    - corelink\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory)
+            (candidate / ".github/actionlint.yaml").parent.mkdir(parents=True)
+            (candidate / ".github/actionlint.yaml").write_text(
+                "paths:\n  '**':\n    ignore:\n      - '.*'\n", encoding="utf-8"
+            )
+            calls: list[tuple[list[str], Path]] = []
+
+            def capture(invocation: list[str], cwd: Path,
+                        env: dict[str, str] | None = None) -> tuple[int, str]:
+                calls.append((invocation, cwd))
+                return 0, "ok"
+
+            with mock.patch(__name__ + ".bounded_process", side_effect=capture):
+                code, _ = run_catalog_command(command, candidate, "", "")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        invocation, cwd = calls[0]
+        self.assertEqual(cwd, ROOT)
+        self.assertEqual(invocation[:3], [
+            "actionlint", "-config-file", str(ROOT / ".github/ci/actionlint-runner.yaml")
+        ])
+        self.assertEqual(invocation[3], str(candidate / ".github/workflows/build-cf-container-images.yml"))
+
+    def test_issue_578_uses_updated_at_and_rejects_incomplete_run_metadata(self) -> None:
+        run = {
+            "status": "completed",
+            "conclusion": "success",
+            "head_branch": "main",
+            "updated_at": "2026-09-22T23:30:00Z",
+            "completed_at": "2026-09-23T00:30:00Z",
+        }
+        self.assertEqual(workflow_run_date(run), "2026-09-22")
+        invalid_runs = [
+            {**run, "status": "in_progress"},
+            {**run, "conclusion": "failure"},
+            {**run, "head_branch": "release"},
+            {**run, "updated_at": ""},
+            {**run, "updated_at": None},
+            {**run, "updated_at": "2026-09-22"},
+            {**run, "updated_at": "not-a-timestamp"},
+        ]
+        for invalid in invalid_runs:
+            with self.subTest(run=invalid), self.assertRaises(ValueError):
+                workflow_run_date(invalid)
 
     def test_rejects_undeclared_pack_path_sha_command_and_dispatch_ref(self) -> None:
         with self.assertRaises(ValueError):
