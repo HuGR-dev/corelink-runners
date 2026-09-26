@@ -274,8 +274,11 @@ impl<B: BoxExec> ClwBoxDrive<B> {
         let state_dir_out = self
             .boxx
             .run(&["mktemp", "-d", "/tmp/corelink-run-state.XXXXXX"])?;
-        let state_dir = state_dir_out.stdout.trim();
+        // `mktemp -d` emits exactly one path line. Do not trim away malformed
+        // framing, because that could turn unrelated output into a trusted path.
+        let state_dir = state_dir_out.stdout.strip_suffix('\n').unwrap_or_default();
         let valid_state_dir = state_dir_out.code == Some(0)
+            && !state_dir.is_empty()
             && state_dir.starts_with("/tmp/corelink-run-state.")
             && state_dir
                 .strip_prefix("/tmp/corelink-run-state.")
@@ -285,25 +288,35 @@ impl<B: BoxExec> ClwBoxDrive<B> {
                             .bytes()
                             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
                 });
-        let state_path = valid_state_dir.then(|| format!("{state_dir}/state"));
-        let state_env = state_path
-            .as_ref()
-            .map(|path| format!("CLW_RUN_STATE_FILE={path}"));
-        let mut argv: Vec<&str> = Vec::new();
-        if let Some(value) = state_env.as_deref() {
-            argv.extend(["env", value]);
+        if !valid_state_dir {
+            let stderr = state_dir_out.stderr.trim();
+            let reason = if stderr.is_empty() {
+                format!(
+                    "mktemp returned an invalid execution receipt directory (exit {:?})",
+                    state_dir_out.code
+                )
+            } else {
+                stderr.to_string()
+            };
+            return Ok(ClwDriveOutcome::ClwFailed {
+                clw_exit_code: state_dir_out.code.unwrap_or(-1),
+                reason,
+            });
         }
+        let state_path = format!("{state_dir}/state");
+        let state_env = format!("CLW_RUN_STATE_FILE={state_path}");
+        let mut argv: Vec<&str> = Vec::new();
+        argv.extend(["env", &state_env]);
         argv.extend(["clw", "run", "--"]);
         argv.extend(self.run.command.iter().map(String::as_str));
         let run_result = self.boxx.run(&argv);
-        let receipt = state_path.as_deref().and_then(|path| {
-            let out = self.boxx.run(&["cat", path]).ok()?;
-            (out.code == Some(0)).then_some(out.stdout)
-        });
-        if let Some(path) = state_path.as_deref() {
-            let _ = self.boxx.run(&["rm", "-f", "--", path]);
-            let _ = self.boxx.run(&["rmdir", "--", state_dir]);
-        }
+        let receipt = self
+            .boxx
+            .run(&["cat", &state_path])
+            .ok()
+            .and_then(|out| (out.code == Some(0)).then_some(out.stdout));
+        let _ = self.boxx.run(&["rm", "-f", "--", &state_path]);
+        let _ = self.boxx.run(&["rmdir", "--", state_dir]);
         let run = run_result?;
         Ok(match run.code {
             // A receipt is the only discriminator when child and wrapper both
@@ -778,6 +791,76 @@ mod tests {
             ),
             "hydrate failure ⇒ ClwFailed with stderr-derived reason; got {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_receipt_directory_fails_before_clw_run_dispatch() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct MktempBox {
+            mktemp_out: CmdOutput,
+            calls: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+
+        impl BoxExec for MktempBox {
+            fn run(&self, argv: &[&str]) -> anyhow::Result<CmdOutput> {
+                self.calls
+                    .lock()
+                    .expect("calls mutex")
+                    .push(argv.iter().map(|arg| (*arg).to_string()).collect());
+                let ok = || CmdOutput {
+                    code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                };
+                match argv.first().copied() {
+                    Some("mktemp") => Ok(self.mktemp_out.clone()),
+                    Some("clw") | Some("env") => Ok(ok()),
+                    _ => Ok(ok()),
+                }
+            }
+        }
+
+        for mktemp_out in [
+            CmdOutput {
+                code: Some(1),
+                stdout: "/tmp/corelink-run-state.test\n".to_string(),
+                stderr: "mktemp failed".to_string(),
+            },
+            CmdOutput {
+                code: Some(0),
+                stdout: "invalid-directory\n".to_string(),
+                stderr: String::new(),
+            },
+            CmdOutput {
+                code: Some(0),
+                stdout: "\n/tmp/corelink-run-state.test\n".to_string(),
+                stderr: String::new(),
+            },
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let boxx = MktempBox {
+                mktemp_out,
+                calls: Arc::clone(&calls),
+            };
+            let outcome = ClwBoxDrive::new(boxx, spec())
+                .drive("lease-x")
+                .await
+                .expect("mock transport must not error");
+
+            assert!(
+                matches!(outcome, ClwDriveOutcome::ClwFailed { .. }),
+                "invalid receipt directory must fail as a wrapper error; got {outcome:?}"
+            );
+            assert!(
+                !calls.lock().expect("calls mutex").iter().any(|argv| {
+                    argv.windows(2)
+                        .any(|pair| pair[0] == "clw" && pair[1] == "run")
+                }),
+                "clw run must not be dispatched without a valid receipt directory"
+            );
+        }
     }
 
     #[tokio::test]
