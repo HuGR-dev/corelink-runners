@@ -23,8 +23,21 @@ vi.mock("@cloudflare/containers", () => {
       async schedule() {}
       async stop() {}
       async destroy() {}
-      async containerFetch(_req: any, _port: any): Promise<Response> {
-        return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify({ root: "bafybeicorp", bytes_total: 1048576 }), stderr: "" }), { status: 200 });
+      async containerFetch(req: Request, _port: any): Promise<Response> {
+        const body = await req.clone().json() as { argv?: string[] };
+        const argv = body.argv ?? [];
+        const name = argv[argv.indexOf("--name") + 1] ?? "snapshot-fixture";
+        const stdout = argv.includes("snapshot") ? JSON.stringify({
+          name,
+          root: "b".repeat(64),
+          files: 1,
+          bytes_total: 1048576,
+          chunks_total: 1,
+          chunks_uploaded: 1,
+          unchanged: false,
+          skipped_external_symlinks: [],
+        }) : "";
+        return new Response(JSON.stringify({ exit_code: 0, stdout, stderr: "" }), { status: 200 });
       }
       renewActivityTimeout() {}
     },

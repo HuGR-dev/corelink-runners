@@ -44,10 +44,23 @@ vi.mock("@cloudflare/containers", () => {
             return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
           }
           if (url.pathname === "/clw" || url.pathname === "/exec") {
+            const body = typeof req === "string" ? {} : await (req as Request).clone().json() as { argv?: string[] };
+            const argv = body.argv ?? [];
+            const name = argv[argv.indexOf("--name") + 1] ?? "snapshot-fixture";
+            const stdout = argv.includes("snapshot") ? JSON.stringify({
+              name,
+              root: "c".repeat(64),
+              files: 1,
+              bytes_total: 1048576,
+              chunks_total: 1,
+              chunks_uploaded: 1,
+              unchanged: false,
+              skipped_external_symlinks: [],
+            }) : "";
             return new Response(
               JSON.stringify({
                 exit_code: 0,
-                stdout: JSON.stringify({ root: "bafybeicorp987654321", bytes_total: 1048576, inodes_used: 1240, inodes_total: 100000 }),
+                stdout,
                 stderr: "",
               }),
               { status: 200, headers: { "Content-Type": "application/json" } }
