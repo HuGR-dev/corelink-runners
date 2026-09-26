@@ -349,10 +349,93 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       });
       await doInstance.onStart();
 
+      const owner = (doInstance as any).devenvState;
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch");
       const snapResp = await doInstance.snapshot({ force: false });
       expect(snapResp.ok).toBe(true);
       expect(snapResp.workspaceSnapshot.root).toBe("a".repeat(64));
       expect(snapResp.workspaceSnapshot.bytesTotal).toBe(1048576);
+      const requests = await Promise.all(execSpy.mock.calls.map(async ([request]) =>
+        await (request as Request).clone().json() as Record<string, unknown>));
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.expected_session_uuid).toBe(owner.sessionUuid);
+        expect(request.expected_generation_id).toBe(owner.generationId);
+      }
+      expect((doInstance as any).envVars.DEVENV_GENERATION_ID).toBe(String(owner.generationId));
+    });
+
+    it.each([
+      ["the same names", "recovery", "default"],
+      ["different names", "replacement-workspace", "replacement-profile"],
+    ])("refuses a pending snapshot after stop and restart with %s", async (_label, nextWorkspace, nextProfile) => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const initialPayload = testPayload();
+      await startTest(doInstance, initialPayload);
+      await doInstance.onStart();
+      const initial = (doInstance as any).devenvState;
+      let reachedFirstExec!: () => void;
+      const firstExecReached = new Promise<void>((resolve) => { reachedFirstExec = resolve; });
+      let releaseFirstExec!: (response: Response) => void;
+      const firstExecResponse = new Promise<Response>((resolve) => { releaseFirstExec = resolve; });
+      const executed: Array<{ sessionUuid: string; generationId: number; name: string }> = [];
+
+      vi.spyOn(doInstance as any, "containerFetch").mockImplementation(async (request: Request) => {
+        const body = await request.clone().json() as {
+          argv: string[]; expected_session_uuid?: string; expected_generation_id?: number;
+        };
+        const current = (doInstance as any).devenvState;
+        if (body.expected_session_uuid !== current.sessionUuid ||
+            body.expected_generation_id !== current.generationId) {
+          return new Response(JSON.stringify({ error: "devenv_session_identity_mismatch" }), { status: 409 });
+        }
+        const name = body.argv[body.argv.indexOf("--name") + 1];
+        executed.push({ sessionUuid: current.sessionUuid, generationId: current.generationId, name });
+        if (executed.length === 1) {
+          reachedFirstExec();
+          return firstExecResponse;
+        }
+        return snapshotExecResponse(name);
+      });
+
+      const pendingSnapshot = doInstance.snapshot({ force: false });
+      await firstExecReached;
+      await doInstance.stopAuthorizedDevenv({ tenantId: initial.tenantId, sessionUuid: initial.sessionUuid });
+      await startTest(doInstance, {
+        ...initialPayload,
+        config: { ...initialPayload.config, workspaceName: nextWorkspace, profileName: nextProfile },
+      });
+      await doInstance.onStart();
+      const replacement = (doInstance as any).devenvState;
+      expect(replacement.sessionUuid).not.toBe(initial.sessionUuid);
+      expect(replacement.generationId).toBeGreaterThan(initial.generationId);
+
+      releaseFirstExec(snapshotExecResponse(initial.profileName));
+      await expect(pendingSnapshot).rejects.toThrow("DEVENV_SNAPSHOT_SESSION_CHANGED");
+      expect(executed).toEqual([{
+        sessionUuid: initial.sessionUuid,
+        generationId: initial.generationId,
+        name: initial.profileName,
+      }]);
+      expect((doInstance as any).devenvState.sessionUuid).toBe(replacement.sessionUuid);
+    });
+
+    it("routes HTTP snapshots through the same session-bound exec contract", async () => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, testPayload());
+      await doInstance.onStart();
+      const owner = (doInstance as any).devenvState;
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch");
+      const response = await doInstance.fetch(new Request("https://runner.test/v1/customer/devenv/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: false }),
+      }));
+      expect(response.status).toBe(200);
+      expect((await response.json() as { ok: boolean }).ok).toBe(true);
+      const requests = await Promise.all(execSpy.mock.calls.map(async ([request]) =>
+        await (request as Request).clone().json() as Record<string, unknown>));
+      expect(requests).toHaveLength(2);
+      expect(requests.every((request) => request.expected_session_uuid === owner.sessionUuid &&
+        request.expected_generation_id === owner.generationId)).toBe(true);
     });
 
     it("rejects malformed snapshot roots without returning an ok response", async () => {
@@ -636,6 +719,23 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
     });
   });
 });
+
+function snapshotExecResponse(name: string): Response {
+  return new Response(JSON.stringify({
+    exit_code: 0,
+    stdout: JSON.stringify({
+      name,
+      root: "a".repeat(64),
+      files: 1,
+      bytes_total: 1048576,
+      chunks_total: 1,
+      chunks_uploaded: 1,
+      unchanged: false,
+      skipped_external_symlinks: [],
+    }),
+    stderr: "",
+  }), { status: 200 });
+}
 
 function testPayload(): StartPayload {
   return { config: {

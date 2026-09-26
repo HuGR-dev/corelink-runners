@@ -257,6 +257,7 @@ export async function launchAuthorizedDevenv(host: DevenvLaunchHost, payload: Au
       CLW_TENANT: grant.tenantId, WORKSPACE_NAME: config.workspaceName, PROFILE_NAME: config.profileName,
       EXEC_SERVER_AUTH_TOKEN_FILE, EXEC_SERVER_AUTH_TOKEN: host.execToken,
       SESSION_UUID: grant.sessionUuid, BILLING_TENANT_UUID: grant.tenantId,
+      DEVENV_GENERATION_ID: String(generationId),
     };
     await host.credentials.markProviderPossible();
     await host.transition({
