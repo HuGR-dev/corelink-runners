@@ -62,6 +62,7 @@ def validate(workflow):
         reject("hosted build must run the focused contract test")
     for required in (
         "EXPECTED_SOURCE_SHA",
+        'test "${EXPECTED_SOURCE_SHA}" = "${GITHUB_SHA}"',
         'test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"',
         "deploy/cloudflare/Dockerfile.runner-devenv",
         "cp Cargo.toml Cargo.lock",
