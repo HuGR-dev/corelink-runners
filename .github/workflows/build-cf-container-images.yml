@@ -276,8 +276,8 @@ jobs:
             echo '```'
             echo "${{ steps.runner.outputs.ref }}"
             echo '```'
-            printf 'BuildKit manifest: `%s`; config: `%s`.\n' "${{ steps.runner.outputs.build_digest }}" "${{ steps.runner.outputs.config_digest }}"
-            printf 'Disk budget: filesystem `%s` bytes; archive `%s` bytes; uncompressed layers `%s` bytes; post-prune BuildKit `%s` bytes; free before import `%s` bytes.\n' "${{ steps.runner.outputs.disk_filesystem_bytes }}" "${{ steps.runner.outputs.disk_archive_bytes }}" "${{ steps.runner.outputs.disk_uncompressed_layer_bytes }}" "${{ steps.runner.outputs.disk_buildkit_bytes }}" "${{ steps.runner.outputs.disk_free_before_import_bytes }}"
+            printf "BuildKit manifest: \`%s\`; config: \`%s\`.\n" "${{ steps.runner.outputs.build_digest }}" "${{ steps.runner.outputs.config_digest }}"
+            printf "Disk budget: filesystem \`%s\` bytes; archive \`%s\` bytes; uncompressed layers \`%s\` bytes; post-prune BuildKit \`%s\` bytes; free before import \`%s\` bytes.\n" "${{ steps.runner.outputs.disk_filesystem_bytes }}" "${{ steps.runner.outputs.disk_archive_bytes }}" "${{ steps.runner.outputs.disk_uncompressed_layer_bytes }}" "${{ steps.runner.outputs.disk_buildkit_bytes }}" "${{ steps.runner.outputs.disk_free_before_import_bytes }}"
             echo ""
             echo "**CheckHostContainer** (first push — then flip wrangler.jsonc off the Dockerfile)"
             echo '```'
