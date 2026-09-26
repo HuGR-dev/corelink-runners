@@ -42,6 +42,7 @@ printf '[extend]\nuseDefault = true\n' >"$config"
 # The #604 devenv test fixture has separately reviewed synthetic findings.
 # Its synced-main merge resolution repeats the same synthetic fixture.
 # #572 sync-merge snapshot fixture; this exact finding is synthetic.
+# #574 final sync merge carries the same synthetic snapshot-fixture fingerprint.
 cat >"$ignore_file" <<'EOF'
 1400ebbc5c3f0e95d0d813e412bdf15757fccc92:deploy/cloudflare/test/compute-terminal-test-helpers.ts:generic-api-key:3
 014c07ce43b51c9a17b88bf9f915faeb4a499cc3:docs/handoff/2026-09-06-compaction-checkpoint.md:generic-api-key:43
@@ -70,6 +71,7 @@ c5044c0a62389c7d9ca4b7c3d62008a70142026e:deploy/cloudflare/test/devenv-do.test.t
 a6173dd9b2a6d415d31cffda3ac11fa0e67409d0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
 cc936edea8a34815b80fa76184668a29c4d8af5f:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:438
 38e81a9f2bc22e31ebc6adaecae75243d253d660:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:521
+1d01eef441d5566f8aac61701890fc07ba32ca24:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:521
 EOF
 install_scanner() {
   local archive checksum_tool
