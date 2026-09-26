@@ -47,6 +47,7 @@ vi.mock("../src/lib.js", async (importOriginal) => ({
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
 import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
+import { acceptedBillingResponse } from "./helpers/billing-ack";
 
 describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
   let mockStorage: Map<string, any>;
@@ -340,7 +341,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(doInstance, {
@@ -369,6 +370,29 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(body[0].qty).toBeLessThan(480);
     });
 
+    it("does not settle or delete pending usage from a status-only 202", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 202 })));
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, {
+        config: {
+          workspaceName: "status-only-ack",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      });
+      await doInstance.onStart();
+      await doInstance.requestStop();
+      await doInstance.onStop();
+      expect(mockStorage.has("devenv:usage:settled")).toBe(false);
+      expect(mockStorage.has("devenv:usage:pending")).toBe(true);
+    });
+
     it("keeps a failed delivery frozen and blocks a new session until retry succeeds", async () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
@@ -376,7 +400,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const fetchMock = vi.fn()
         .mockRejectedValueOnce(new Error("billing unavailable"))
         .mockRejectedValueOnce(new Error("billing still unavailable"))
-        .mockResolvedValue(new Response("{}", { status: 202 }));
+        .mockImplementation(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       const payload: StartPayload = {
@@ -409,7 +433,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let failDelete = true;
       const storageDelete = mockCtx.storage.delete;
@@ -448,7 +472,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let failPut = true;
       const storagePut = mockCtx.storage.put;
@@ -489,7 +513,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
     it("retains callback time in memory after the first terminal-state write fails", async () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let now = 1000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -518,9 +542,13 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_REGION = "iad";
       let resolveDelivery!: (response: Response) => void;
+      let pendingInit: RequestInit | undefined;
       const fetchMock = vi.fn()
         .mockRejectedValueOnce(new Error("offline"))
-        .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveDelivery = resolve; }));
+        .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise<Response>((resolve) => {
+          pendingInit = init;
+          resolveDelivery = resolve;
+        }));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(instance, testPayload());
@@ -530,14 +558,14 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const retry = instance.requestStop();
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
       const lateCallback = instance.onStop();
-      resolveDelivery(new Response("{}", { status: 202 }));
+      resolveDelivery(acceptedBillingResponse(pendingInit));
       await Promise.all([retry, lateCallback]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       await expect(startTest(instance, testPayload())).resolves.toMatchObject({ status: "starting" });
     });
 
     it("default-disabled billing emits nothing after a later configuration change", async () => {
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(instance, testPayload());
