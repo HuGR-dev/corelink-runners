@@ -21,7 +21,7 @@ RUN curl -fsSL "https://github.com/HuGR-Labs/clw-releases/releases/download/v${C
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1b: Build in-container exec-server from Rust source (musl static)
 # ══════════════════════════════════════════════════════════════════════
-FROM rust:1.82-alpine AS exec-builder
+FROM rust:1.96.0-alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41 AS exec-builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static git make perl
 
@@ -59,7 +59,7 @@ WORKDIR /out
 
 # ttyd v1.7.7
 ARG TTYD_VERSION=1.7.7
-ARG TTYD_SHA256=174ff46b7a2dce51d9ad0b368731551a37c35bd28ab837fec39e7c53d10cf6e3
+ARG TTYD_SHA256=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
 RUN curl -fsSL -o /out/ttyd \
     "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
  && echo "${TTYD_SHA256}  /out/ttyd" | sha256sum -c - \
