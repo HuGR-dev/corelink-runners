@@ -119,11 +119,29 @@ def validate(workflow):
         for line in hosted_publisher.splitlines()
         if "${{ secrets." in line
     }
+    publication_step = re.search(
+        r"(?ms)^      - name: Build, publish, and capture immutable receipt\n"
+        r"(.*?)(?=^      - name: |\Z)",
+        hosted_publisher,
+    )
+    if publication_step is None:
+        reject("hosted DevEnv publish step is missing")
+    publication_step_body = publication_step.group(1)
+    publisher_job_header = hosted_publisher.split("    steps:\n", 1)[0]
+    if "${{ secrets." in publisher_job_header:
+        reject("Cloudflare secrets must not be available to every publisher job step")
     if publisher_secrets != {
         "CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}",
         "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
     }:
         reject("hosted DevEnv publisher must use only the Cloudflare account and token secrets")
+    scoped_secrets = {
+        line.strip()
+        for line in publication_step_body.splitlines()
+        if "${{ secrets." in line
+    }
+    if scoped_secrets != publisher_secrets:
+        reject("Cloudflare secrets must be scoped to the build/publish step only")
 
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
@@ -160,6 +178,7 @@ mutations = (
     ("publisher missing exact SHA guard", "devenv-publish", "inputs.expected_source_sha == github.sha", "true"),
     ("publisher invokes deploy", "devenv-publish", "wrangler containers push", "wrangler deploy"),
     ("publisher reads an extra secret", "devenv-publish", "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}", "CLOUDFLARE_API_TOKEN: ${{ secrets.OTHER_TOKEN }}"),
+    ("publisher secrets moved to job scope", "devenv-publish", "    permissions:\n      contents: read\n    steps:", "    permissions:\n      contents: read\n    env:\n      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}\n      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n    steps:"),
     ("publisher logs secret", "devenv-publish", "Build, publish, and capture immutable receipt", 'echo "${CLOUDFLARE_API_TOKEN}"'),
 )
 for label, job, before, after in mutations:
@@ -240,37 +259,54 @@ def fixture(directory, *, metadata_mode="complete", revision=source_sha,
         "layers": [attestation_layer],
     })
     attestation = put(attestation_manifest, "application/vnd.oci.image.manifest.v1+json")
-    index = {
+    output_index_raw = json_bytes({
         "schemaVersion": 2,
         "manifests": [
-            {**image, "annotations": {
-                "org.opencontainers.image.ref.name": ref_name or image_ref.rsplit(":", 1)[-1],
-            }},
+            image,
             {**attestation, "annotations": {
                 "vnd.docker.reference.type": "attestation-manifest",
                 "vnd.docker.reference.digest": image["digest"],
+            }},
+        ],
+    })
+    output_index = put(output_index_raw, "application/vnd.oci.image.index.v1+json")
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {**output_index, "annotations": {
+                "org.opencontainers.image.ref.name": ref_name or image_ref.rsplit(":", 1)[-1],
             }},
         ],
     }
     if root_size_delta:
         index["manifests"][0]["size"] += root_size_delta
     index_raw = json_bytes(index)
-    index_digest = digest(index_raw)
     metadata = {}
     if metadata_mode == "complete":
         metadata = {
-            "containerimage.digest": index_digest,
+            "containerimage.digest": output_index["digest"],
             "containerimage.config.digest": config["digest"],
             "containerimage.descriptor": {
                 "mediaType": "application/vnd.oci.image.index.v1+json",
-                "digest": index_digest,
-                "size": len(index_raw),
+                "digest": output_index["digest"],
+                "size": len(output_index_raw),
+            },
+        }
+    elif metadata_mode == "manifest":
+        metadata = {
+            "containerimage.digest": image["digest"],
+            "containerimage.descriptor": {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": image["digest"],
+                "size": len(image_manifest),
             },
         }
     elif metadata_mode == "mismatch":
         metadata = {"containerimage.digest": "sha256:" + "f" * 64}
     elif metadata_mode == "config-mismatch":
         metadata = {"containerimage.config.digest": "sha256:" + "f" * 64}
+    elif metadata_mode == "manifest-without-descriptor":
+        metadata = {"containerimage.digest": image["digest"]}
 
     archive_path = directory / "image.oci.tar"
     with tarfile.open(archive_path, "w") as archive:
@@ -306,12 +342,14 @@ def expect_fail(label, **options):
 
 expect_pass("metadata fields present")
 expect_pass("optional metadata fields omitted", metadata_mode="absent")
+expect_pass("manifest-form metadata reconciled", metadata_mode="manifest")
 expect_fail("output digest mismatch", metadata_mode="mismatch")
 expect_fail("config digest mismatch", metadata_mode="config-mismatch")
+expect_fail("manifest digest lacks media type and size", metadata_mode="manifest-without-descriptor")
 expect_fail("descriptor size mismatch", root_size_delta=1)
 expect_fail("revision label mismatch", revision="b" * 40)
 expect_fail("source label mismatch", source="https://example.invalid/repo")
 expect_fail("SLSA subject not bound to runnable image", bound=False)
 expect_fail("unexpected OCI ref name", ref_name="latest")
-print("runner-devenv-oci-verifier.selftest: PASS (9 positive/negative graph cases)")
+print("runner-devenv-oci-verifier.selftest: PASS (11 positive/negative graph cases)")
 PY

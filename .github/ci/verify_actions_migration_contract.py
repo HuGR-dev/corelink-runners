@@ -198,9 +198,22 @@ def validate(documents: dict[str, str]) -> list[str]:
             for required in required_publisher_contract:
                 if required not in publisher:
                     errors.append(f"{name}: hosted DevEnv publisher is missing {required}")
+            publication_step = re.search(
+                r"(?ms)^      - name: Build, publish, and capture immutable receipt\n"
+                r"(.*?)(?=^      - name: |\Z)",
+                publisher,
+            )
+            if publication_step is None:
+                errors.append(f"{name}: hosted DevEnv publication step is missing")
+                publication_step_body = ""
+            else:
+                publication_step_body = publication_step.group(1)
+            publisher_job_header = publisher.split("    steps:\n", 1)[0]
+            if "${{ secrets." in publisher_job_header:
+                errors.append(f"{name}: hosted DevEnv publisher secrets must not be job-scoped")
             publisher_secrets = {
                 line.strip()
-                for line in publisher.splitlines()
+                for line in publication_step_body.splitlines()
                 if "${{ secrets." in line
             }
             if publisher_secrets != {
@@ -306,6 +319,14 @@ def negative_controls(documents: dict[str, str]) -> int:
          lambda s: re.sub(
              r"(?s)(  devenv-publish:\n.*?CLOUDFLARE_API_TOKEN: )\$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}",
              r"\1${{ secrets.OTHER_TOKEN }}",
+             s,
+             count=1,
+         )),
+        ("DevEnv publisher secrets moved to job scope", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-publish:\n.*?    permissions:\n      contents: read\n)    steps:\n",
+             r"\1    env:\n      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}\n"
+             r"      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n    steps:\n",
              s,
              count=1,
          )),

@@ -241,14 +241,17 @@ def verify_archive(
             if not provenance_found:
                 raise VerificationError("OCI graph has no SLSA provenance bound to the runnable image manifest")
 
-            # Buildx metadata varies by exporter: fields can identify the archive
-            # index or the runnable manifest. Reconcile fields when present while
-            # deriving the authoritative digests from verified archive bytes.
-            allowed_output_digests = {index_digest, image_manifest_digest}
+            # Buildx metadata may name the tagged root descriptor or, when its
+            # descriptor explicitly identifies a manifest, the runnable manifest.
+            # The archive graph remains authoritative for every size and digest.
+            named_root_digests = {
+                descriptor_parts(descriptor, "named OCI root descriptor")[0]
+                for descriptor in named_roots
+            }
+            metadata_digest = None
             if "containerimage.digest" in metadata:
                 metadata_digest = metadata["containerimage.digest"]
-                if require_digest(metadata_digest, "BuildKit containerimage.digest") not in allowed_output_digests:
-                    raise VerificationError("BuildKit output digest disagrees with the verified OCI graph")
+                metadata_digest = require_digest(metadata_digest, "BuildKit containerimage.digest")
             if "containerimage.config.digest" in metadata:
                 metadata_config_digest = metadata["containerimage.config.digest"]
                 if require_digest(metadata_config_digest, "BuildKit containerimage.config.digest") != config_digest:
@@ -256,14 +259,32 @@ def verify_archive(
             if "containerimage.descriptor" in metadata:
                 metadata_descriptor = metadata["containerimage.descriptor"]
                 digest, size = descriptor_parts(metadata_descriptor, "BuildKit containerimage.descriptor")
-                if digest == index_digest:
-                    expected_size = len(index_raw)
-                elif digest == image_manifest_digest:
-                    expected_size = descriptors[digest]["size"]
+                media_type = metadata_descriptor.get("mediaType")
+                if digest in named_root_digests:
+                    verified_descriptor = descriptors[digest]
+                elif digest == image_manifest_digest and media_type in IMAGE_MANIFEST_TYPES:
+                    verified_descriptor = descriptors[digest]
                 else:
                     raise VerificationError("BuildKit descriptor digest disagrees with the verified OCI graph")
-                if size != expected_size:
+                if digest in named_root_digests | {image_manifest_digest}:
+                    if media_type != verified_descriptor.get("mediaType"):
+                        raise VerificationError("BuildKit descriptor media type disagrees with the verified OCI graph")
+                if size != verified_descriptor["size"]:
                     raise VerificationError("BuildKit descriptor size disagrees with the verified OCI graph")
+                if metadata_digest is not None and metadata_digest != digest:
+                    raise VerificationError("BuildKit output and descriptor digests disagree")
+
+            if metadata_digest is not None and metadata_digest not in named_root_digests:
+                if metadata_digest != image_manifest_digest:
+                    raise VerificationError("BuildKit output digest is not the named OCI root or runnable manifest")
+                if not isinstance(metadata.get("containerimage.descriptor"), dict):
+                    raise VerificationError("BuildKit manifest digest has no descriptor identifying its media type and size")
+            if metadata_digest is not None:
+                output_digest = metadata_digest
+            elif "containerimage.descriptor" in metadata:
+                output_digest = metadata["containerimage.descriptor"]["digest"]
+            else:
+                output_digest = next(iter(named_root_digests))
 
     except (tarfile.TarError, OSError, KeyError, TypeError, AttributeError) as error:
         if isinstance(error, VerificationError):
@@ -273,7 +294,8 @@ def verify_archive(
     return {
         "source_sha": source_sha,
         "image_ref": image_ref,
-        "index_digest": index_digest,
+        "output_digest": output_digest,
+        "layout_index_digest": index_digest,
         "manifest_digest": image_manifest_digest,
         "config_digest": config_digest,
         "provenance": "verified",
@@ -294,7 +316,7 @@ def main() -> None:
         summary.write("### GitHub-hosted DevEnv build-only proof\n\n")
         summary.write(f"- Source commit: `{result['source_sha']}`\n")
         summary.write(f"- Local OCI image ref: `{result['image_ref']}`\n")
-        summary.write(f"- Verified OCI index digest: `{result['index_digest']}`\n")
+        summary.write(f"- Verified immutable output digest: `{result['output_digest']}`\n")
         summary.write(f"- Runnable manifest digest: `{result['manifest_digest']}`\n")
         summary.write(f"- Config digest: `{result['config_digest']}`\n")
         summary.write("- SLSA provenance: verified and bound to the runnable image manifest\n")
