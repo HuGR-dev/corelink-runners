@@ -813,7 +813,7 @@ export class ContainmentDO extends DurableObject<Env> {
     repoInput: string,
     jobIdInput: string,
     now = Date.now(),
-  ): Promise<{ status: "reserved" | "contained" | "busy" | "effect_eligible" | "completed" | "invalid"; reservation?: ContainmentRedriveReservation }> {
+  ): Promise<{ status: "reserved" | "resumable" | "contained" | "busy" | "completed" | "invalid"; reservation?: ContainmentRedriveReservation }> {
     const identity = normalizeRedriveIdentity(repoInput, jobIdInput);
     if (!identity) return { status: "invalid" };
     const { repo, job_id: jobId } = identity;
@@ -826,11 +826,21 @@ export class ContainmentDO extends DurableObject<Env> {
       const prior = (await s.get(key)) as ContainmentRedriveReservation | undefined;
       if (prior) {
         if (prior.schema_version !== 1 || prior.repo !== repo || prior.job_id !== jobId || typeof prior.owner !== "string" || typeof prior.token !== "string" || prior.path !== "redrive" || prior.effect_id !== redriveEffectId(repo, jobId) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 1 || !Number.isFinite(prior.expires_ms) || !["HELD", "EFFECT_ELIGIBLE", "COMPLETED"].includes(prior.state) || (prior.event_id !== null && typeof prior.event_id !== "string") || typeof prior.completion_observed !== "boolean") return { status: "busy" as const };
-        if (prior.state === "EFFECT_ELIGIBLE") return { status: "effect_eligible" as const, reservation: prior };
+        // Eligibility is a durable recovery handle for this exact owner tuple.
+        // A later redrive may resume it, but may never replace it with a fresh
+        // owner/effect identity. The canonical owner ledger decides whether the
+        // tuple stopped before DRIVING (safe to continue) or already authorized
+        // the provider (observe only, never drive again).
+        // A verified completion is evidence that this effect may already have
+        // reached the provider. Leave it for the matching owner to settle;
+        // resuming it could otherwise authorize a duplicate provider call.
+        if (prior.state === "EFFECT_ELIGIBLE" && prior.completion_observed) return { status: "busy" as const, reservation: prior };
+        if (prior.state === "EFFECT_ELIGIBLE") return { status: "resumable" as const, reservation: prior };
         if (prior.state === "COMPLETED") return { status: "completed" as const, reservation: prior };
         if (prior.state !== "HELD" || prior.expires_ms > now) return { status: "busy" as const, reservation: prior };
-        // Only this exact HELD state may be reclaimed. EFFECT_ELIGIBLE has no
-        // timer/reset path, so no existing effect can ever be reissued.
+        // Only this exact HELD state may be reclaimed. An eligible tuple is
+        // resumed above and is never replaced, so no existing effect can be
+        // reissued under a new owner.
         const reclaimed: ContainmentRedriveReservation = {
           ...prior,
           owner: crypto.randomUUID(),
@@ -884,6 +894,12 @@ export class ContainmentDO extends DurableObject<Env> {
       // Expiry is a fence, not a hint. A worker that read a HELD tuple before
       // its deadline must not promote it after the deadline; it has to reclaim
       // a fresh tuple through reserveRedriveCandidate first.
+      if (reservation.state === "EFFECT_ELIGIBLE") {
+        // Idempotent admission for the exact retained tuple. This is the only
+        // restart path: it neither reissues a permit nor changes owner/effect.
+        if (reservation.completion_observed) return { status: "ineligible" as const };
+        return { status: "eligible" as const, permit: reservationPermit(reservation) };
+      }
       if (reservation.state !== "HELD" || !Number.isFinite(reservation.expires_ms) || reservation.expires_ms <= now) return { status: "ineligible" as const };
       const eligible: ContainmentRedriveReservation = { ...reservation, state: "EFFECT_ELIGIBLE" };
       await s.put(containmentReservationKey(repo, jobId), eligible);
@@ -5941,7 +5957,7 @@ export async function redriveOrphanedJobs(
         } catch {
           continue; // authority uncertainty is fail-closed before any KV seam
         }
-        if (admitted.status !== "reserved" || !admitted.reservation) continue;
+        if ((admitted.status !== "reserved" && admitted.status !== "resumable") || !admitted.reservation) continue;
         reservation = admitted.reservation;
       }
       const reInstallationId = candidate.installationId
@@ -6245,7 +6261,7 @@ export async function retryOrphanedSpawns(
       } catch {
         continue; // authority uncertainty precedes every retry mutation
       }
-      if (admitted.status !== "reserved" || !admitted.reservation) continue;
+      if ((admitted.status !== "reserved" && admitted.status !== "resumable") || !admitted.reservation) continue;
       reservation = admitted.reservation;
     }
     // Commit the retry epoch before any external claim. The authority's result
