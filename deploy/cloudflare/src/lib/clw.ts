@@ -120,7 +120,7 @@ export async function parseClwExecResponse(resp: Response): Promise<ClwExecResul
     const joined = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
-    raw = new TextDecoder("utf-8", { fatal: true }).decode(joined);
+    raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(joined);
   } catch {
     throw new Error("CLW_EXEC_ENVELOPE_INVALID_UTF8");
   }
@@ -196,7 +196,7 @@ export async function containerExec(
   doFetch: (url: string, init?: RequestInit, port?: number) => Promise<Response>,
   argv: readonly string[],
   options: { timeoutMs?: number; execToken?: string } = {},
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<ClwExecResult> {
   const timeoutMs = options.timeoutMs ?? CLW_DEFAULT_TIMEOUT_MS;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (options.execToken) {

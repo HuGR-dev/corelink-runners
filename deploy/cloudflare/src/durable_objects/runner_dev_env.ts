@@ -15,7 +15,7 @@ import {
   validateStateTransition,
 } from "../types/devenv.js";
 import { DevenvCredentials, launchAuthorizedDevenv } from "../lib/devenv_credentials.js";
-import { parseClwExecResponse, parseClwSnapshotReport } from "../lib/clw.js";
+import { parseClwExecResponse, parseClwSnapshotReport, type ClwExecResult } from "../lib/clw.js";
 import { pushUsageEvent } from "../lib.js";
 import { buildDevenvUsageEvent, type DevenvUsageInput } from "../lib/devenv_usage.js";
 import {
@@ -623,7 +623,7 @@ export class RunnerDevEnvDO extends Container<any> {
 
   // ── In-Container Exec Client ─────────────────────────────────────
 
-  private async containerExec(argv: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  private async containerExec(argv: readonly string[]): Promise<ClwExecResult> {
     const req = new Request(`http://localhost:${EXEC_SERVER_PORT}/clw`, {
       method: "POST",
       headers: {

@@ -364,7 +364,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
           tier: "standard-4",
           clwEndpoint: "https://corelink-api.humangr.com",
           clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
-          clwToken: "cl_pat_1234567890abcdef1234567890",
+          clwToken: `cl_${"a".repeat(24)}`,
         },
       });
       await doInstance.onStart();
