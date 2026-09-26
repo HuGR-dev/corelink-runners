@@ -565,7 +565,7 @@ if (process.env.NODE_TEST_CONTEXT) {
     malformed.candidates[0].acknowledgement.body.outcomes[0].index = 1;
     malformed.candidates[6].acknowledgement.body.outcomes[0].index = 1;
     assert.equal(classifySnapshot(bytesFor(malformed)).counts.unresolved, 3);
-    const conflicting = structuredClone(matrix); conflicting.candidates[5].marker_value = "different";
+    const conflicting = structuredClone(matrix); conflicting.candidates[6].marker_value = "different";
     assert.throws(() => classifySnapshot(bytesFor(conflicting)));
   });
 }
