@@ -182,6 +182,33 @@ describe("durable billing recovery", () => {
     expect([...kv.store.keys()].some((key) => key.startsWith("usage:settled:"))).toBe(false);
   });
 
+  it("retains the whole chunk when complete per-record outcomes are reordered", async () => {
+    const kv = kvWithPages({ "usage:1": record("1"), "usage:2": record("2") });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      const events = JSON.parse(String(init?.body)) as { idem_key: string }[];
+      return new Response(JSON.stringify({
+        outcomes: [
+          { index: 1, idem_key: events[1].idem_key, outcome: "accepted" },
+          { index: 0, idem_key: events[0].idem_key, outcome: "accepted" },
+        ],
+        accepted: 2,
+        deduped: 0,
+        rejected: 0,
+        total: 2,
+      }), { status: 202 });
+    }));
+    const result = await flushBillingUsageBacklog({
+      RUNNER_JOB_PATS: kv,
+      BILLING_INGEST_URL: "https://billing.test/usage",
+      BILLING_INGEST_AUTH_KEY: "secret",
+    });
+    expect(result.pushed).toBe(0);
+    expect(result.failed).toBe(2);
+    expect(kv.store.has("usage:1")).toBe(true);
+    expect(kv.store.has("usage:2")).toBe(true);
+    expect([...kv.store.keys()].some((key) => key.startsWith("usage:settled:"))).toBe(false);
+  });
+
   it("retains the record when an acknowledgement has unknown fields or inconsistent counts", async () => {
     for (const invalidShape of ["top_level", "outcome", "counts"] as const) {
       const kv = kvWithPages({ "usage:1": record("1") });

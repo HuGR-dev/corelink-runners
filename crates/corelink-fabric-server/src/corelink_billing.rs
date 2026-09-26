@@ -14,9 +14,11 @@
 //! sends RAW per-event records with a stable `idem_key`; the **aggregator** owns
 //! the rollup + hash-chain + dedup, so this adapter computes NO chain hashes.
 //! At-least-once delivery is fine — `idem_key` makes it idempotent. The ingest
-//! returns `{accepted, deduped, rejected, total}` (auth → 401, unparseable/empty/
-//! oversized batch → 400, per-record validation failure → skipped+counted in
-//! `rejected`, backend fault → 503).
+//! returns an ordered `{outcomes, accepted, deduped, rejected, total}` receipt
+//! (auth → 401, unparseable/empty/oversized batch → 400, record rejection → 422
+//! only when all records reject, durable identity conflict → 409, backend fault
+//! → 503). A 202 alone proves nothing: the exporter validates the exact outcome
+//! and key for every buffered event before it drains the source batch.
 //!
 //! ## Billing model — `runner_slot_seconds` (owner, 2026-06-23)
 //!
@@ -44,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use corelink_fabric::meter::{SlotEventKind, SlotOccupancyEvent};
 use corelink_fabric::{BillingExportTarget, compute_meter};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The runner billable `event_kind` — the canonical wire string the Server TL
 /// pinned (ASK-2 final, 2026-06-23): `corelink-billing-emit`'s
@@ -66,6 +69,8 @@ pub const BILLING_INGEST_AUTH_KEY_ENV: &str = "BILLING_INGEST_AUTH_KEY";
 /// colo / region (IATA-style 3-letter code, e.g. `iad`); on the Northflank
 /// fallback it is the configured Northflank region, also 3 chars.
 pub const BILLING_REGION_ENV: &str = "BILLING_REGION";
+/// Maximum bytes read from one bounded billing acknowledgement.
+const BILLING_ACK_MAX_BYTES: u64 = 1_048_576;
 
 /// One raw usage event in the batch — the per-event wire shape the aggregator
 /// ingests. Serialized as-is; the aggregator wraps/rolls-up + chains.
@@ -89,6 +94,15 @@ pub struct UsageEventData {
     /// Deterministic idempotency key, `BLAKE3(lease_id ‖ billing_period)` as
     /// 64-char hex — the aggregator dedups on this, so at-least-once is safe.
     pub idem_key: String,
+}
+
+/// HTTP result from the billing ingest adapter, including its bounded response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingPostResponse {
+    /// HTTP status from the ingest route.
+    pub status: u16,
+    /// Response body, bounded by [`BILLING_ACK_MAX_BYTES`] in the real adapter.
+    pub body: String,
 }
 
 /// `"YYYY-MM"` (UTC) for an epoch-ms instant, from the frozen
@@ -144,8 +158,13 @@ fn idem_key(lease_id: &str, period: &str) -> String {
 /// `IntrospectHttp`). The composition root supplies a `ureq`-backed impl.
 pub trait BillingPoster: Send + Sync {
     /// POST `json_body` (a JSON array of [`UsageEventData`]) to `url` with the
-    /// `x-corelink-internal-auth: <auth>` header. Returns the HTTP status.
-    fn post_batch(&self, url: &str, auth: &str, json_body: &str) -> anyhow::Result<u16>;
+    /// `x-corelink-internal-auth: <auth>` header. Returns status and bounded body.
+    fn post_batch(
+        &self,
+        url: &str,
+        auth: &str,
+        json_body: &str,
+    ) -> anyhow::Result<BillingPostResponse>;
 }
 
 /// The real `ureq` [`BillingPoster`] (mirrors `UreqIntrospect`): a per-call
@@ -163,7 +182,12 @@ impl UreqBillingPoster {
 }
 
 impl BillingPoster for UreqBillingPoster {
-    fn post_batch(&self, url: &str, auth: &str, json_body: &str) -> anyhow::Result<u16> {
+    fn post_batch(
+        &self,
+        url: &str,
+        auth: &str,
+        json_body: &str,
+    ) -> anyhow::Result<BillingPostResponse> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(self.timeout))
             .http_status_as_error(false)
@@ -179,9 +203,144 @@ impl BillingPoster for UreqBillingPoster {
         for (name, value) in crate::cf_access::cf_access_headers() {
             req = req.header(name, value.as_str());
         }
-        let resp = req.send(json_body)?;
-        Ok(resp.status().as_u16())
+        let mut resp = req.send(json_body)?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .body_mut()
+            .with_config()
+            .limit(BILLING_ACK_MAX_BYTES)
+            .read_to_string()?;
+        Ok(BillingPostResponse { status, body })
     }
+}
+
+fn has_exact_json_keys(value: &Value, required: &[&str], optional: &[&str]) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    required.iter().all(|key| object.contains_key(*key))
+        && object
+            .keys()
+            .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+}
+
+/// Validate the same per-record acknowledgement contract emitted by
+/// `corelink-server::routes::billing_ingest::IngestResponse`. The native
+/// exporter clears buffered events only after this succeeds.
+fn validate_billing_ack(
+    response: &BillingPostResponse,
+    events: &[UsageEventData],
+) -> anyhow::Result<()> {
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| anyhow::anyhow!("billing usage acknowledgement is not valid JSON"))?;
+    anyhow::ensure!(
+        has_exact_json_keys(
+            &value,
+            &["outcomes", "accepted", "deduped", "rejected", "total"],
+            &[]
+        ),
+        "billing usage acknowledgement has missing or unknown top-level fields"
+    );
+    let object = value.as_object().expect("exact object shape checked");
+    let outcomes = object["outcomes"].as_array().ok_or_else(|| {
+        anyhow::anyhow!("billing usage acknowledgement outcomes are not an array")
+    })?;
+    anyhow::ensure!(
+        outcomes.len() == events.len(),
+        "billing usage acknowledgement outcome count mismatch"
+    );
+    let read_count = |name: &str| -> anyhow::Result<usize> {
+        let count = object[name]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("billing usage acknowledgement count {name} is invalid")
+            })?;
+        anyhow::ensure!(
+            count <= events.len(),
+            "billing usage acknowledgement count {name} exceeds the batch"
+        );
+        Ok(count)
+    };
+    let accepted = read_count("accepted")?;
+    let deduped = read_count("deduped")?;
+    let rejected = read_count("rejected")?;
+    let total = read_count("total")?;
+    let (mut actual_accepted, mut actual_deduped, mut actual_rejected) = (0, 0, 0);
+    let mut actual_conflicts = 0;
+    for (index, (outcome, event)) in outcomes.iter().zip(events).enumerate() {
+        anyhow::ensure!(
+            has_exact_json_keys(outcome, &["index", "idem_key", "outcome"], &["reason"]),
+            "billing usage acknowledgement outcome {index} has missing or unknown fields"
+        );
+        let item = outcome.as_object().expect("exact object shape checked");
+        anyhow::ensure!(
+            item["index"].as_u64() == Some(index as u64),
+            "billing usage acknowledgement outcome ordering mismatch"
+        );
+        anyhow::ensure!(
+            item["idem_key"].as_str() == Some(event.idem_key.as_str()),
+            "billing usage acknowledgement idempotency key mismatch"
+        );
+        let kind = item["outcome"].as_str().ok_or_else(|| {
+            anyhow::anyhow!("billing usage acknowledgement outcome kind is invalid")
+        })?;
+        let reason_present = item.contains_key("reason");
+        let reason = item.get("reason").and_then(Value::as_str);
+        match kind {
+            "accepted" => {
+                anyhow::ensure!(
+                    !reason_present,
+                    "accepted billing outcome unexpectedly has a reason"
+                );
+                actual_accepted += 1;
+            }
+            "deduped" => {
+                anyhow::ensure!(
+                    !reason_present,
+                    "deduped billing outcome unexpectedly has a reason"
+                );
+                actual_deduped += 1;
+            }
+            "rejected" => {
+                anyhow::ensure!(
+                    reason.is_some_and(|value| !value.is_empty()),
+                    "rejected billing outcome has no reason"
+                );
+                actual_rejected += 1;
+            }
+            "conflict" => {
+                anyhow::ensure!(
+                    reason.is_some_and(|value| !value.is_empty()),
+                    "conflicting billing outcome has no reason"
+                );
+                actual_conflicts += 1;
+            }
+            _ => anyhow::bail!("billing usage acknowledgement outcome kind is unknown"),
+        }
+    }
+    anyhow::ensure!(
+        accepted == actual_accepted
+            && deduped == actual_deduped
+            && rejected == actual_rejected
+            && total == accepted + deduped,
+        "billing usage acknowledgement counters are inconsistent"
+    );
+    anyhow::ensure!(
+        if actual_conflicts > 0 {
+            response.status == 409
+        } else if actual_rejected == events.len() {
+            response.status == 422
+        } else {
+            response.status == 202
+        },
+        "billing usage acknowledgement status disagrees with outcomes"
+    );
+    anyhow::ensure!(
+        actual_rejected == 0 && actual_conflicts == 0,
+        "billing ingest explicitly rejected or conflicted with an event; retaining batch"
+    );
+    Ok(())
 }
 
 impl CorelinkBillingTarget<UreqBillingPoster> {
@@ -272,10 +431,10 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
         self.buffer.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
-    /// Flush the buffered batch to corelink-billing. On success the buffer is
-    /// cleared; on a transport / non-2xx error the buffer is RETAINED (the next
-    /// tick retries — `idem_key` makes the re-send idempotent) and the error is
-    /// returned. A no-op (and `Ok`) when the buffer is empty.
+    /// Flush the buffered batch to corelink-billing. The complete typed receipt
+    /// must account for every submitted idempotency key before the buffer is
+    /// cleared. Transport, malformed, rejected, and conflicting responses keep
+    /// the batch buffered for repair/retry. A no-op (and `Ok`) when empty.
     ///
     /// Inherent method; the [`BillingExportTarget::flush`] trait method (driven by
     /// the composition root over `dyn BillingExportTarget`) delegates here.
@@ -291,12 +450,14 @@ impl<P: BillingPoster> CorelinkBillingTarget<P> {
                 buf[..buf.len().min(MAX_BATCH)].to_vec()
             };
             let body = serde_json::to_string(&batch)?;
-            let status = self.poster.post_batch(&self.url, &self.auth, &body)?;
-            if !(200..300).contains(&status) {
+            let response = self.poster.post_batch(&self.url, &self.auth, &body)?;
+            if response.status != 202 && response.status != 409 && response.status != 422 {
                 anyhow::bail!(
-                    "corelink-billing ingest returned HTTP {status}; retaining batch for retry"
+                    "corelink-billing ingest returned HTTP {}; retaining batch for retry",
+                    response.status
                 );
             }
+            validate_billing_ack(&response, &batch)?;
             let mut buf = self.buffer.lock().unwrap_or_else(|p| p.into_inner());
             if buf.len() < batch.len() || buf[..batch.len()] != batch[..] {
                 anyhow::bail!("billing buffer changed while acknowledging batch");
@@ -452,6 +613,7 @@ mod tests {
     use corelink_fabric::tenant::TenantId;
 
     use super::*;
+    use serde_json::json;
 
     fn tid(s: &str) -> TenantId {
         TenantId::new(s).expect("valid tenant id")
@@ -467,13 +629,14 @@ mod tests {
         }
     }
 
-    /// A poster that records every batch body it is asked to POST, and returns a
-    /// scripted status (200 unless overridden, or a transport error).
+    /// A poster that records each batch and returns a scripted typed receipt or
+    /// status (202 with accepted outcomes by default, or a transport error).
     struct RecordingPoster {
         status: u16,
         statuses: Mutex<Vec<u16>>,
         transport_ok: bool,
         bodies: Mutex<Vec<String>>,
+        response_body: Option<String>,
     }
     struct BlockingPoster {
         entered: std::sync::Arc<std::sync::Barrier>,
@@ -481,20 +644,51 @@ mod tests {
         bodies: Mutex<Vec<String>>,
     }
     impl BillingPoster for BlockingPoster {
-        fn post_batch(&self, _url: &str, _auth: &str, body: &str) -> anyhow::Result<u16> {
+        fn post_batch(
+            &self,
+            _url: &str,
+            _auth: &str,
+            body: &str,
+        ) -> anyhow::Result<BillingPostResponse> {
             self.bodies.lock().unwrap().push(body.to_string());
             self.entered.wait();
             self.release.wait();
-            Ok(200)
+            Ok(successful_response(body))
+        }
+    }
+    fn successful_response(body: &str) -> BillingPostResponse {
+        let events: Vec<UsageEventData> = serde_json::from_str(body).unwrap();
+        let outcomes: Vec<_> = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                json!({
+                    "index": index,
+                    "idem_key": event.idem_key,
+                    "outcome": "accepted"
+                })
+            })
+            .collect();
+        BillingPostResponse {
+            status: 202,
+            body: json!({
+                "outcomes": outcomes,
+                "accepted": events.len(),
+                "deduped": 0,
+                "rejected": 0,
+                "total": events.len()
+            })
+            .to_string(),
         }
     }
     impl RecordingPoster {
         fn ok() -> Self {
             Self {
-                status: 200,
+                status: 202,
                 statuses: Mutex::new(Vec::new()),
                 transport_ok: true,
                 bodies: Mutex::new(Vec::new()),
+                response_body: None,
             }
         }
         fn status(s: u16) -> Self {
@@ -503,6 +697,7 @@ mod tests {
                 statuses: Mutex::new(Vec::new()),
                 transport_ok: true,
                 bodies: Mutex::new(Vec::new()),
+                response_body: None,
             }
         }
         fn transport_error() -> Self {
@@ -511,6 +706,7 @@ mod tests {
                 statuses: Mutex::new(Vec::new()),
                 transport_ok: false,
                 bodies: Mutex::new(Vec::new()),
+                response_body: None,
             }
         }
         fn bodies(&self) -> Vec<String> {
@@ -518,24 +714,52 @@ mod tests {
         }
         fn scripted(statuses: Vec<u16>) -> Self {
             Self {
-                status: 200,
+                status: 202,
                 statuses: Mutex::new(statuses),
                 transport_ok: true,
                 bodies: Mutex::new(Vec::new()),
+                response_body: None,
+            }
+        }
+        fn with_body(status: u16, response_body: impl Into<String>) -> Self {
+            Self {
+                status,
+                statuses: Mutex::new(Vec::new()),
+                transport_ok: true,
+                bodies: Mutex::new(Vec::new()),
+                response_body: Some(response_body.into()),
             }
         }
     }
     impl BillingPoster for RecordingPoster {
-        fn post_batch(&self, _url: &str, _auth: &str, json_body: &str) -> anyhow::Result<u16> {
+        fn post_batch(
+            &self,
+            _url: &str,
+            _auth: &str,
+            json_body: &str,
+        ) -> anyhow::Result<BillingPostResponse> {
             self.bodies.lock().unwrap().push(json_body.to_string());
             if !self.transport_ok {
                 anyhow::bail!("simulated transport error");
             }
             let mut statuses = self.statuses.lock().unwrap();
-            Ok(if statuses.is_empty() {
+            let status = if statuses.is_empty() {
                 self.status
             } else {
                 statuses.remove(0)
+            };
+            Ok(if let Some(body) = &self.response_body {
+                BillingPostResponse {
+                    status,
+                    body: body.clone(),
+                }
+            } else if status == 202 {
+                successful_response(json_body)
+            } else {
+                BillingPostResponse {
+                    status,
+                    body: String::new(),
+                }
             })
         }
     }
@@ -547,6 +771,122 @@ mod tests {
             "billing-secret",
             "iad",
         )
+    }
+
+    #[test]
+    fn billing_ack_contract_rejects_status_only_and_malformed_vectors() {
+        let event = UsageEventData {
+            tenant_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+            event_kind: RUNNER_SLOT_SECONDS_KIND.into(),
+            qty: 3,
+            billing_period: "2026-06".into(),
+            region: "iad".into(),
+            source: BILLING_SOURCE.into(),
+            time_ms: 1_781_524_800_000,
+            idem_key: idem_key("lease-fixed", "2026-06"),
+        };
+        let body = serde_json::to_string(std::slice::from_ref(&event)).unwrap();
+        let valid = successful_response(&body);
+        let mut vectors = vec![
+            ("status-only success", 202, String::new()),
+            (
+                "missing outcomes",
+                202,
+                r#"{"accepted":1,"deduped":0,"rejected":0,"total":1}"#.into(),
+            ),
+        ];
+        let mut inconsistent = serde_json::from_str::<Value>(&valid.body).unwrap();
+        inconsistent["accepted"] = json!(0);
+        inconsistent["total"] = json!(0);
+        vectors.push(("inconsistent counters", 202, inconsistent.to_string()));
+        let mut reordered = serde_json::from_str::<Value>(&valid.body).unwrap();
+        reordered["outcomes"][0]["index"] = json!(1);
+        vectors.push(("reordered outcome", 202, reordered.to_string()));
+        let mut wrong_key = serde_json::from_str::<Value>(&valid.body).unwrap();
+        wrong_key["outcomes"][0]["idem_key"] = json!("f".repeat(64));
+        vectors.push(("idempotency key mismatch", 202, wrong_key.to_string()));
+
+        for (name, status, body) in vectors {
+            let response = BillingPostResponse { status, body };
+            assert!(
+                validate_billing_ack(&response, std::slice::from_ref(&event)).is_err(),
+                "accepted {name}"
+            );
+        }
+        validate_billing_ack(&valid, std::slice::from_ref(&event))
+            .expect("typed accepted vector passes");
+
+        let mut deduped = serde_json::from_str::<Value>(&valid.body).unwrap();
+        deduped["outcomes"][0]["outcome"] = json!("deduped");
+        deduped["accepted"] = json!(0);
+        deduped["deduped"] = json!(1);
+        let response = BillingPostResponse {
+            status: 202,
+            body: deduped.to_string(),
+        };
+        validate_billing_ack(&response, std::slice::from_ref(&event))
+            .expect("typed deduped vector is idempotent success");
+
+        let mut second = event.clone();
+        second.idem_key = "b".repeat(64);
+        let events = [event.clone(), second];
+        let batch = serde_json::to_string(&events).unwrap();
+        let valid_batch = successful_response(&batch);
+        let mut reordered = serde_json::from_str::<Value>(&valid_batch.body).unwrap();
+        reordered["outcomes"].as_array_mut().unwrap().reverse();
+        let response = BillingPostResponse {
+            status: 202,
+            body: reordered.to_string(),
+        };
+        assert!(
+            validate_billing_ack(&response, &events).is_err(),
+            "complete outcomes in the wrong record order must be rejected"
+        );
+    }
+
+    #[test]
+    fn billing_ack_accepts_the_shared_cross_repository_vector() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../conformance/billing-ingest-ack-v1.json"
+        ))
+        .unwrap();
+        let request: Vec<UsageEventData> =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        let response = BillingPostResponse {
+            status: fixture["response"]["status"].as_u64().unwrap() as u16,
+            body: fixture["response"]["body"].to_string(),
+        };
+        validate_billing_ack(&response, &request)
+            .expect("shared v1 acknowledgement vector matches the native consumer");
+    }
+
+    #[test]
+    fn rejected_and_conflicting_typed_acknowledgements_retain_native_buffer() {
+        for (status, outcome, reason) in [
+            (422, "rejected", "bad_tenant_id"),
+            (409, "conflict", "payload_mismatch"),
+        ] {
+            let t = target(RecordingPoster::ok());
+            t.export(&ev("a", "L1", SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("a", "L1", SlotEventKind::Released, 1_000))
+                .unwrap();
+            let request: Vec<UsageEventData> = serde_json::from_str(
+                &serde_json::to_string(&t.buffer.lock().unwrap().clone()).unwrap(),
+            )
+            .unwrap();
+            let response_body = json!({
+                "outcomes": [{"index": 0, "idem_key": request[0].idem_key, "outcome": outcome, "reason": reason}],
+                "accepted": 0, "deduped": 0, "rejected": if outcome == "rejected" {1} else {0}, "total": 0
+            }).to_string();
+            let t = target(RecordingPoster::with_body(status, response_body));
+            t.export(&ev("a", "L1", SlotEventKind::Acquired, 0))
+                .unwrap();
+            t.export(&ev("a", "L1", SlotEventKind::Released, 1_000))
+                .unwrap();
+            assert!(t.flush().is_err());
+            assert_eq!(t.buffered(), 1, "{outcome} cannot settle the source batch");
+        }
     }
 
     /// Acquire→Released emits ONE event whose qty is the slot's lifetime in
@@ -759,7 +1099,7 @@ mod tests {
 
     #[test]
     fn failed_second_chunk_retries_same_bytes_without_discarding_tail() {
-        let poster = RecordingPoster::scripted(vec![200, 503, 200]);
+        let poster = RecordingPoster::scripted(vec![202, 503, 202]);
         let t = target(poster);
         for i in 0..1_025u64 {
             t.export(&ev("a", &format!("L{i}"), SlotEventKind::Acquired, 0))
@@ -854,7 +1194,7 @@ mod tests {
 
     #[test]
     fn fabric_billing_wire_fixture_is_byte_identical_and_retries_identically() {
-        let t = target(RecordingPoster::scripted(vec![503, 200]));
+        let t = target(RecordingPoster::scripted(vec![503, 202]));
         t.buffer.lock().unwrap().push(UsageEventData {
             tenant_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
             event_kind: RUNNER_SLOT_SECONDS_KIND.into(),
@@ -906,6 +1246,21 @@ mod tests {
             .unwrap();
         assert!(t.flush().is_err(), "500 surfaces as Err");
         assert_eq!(t.buffered(), 1, "batch retained on non-2xx");
+    }
+
+    #[test]
+    fn flush_status_only_success_retains_buffer() {
+        let t = target(RecordingPoster::with_body(202, ""));
+        t.export(&ev("a", "L1", SlotEventKind::Acquired, 0))
+            .unwrap();
+        t.export(&ev("a", "L1", SlotEventKind::Released, 1_000))
+            .unwrap();
+        assert!(t.flush().is_err(), "202 without a typed body is ambiguous");
+        assert_eq!(
+            t.buffered(),
+            1,
+            "status-only response cannot drain source events"
+        );
     }
 
     /// `from_env` wires the target only when ALL THREE env vars are present +

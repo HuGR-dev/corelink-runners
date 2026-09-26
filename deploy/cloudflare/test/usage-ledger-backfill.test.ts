@@ -15,6 +15,7 @@
 // NEW FILE — disjoint from test/index.test.ts (which owns the GitHub-listing
 // reconciler tests) and test/webhook-route.test.ts (the queued spawn spine).
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { acceptedBillingResponse } from "./helpers/billing-ack";
 
 // ── Test double for @cloudflare/containers (mirrors the sibling route tests) ──
 vi.mock("@cloudflare/containers", () => ({
@@ -234,7 +235,7 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
         }
         if (u.includes("/internal/v1/billing/usage")) {
           pushed.push(JSON.parse(String(init?.body)));
-          return new Response(null, { status: 202 });
+          return acceptedBillingResponse(init);
         }
         return new Response("nope", { status: 404 });
       }),
@@ -330,7 +331,7 @@ describe("WP-F usage ledger — reconciler backfill (read side)", () => {
       }
       if (u.includes("/internal/v1/billing/usage")) {
         pushed.push(JSON.parse(String(init?.body)));
-        return new Response(null, { status: 202 });
+        return acceptedBillingResponse(init);
       }
       return new Response("nope", { status: 404 });
     }));

@@ -1567,11 +1567,102 @@ export async function buildUsageEvent(opts: {
   };
 }
 
+const BILLING_ACK_MAX_BYTES = 1_048_576;
+type BillingAckOutcome = "accepted" | "deduped" | "rejected" | "conflict";
+
+function billingAckRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function billingAckExactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  return required.every((key) => Object.hasOwn(value, key))
+    && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
+}
+
+async function readBillingAckBody(response: Response): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > BILLING_ACK_MAX_BYTES)) {
+    throw new Error("billing usage acknowledgement too large");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("billing usage acknowledgement missing body");
+  const decoder = new TextDecoder();
+  let body = "";
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return body + decoder.decode();
+    bytes += value.byteLength;
+    if (bytes > BILLING_ACK_MAX_BYTES) {
+      await reader.cancel();
+      throw new Error("billing usage acknowledgement too large");
+    }
+    body += decoder.decode(value, { stream: true });
+  }
+}
+
+async function validateBillingUsageAck(response: Response, event: UsageEvent): Promise<void> {
+  if (response.status !== 202 && response.status !== 409 && response.status !== 422) {
+    throw new Error(`billing usage-push ${response.status}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readBillingAckBody(response));
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("billing usage acknowledgement")) throw error;
+    throw new Error("billing usage acknowledgement invalid JSON");
+  }
+  if (!billingAckRecord(value)
+    || !billingAckExactKeys(value, ["outcomes", "accepted", "deduped", "rejected", "total"])
+    || !Array.isArray(value.outcomes) || value.outcomes.length !== 1) {
+    throw new Error("billing usage acknowledgement missing outcomes");
+  }
+  const count = (item: unknown): number | null =>
+    typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= 1 ? item : null;
+  const accepted = count(value.accepted);
+  const deduped = count(value.deduped);
+  const rejected = count(value.rejected);
+  const total = count(value.total);
+  if (accepted === null || deduped === null || rejected === null || total === null) {
+    throw new Error("billing usage acknowledgement counts invalid");
+  }
+  const item: unknown = value.outcomes[0];
+  if (!billingAckRecord(item)
+    || !billingAckExactKeys(item, ["index", "idem_key", "outcome"], ["reason"])
+    || item.index !== 0
+    || (item.outcome !== "accepted" && item.outcome !== "deduped"
+      && item.outcome !== "rejected" && item.outcome !== "conflict")) {
+    throw new Error("billing usage acknowledgement outcome invalid");
+  }
+  const outcome = item.outcome as BillingAckOutcome;
+  if (item.idem_key !== event.idem_key) throw new Error("billing usage acknowledgement idem key mismatch");
+  const reason = item.reason;
+  const hasReason = Object.hasOwn(item, "reason");
+  if ((outcome === "rejected" || outcome === "conflict")
+      !== (hasReason && typeof reason === "string" && reason.length > 0)) {
+    throw new Error("billing usage acknowledgement reason invalid");
+  }
+  if ((accepted !== (outcome === "accepted" ? 1 : 0))
+    || (deduped !== (outcome === "deduped" ? 1 : 0))
+    || (rejected !== (outcome === "rejected" ? 1 : 0))
+    || total !== accepted + deduped) {
+    throw new Error("billing usage acknowledgement counts mismatch");
+  }
+  if ((outcome === "conflict" && response.status !== 409)
+    || (outcome === "rejected" && response.status !== 422)
+    || ((outcome === "accepted" || outcome === "deduped") && response.status !== 202)) {
+    throw new Error("billing usage acknowledgement status mismatch");
+  }
+  if (outcome === "rejected" || outcome === "conflict") {
+    throw new Error(`billing usage-push ${outcome}:${String(reason)}`);
+  }
+}
+
 /**
- * POST a batch of one usage event to corelink-billing ingest with the dedicated
- * key. Throws on a non-2xx (the caller swallows it — fail-open). The ingest
- * returns `{accepted, deduped, total}`; we only need the 2xx (the aggregator
- * reconciles, and idem_key makes a retry safe).
+ * POST one usage event to corelink-billing and require the complete typed
+ * per-record acknowledgement before callers can report success or settle an
+ * outbox. Transport, ambiguous, rejected, and conflicting outcomes throw so
+ * durable callers retain their source record for retry or repair.
  */
 export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent, signal?: AbortSignal): Promise<void> {
   const resp = await fetch(env.BILLING_INGEST_URL ?? "", {
@@ -1585,7 +1676,7 @@ export async function pushUsageEvent(env: BillingEnv, ev: UsageEvent, signal?: A
     body: JSON.stringify([ev]),
     ...(signal ? { signal } : {}),
   });
-  if (!resp.ok) throw new Error(`billing usage-push ${resp.status}`);
+  await validateBillingUsageAck(resp, ev);
 }
 
 // ── Durable per-completed-job usage ledger (WP-F) ────────────────────────────

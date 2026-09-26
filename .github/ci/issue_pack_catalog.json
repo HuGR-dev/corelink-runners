@@ -104,5 +104,32 @@
     "commands": [
       ["node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs"]
     ]
+  },
+  "issue-604": {
+    "issue": 604,
+    "pull_request": 634,
+    "exact_paths": true,
+    "paths": [
+      "conformance/billing-ingest-ack-v1.json",
+      "conformance/manifest.sha256",
+      "crates/corelink-fabric-server/src/corelink_billing.rs",
+      "deploy/cloudflare/src/lib.ts",
+      "deploy/cloudflare/test/billing-recovery.test.ts",
+      "deploy/cloudflare/test/containment-intake.test.ts",
+      "deploy/cloudflare/test/devenv-do.test.ts",
+      "deploy/cloudflare/test/helpers/billing-ack.ts",
+      "deploy/cloudflare/test/index.test.ts",
+      "deploy/cloudflare/test/usage-event-conformance.test.ts",
+      "deploy/cloudflare/test/usage-ledger-backfill.test.ts",
+      "docs/contracts/billing-ingest-ack-v1.md",
+      "scripts/ci/secret-scan.sh"
+    ],
+    "commands": [
+      ["npm", "ci"],
+      ["npm", "run", "typecheck"],
+      ["npx", "vitest", "run", "test/index.test.ts", "test/containment-intake.test.ts", "test/devenv-do.test.ts", "test/billing-recovery.test.ts", "test/usage-ledger-backfill.test.ts", "test/usage-event-conformance.test.ts"],
+      ["cargo", "test", "--locked", "--lib", "-p", "corelink-fabric-server", "corelink_billing::tests"],
+      ["cargo", "test", "--locked", "--lib", "-p", "corelink-runners-contracts", "conformance_"]
+    ]
   }
 }

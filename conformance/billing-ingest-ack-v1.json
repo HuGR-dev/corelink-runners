@@ -1,0 +1,30 @@
+{
+  "request": [
+    {
+      "tenant_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "event_kind": "runner_slot_seconds",
+      "qty": 3,
+      "billing_period": "2026-06",
+      "region": "iad",
+      "source": "corelink-runners/fabricd",
+      "time_ms": 1781524800000,
+      "idem_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "response": {
+    "status": 202,
+    "body": {
+      "outcomes": [
+        {
+          "index": 0,
+          "idem_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "outcome": "accepted"
+        }
+      ],
+      "accepted": 1,
+      "deduped": 0,
+      "rejected": 0,
+      "total": 1
+    }
+  }
+}
