@@ -165,6 +165,22 @@ for required in (
     if required not in verifier:
         reject(f"OCI verifier is missing a required graph/provenance check: {required}")
 
+resolver = (Path(sys.argv[1]).parents[2] / "scripts/ci/resolve-pushed-ref.sh").read_text(
+    encoding="utf-8"
+)
+for required in (
+    'expected_ref="${base}:${TAG}"',
+    'manifest inspect -v "${expected_ref}"',
+    'descriptor.get("digest")',
+    'descriptor.get("mediaType")',
+    'Pushed image: ${expected_ref}',
+):
+    if required not in resolver:
+        reject(f"Cloudflare registry receipt resolver is missing: {required}")
+for forbidden in ("manifest-[^@[:space:]]*@sha256:", "did not contain an immutable sha256 digest"):
+    if forbidden in resolver:
+        reject(f"Cloudflare registry receipt resolver trusts unsupported transcript digest data: {forbidden}")
+
 # Negative cases ensure the assertions fail closed on the routing and evidence
 # regressions that would otherwise make this proof unsafe or non-reproducible.
 mutations = (
