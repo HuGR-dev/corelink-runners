@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # Offline self-test for resolve-pushed-ref.sh.
 #
-# Every successful resolution must be an immutable digest. In particular, a
-# push transcript without a digest must fail instead of returning its mutable
-# tag as a deployment reference.
+# Every successful resolution must use a descriptor digest read from the
+# registry. Wrangler's tag-only push transcript must never be mistaken for an
+# immutable reference.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 resolver="${script_dir}/resolve-pushed-ref.sh"
 work="$(mktemp -d)"
 trap 'rm -rf -- "${work}"' EXIT
+
+mkdir -p "${work}/bin"
+cat >"${work}/bin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" != "manifest inspect -v registry.cloudflare.com/account-fixture/fixture-image:deadbeef" ]]; then
+  exit 2
+fi
+cat "${MOCK_MANIFEST}"
+MOCK_DOCKER
+chmod +x "${work}/bin/docker"
+export DOCKER_BIN="${work}/bin/docker"
 
 export CLOUDFLARE_ACCOUNT_ID='account-fixture'
 image='fixture-image'
@@ -38,24 +50,34 @@ expect_fail() {
       "${label}" "${output}" >&2
     exit 1
   fi
-  if [[ "${output}" != *'did not contain an immutable sha256 digest'* ]]; then
+  if [[ "${output}" != *'resolve-pushed-ref:'* ]]; then
     printf 'resolve-pushed-ref selftest: %s: missing fail-closed diagnostic\n' \
       "${label}" >&2
     exit 1
   fi
 }
 
-printf 'manifest-fixture@%s: done\n' "${digest}" >"${work}/manifest.out"
-expect_ref 'manifest digest' "${base}@${digest}" "${work}/manifest.out"
-
-printf 'Pushed image: %s@%s\n' "${base}" "${digest}" >"${work}/pushed.out"
-expect_ref 'Pushed image digest' "${base}@${digest}" "${work}/pushed.out"
+cat >"${work}/remote-manifest.json" <<EOF
+{"Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"${digest}"}}
+EOF
+export MOCK_MANIFEST="${work}/remote-manifest.json"
 
 printf 'Pushed image: %s:%s\n' "${base}" "${tag}" >"${work}/tag-only.out"
-expect_fail 'tag-only transcript' "${work}/tag-only.out"
+expect_ref 'tag-only Wrangler transcript with verified remote digest' \
+  "${base}@${digest}" "${work}/tag-only.out"
 
-printf 'manifest-fixture@sha256:bad: done\n' >"${work}/malformed.out"
-expect_fail 'malformed digest' "${work}/malformed.out"
+printf 'Pushed image: %s:wrong-tag\n' "${base}" >"${work}/wrong-tag.out"
+expect_fail 'wrong tag transcript' "${work}/wrong-tag.out"
+
+printf '{"Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:bad"}}\n' \
+  >"${work}/malformed-remote.json"
+export MOCK_MANIFEST="${work}/malformed-remote.json"
+expect_fail 'malformed remote digest' "${work}/tag-only.out"
+
+printf '{"Descriptor":{"mediaType":"application/vnd.unknown","digest":"%s"}}\n' \
+  "${digest}" >"${work}/unsupported-media.json"
+export MOCK_MANIFEST="${work}/unsupported-media.json"
+expect_fail 'unsupported remote descriptor' "${work}/tag-only.out"
 
 expect_fail 'missing transcript' "${work}/missing.out"
 
