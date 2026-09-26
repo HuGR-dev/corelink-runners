@@ -2,7 +2,7 @@
 // Offline classification and restricted local review journal. No provider/KV access.
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -269,6 +269,23 @@ async function safePaths(journalPath, { allowMissingFile = false } = {}) {
   }
   let fileStat;
   try { fileStat = await lstat(target); } catch (error) { if (error.code !== "ENOENT" || !allowMissingFile) failClosed(); }
+  if (fileStat && fileStat.nlink === 2) {
+    const tempPattern = new RegExp(`^\\.issue-603-journal-${processUid()}-[0-9a-f]{24}\\.tmp$`);
+    const names = (await readdir(parentPath)).filter((name) => tempPattern.test(name));
+    const matchingLinks = [];
+    for (const name of names) {
+      let tempStat;
+      try { tempStat = await lstat(path.join(parentPath, name)); } catch { continue; }
+      if (tempStat.isFile() && !tempStat.isSymbolicLink() && tempStat.nlink === 2
+        && tempStat.uid === processUid() && (tempStat.mode & 0o777) === 0o600
+        && tempStat.dev === fileStat.dev && tempStat.ino === fileStat.ino) matchingLinks.push(name);
+    }
+    if (matchingLinks.length !== 1) failClosed();
+    await unlink(path.join(parentPath, matchingLinks[0]));
+    const directory = await open(parentPath, fsConstants.O_RDONLY);
+    try { await directory.sync(); } finally { await directory.close(); }
+    fileStat = await lstat(target);
+  }
   if (fileStat && (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.nlink !== 1
     || fileStat.uid !== processUid() || (fileStat.mode & 0o777) !== 0o600 || fileStat.size > MAX_JOURNAL_BYTES)) failClosed();
   return { target, parentPath, exists: Boolean(fileStat) };
@@ -510,9 +527,12 @@ if (process.env.NODE_TEST_CONTEXT) {
       const prior = await readFile(journal);
       const temp = path.join(root, `.issue-603-journal-${processUid()}-interrupted.tmp`);
       await writeFixtureFile(temp, "{");
+      const linkedTemp = path.join(root, `.issue-603-journal-${processUid()}-${randomBytes(12).toString("hex")}.tmp`);
+      await link(journal, linkedTemp);
       parseReceipt(command(["--resume", snapshot, "--journal", journal]));
       assert.equal(JSON.parse(await readFile(journal, "utf8")).state, "complete");
       assert.notDeepEqual(await readFile(journal), prior);
+      await assert.rejects(lstat(linkedTemp), { code: "ENOENT" });
     } finally { const { rm } = await import("node:fs/promises"); await rm(root, { recursive: true, force: true }); }
   });
 
