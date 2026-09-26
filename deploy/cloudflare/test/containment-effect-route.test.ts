@@ -204,6 +204,29 @@ describe("canonical containment effect route", () => {
     expect(result.status).toBe("before_drive_refused"); expect(drives).toBe(0); expect(storage.map.size).toBe(0); expect(values.size).toBe(0);
   });
 
+  it("retries a redrive tuple after preparation fails before any provider authorization", async () => {
+    const { ledger } = make();
+    const t = await redriveOwnerTuple("acme/repo", "123", "containment:v1:redrive:acme/repo/123", "owner", "token", 7);
+    let preparations = 0;
+    let drives = 0;
+    const route = () => ({
+      ...deps(ledger, t),
+      admit: async () => true,
+      beforeClaim: async () => {
+        preparations++;
+        if (preparations === 1) throw new Error("credential preparation unavailable");
+      },
+      drive: async () => {
+        drives++;
+        return { resource_id: `job:${t.repo}/${t.job_id}`, receipt_id: "recovered", provider_signature: "signature" };
+      },
+    });
+
+    expect((await runCanonicalEffect(route())).status).toBe("unavailable");
+    expect((await runCanonicalEffect(route())).status).toBe("committed");
+    expect(preparations).toBe(2); expect(drives).toBe(1);
+  });
+
   it("returns a complete identity-bound receipt", async () => {
     const { ledger } = make(); const t = tuple();
     const result = await runCanonicalEffect(deps(ledger, t));
