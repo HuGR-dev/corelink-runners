@@ -31,8 +31,27 @@ vi.mock("@cloudflare/containers", () => {
       async stop() {}
       async destroy() {}
       async schedule(_when: Date, _callback: string, _payload: unknown) {}
-      async containerFetch(_req: any, _port: any): Promise<Response> {
-        return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify({ root: "bafybeicorp", bytes_total: 1048576 }), stderr: "" }), { status: 200 });
+      async containerFetch(req: Request, _port: any): Promise<Response> {
+        const body = await req.clone().json() as { argv?: string[] };
+        const argv = body.argv ?? [];
+        if (!argv.includes("snapshot")) {
+          return new Response(JSON.stringify({ exit_code: 0, stdout: "", stderr: "" }), { status: 200 });
+        }
+        const name = argv[argv.indexOf("--name") + 1];
+        return new Response(JSON.stringify({
+          exit_code: 0,
+          stdout: JSON.stringify({
+            name,
+            root: "a".repeat(64),
+            files: 1,
+            bytes_total: 1048576,
+            chunks_total: 1,
+            chunks_uploaded: 1,
+            unchanged: false,
+            skipped_external_symlinks: [],
+          }),
+          stderr: "",
+        }), { status: 200 });
       }
       renewActivityTimeout() {}
     },
@@ -47,6 +66,7 @@ vi.mock("../src/lib.js", async (importOriginal) => ({
 
 import { RunnerDevEnvDO } from "../src/durable_objects/runner_dev_env";
 import { EXEC_SERVER_AUTH_TOKEN_FILE } from "../src/lib/clw";
+import { acceptedBillingResponse } from "./helpers/billing-ack";
 
 describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
   let mockStorage: Map<string, any>;
@@ -330,17 +350,133 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       });
       await doInstance.onStart();
 
+      const owner = (doInstance as any).devenvState;
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch");
       const snapResp = await doInstance.snapshot({ force: false });
       expect(snapResp.ok).toBe(true);
-      expect(snapResp.workspaceSnapshot.root).toBe("bafybeicorp");
+      expect(snapResp.workspaceSnapshot.root).toBe("a".repeat(64));
       expect(snapResp.workspaceSnapshot.bytesTotal).toBe(1048576);
+      const requests = await Promise.all(execSpy.mock.calls.map(async ([request]) =>
+        await (request as Request).clone().json() as Record<string, unknown>));
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.expected_session_uuid).toBe(owner.sessionUuid);
+        expect(request.expected_generation_id).toBe(owner.generationId);
+      }
+      expect((doInstance as any).envVars.DEVENV_GENERATION_ID).toBe(String(owner.generationId));
+    });
+
+    it.each([
+      ["the same names", "recovery", "default"],
+      ["different names", "replacement-workspace", "replacement-profile"],
+    ])("refuses a pending snapshot after stop and restart with %s", async (_label, nextWorkspace, nextProfile) => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      const initialPayload = testPayload();
+      await startTest(doInstance, initialPayload);
+      await doInstance.onStart();
+      const initial = (doInstance as any).devenvState;
+      let reachedFirstExec!: () => void;
+      const firstExecReached = new Promise<void>((resolve) => { reachedFirstExec = resolve; });
+      let releaseFirstExec!: (response: Response) => void;
+      const firstExecResponse = new Promise<Response>((resolve) => { releaseFirstExec = resolve; });
+      const executed: Array<{ sessionUuid: string; generationId: number; name: string }> = [];
+
+      vi.spyOn(doInstance as any, "containerFetch").mockImplementation(async (request: Request) => {
+        const body = await request.clone().json() as {
+          argv: string[]; expected_session_uuid?: string; expected_generation_id?: number;
+        };
+        const current = (doInstance as any).devenvState;
+        if (body.expected_session_uuid !== current.sessionUuid ||
+            body.expected_generation_id !== current.generationId) {
+          return new Response(JSON.stringify({ error: "devenv_session_identity_mismatch" }), { status: 409 });
+        }
+        const name = body.argv[body.argv.indexOf("--name") + 1];
+        executed.push({ sessionUuid: current.sessionUuid, generationId: current.generationId, name });
+        if (executed.length === 1) {
+          reachedFirstExec();
+          return firstExecResponse;
+        }
+        return snapshotExecResponse(name);
+      });
+
+      const pendingSnapshot = doInstance.snapshot({ force: false });
+      await firstExecReached;
+      await doInstance.stopAuthorizedDevenv({ tenantId: initial.tenantId, sessionUuid: initial.sessionUuid });
+      await startTest(doInstance, {
+        ...initialPayload,
+        config: { ...initialPayload.config, workspaceName: nextWorkspace, profileName: nextProfile },
+      });
+      await doInstance.onStart();
+      const replacement = (doInstance as any).devenvState;
+      expect(replacement.sessionUuid).not.toBe(initial.sessionUuid);
+      expect(replacement.generationId).toBeGreaterThan(initial.generationId);
+
+      releaseFirstExec(snapshotExecResponse(initial.profileName));
+      await expect(pendingSnapshot).rejects.toThrow("DEVENV_SNAPSHOT_SESSION_CHANGED");
+      expect(executed).toEqual([{
+        sessionUuid: initial.sessionUuid,
+        generationId: initial.generationId,
+        name: initial.profileName,
+      }]);
+      expect((doInstance as any).devenvState.sessionUuid).toBe(replacement.sessionUuid);
+    });
+
+    it("routes HTTP snapshots through the same session-bound exec contract", async () => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, testPayload());
+      await doInstance.onStart();
+      const owner = (doInstance as any).devenvState;
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch");
+      const response = await doInstance.fetch(new Request("https://runner.test/v1/customer/devenv/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: false }),
+      }));
+      expect(response.status).toBe(200);
+      expect((await response.json() as { ok: boolean }).ok).toBe(true);
+      const requests = await Promise.all(execSpy.mock.calls.map(async ([request]) =>
+        await (request as Request).clone().json() as Record<string, unknown>));
+      expect(requests).toHaveLength(2);
+      expect(requests.every((request) => request.expected_session_uuid === owner.sessionUuid &&
+        request.expected_generation_id === owner.generationId)).toBe(true);
+    });
+
+    it("rejects malformed snapshot roots without returning an ok response", async () => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, {
+        config: {
+          workspaceName: "my-workspace",
+          profileName: "my-profile",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: `cl_${"a".repeat(24)}`,
+        },
+      });
+      await doInstance.onStart();
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch").mockImplementation(async (req: Request) => {
+        const { argv } = await req.json() as { argv: string[] };
+        const name = argv[argv.indexOf("--name") + 1];
+        const report = {
+          name,
+          root: argv[1] === "/data/workspace" ? "/tmp/invalid-root" : "a".repeat(64),
+          files: 0,
+          bytes_total: 0,
+          chunks_total: 0,
+          chunks_uploaded: 0,
+          unchanged: false,
+          skipped_external_symlinks: [],
+        };
+        return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify(report), stderr: "" }), { status: 200 });
+      });
+
+      await expect(doInstance.snapshot({ force: false })).rejects.toThrow("CLW_SNAPSHOT_REPORT_INVALID_FIELDS");
+      expect(execSpy).toHaveBeenCalledTimes(2);
     });
 
     it("stops gracefully and sends canonical HTTP billing without a duplicate D1 tally", async () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(doInstance, {
@@ -369,6 +505,29 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       expect(body[0].qty).toBeLessThan(480);
     });
 
+    it("does not settle or delete pending usage from a status-only 202", async () => {
+      mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
+      mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
+      mockEnv.BILLING_REGION = "iad";
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 202 })));
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, {
+        config: {
+          workspaceName: "status-only-ack",
+          profileName: "default",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      });
+      await doInstance.onStart();
+      await doInstance.requestStop();
+      await doInstance.onStop();
+      expect(mockStorage.has("devenv:usage:settled")).toBe(false);
+      expect(mockStorage.has("devenv:usage:pending")).toBe(true);
+    });
+
     it("keeps a failed delivery frozen and blocks a new session until retry succeeds", async () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
@@ -376,7 +535,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const fetchMock = vi.fn()
         .mockRejectedValueOnce(new Error("billing unavailable"))
         .mockRejectedValueOnce(new Error("billing still unavailable"))
-        .mockResolvedValue(new Response("{}", { status: 202 }));
+        .mockImplementation(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
       const payload: StartPayload = {
@@ -409,7 +568,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let failDelete = true;
       const storageDelete = mockCtx.storage.delete;
@@ -448,7 +607,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_INGEST_AUTH_KEY = "test-key";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let failPut = true;
       const storagePut = mockCtx.storage.put;
@@ -489,7 +648,7 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
     it("retains callback time in memory after the first terminal-state write fails", async () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_REGION = "iad";
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       let now = 1000;
       vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -518,9 +677,13 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       mockEnv.BILLING_INGEST_URL = "https://billing.test/usage";
       mockEnv.BILLING_REGION = "iad";
       let resolveDelivery!: (response: Response) => void;
+      let pendingInit: RequestInit | undefined;
       const fetchMock = vi.fn()
         .mockRejectedValueOnce(new Error("offline"))
-        .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveDelivery = resolve; }));
+        .mockImplementationOnce((_url: string, init?: RequestInit) => new Promise<Response>((resolve) => {
+          pendingInit = init;
+          resolveDelivery = resolve;
+        }));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(instance, testPayload());
@@ -530,14 +693,14 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
       const retry = instance.requestStop();
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
       const lateCallback = instance.onStop();
-      resolveDelivery(new Response("{}", { status: 202 }));
+      resolveDelivery(acceptedBillingResponse(pendingInit));
       await Promise.all([retry, lateCallback]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       await expect(startTest(instance, testPayload())).resolves.toMatchObject({ status: "starting" });
     });
 
     it("default-disabled billing emits nothing after a later configuration change", async () => {
-      const fetchMock = vi.fn(async () => new Response("{}", { status: 202 }));
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => acceptedBillingResponse(init));
       vi.stubGlobal("fetch", fetchMock);
       const instance = new RunnerDevEnvDO(mockCtx, mockEnv);
       await startTest(instance, testPayload());
@@ -584,6 +747,23 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
     });
   });
 });
+
+function snapshotExecResponse(name: string): Response {
+  return new Response(JSON.stringify({
+    exit_code: 0,
+    stdout: JSON.stringify({
+      name,
+      root: "a".repeat(64),
+      files: 1,
+      bytes_total: 1048576,
+      chunks_total: 1,
+      chunks_uploaded: 1,
+      unchanged: false,
+      skipped_external_symlinks: [],
+    }),
+    stderr: "",
+  }), { status: 200 });
+}
 
 function testPayload(): StartPayload {
   return { config: {

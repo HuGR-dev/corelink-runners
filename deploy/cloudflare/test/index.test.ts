@@ -3,6 +3,8 @@
 // Plain vitest (node) — these functions don't need the Workers runtime
 // (crypto.subtle + crypto.randomUUID are on Node 20+).
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   safeEqual,
   verifyGithubHmac,
@@ -38,8 +40,16 @@ import {
   type CredStashLike,
   type StashedCred,
   type StashRecord,
+  type UsageEvent,
 } from "../src/lib";
 import { runnerCredentialLeaseId } from "../src/lib/runner_credential_lease";
+
+const BILLING_ACK_VECTOR = JSON.parse(readFileSync(fileURLToPath(
+  new URL("../../../conformance/billing-ingest-ack-v1.json", import.meta.url),
+), "utf8")) as {
+  request: UsageEvent[];
+  response: { status: number; body: Record<string, unknown> };
+};
 
 describe("safeEqual (constant-time bearer compare)", () => {
   it("true for equal strings", () => expect(safeEqual("abc", "abc")).toBe(true));
@@ -922,21 +932,18 @@ describe("billing usage-push (ASK-2, canonical runner_slot_seconds unit)", () =>
     expect(ev.qty).toBe(0);
   });
 
-  it("pushUsageEvent POSTs a one-event batch with the dedicated key on 2xx", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+  it("pushUsageEvent accepts the shared typed server response vector", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify(BILLING_ACK_VECTOR.response.body),
+      { status: BILLING_ACK_VECTOR.response.status },
+    ));
     vi.stubGlobal("fetch", fetchMock);
     const env = {
       BILLING_INGEST_URL: "https://corelink-api.humangr.com/internal/v1/billing/usage",
       BILLING_INGEST_AUTH_KEY: "billing-key",
       CLW_TENANT: "t",
     };
-    const ev = await buildUsageEvent({
-      tenantId: "t",
-      jobId: "j",
-      startedMs: 0,
-      completedMs: 2000,
-      region: "iad",
-    });
+    const ev = BILLING_ACK_VECTOR.request[0];
     await pushUsageEvent(env, ev);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/internal/v1/billing/usage");
@@ -946,11 +953,62 @@ describe("billing usage-push (ASK-2, canonical runner_slot_seconds unit)", () =>
     expect((init as RequestInit).headers).toMatchObject({ "x-corelink-internal-auth": "billing-key" });
   });
 
+  it("pushUsageEvent treats only a typed deduped outcome as replay success", async () => {
+    const body = structuredClone(BILLING_ACK_VECTOR.response.body) as any;
+    body.outcomes[0].outcome = "deduped";
+    body.accepted = 0;
+    body.deduped = 1;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 202 })));
+    await expect(pushUsageEvent({
+      BILLING_INGEST_URL: "https://x/usage",
+      BILLING_INGEST_AUTH_KEY: "k",
+    }, BILLING_ACK_VECTOR.request[0])).resolves.toBeUndefined();
+  });
+
   it("pushUsageEvent throws on non-2xx (caller swallows — fail-open)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("bad", { status: 400 })));
     const env = { BILLING_INGEST_URL: "https://x/usage", BILLING_INGEST_AUTH_KEY: "k", CLW_TENANT: "t" };
     const ev = await buildUsageEvent({ tenantId: "t", jobId: "j", startedMs: 0, completedMs: 1000, region: "iad" });
     await expect(pushUsageEvent(env, ev)).rejects.toThrow(/billing usage-push 400/);
+  });
+
+  it("pushUsageEvent rejects status-only, malformed, reordered, inconsistent, oversized, rejected, and conflicting acknowledgements", async () => {
+    const ev = BILLING_ACK_VECTOR.request[0];
+    const valid = BILLING_ACK_VECTOR.response.body;
+    const missingOutcomes = { ...valid };
+    delete missingOutcomes.outcomes;
+    const inconsistentCounts = { ...valid, accepted: 0, total: 0 };
+    const reordered = structuredClone(valid) as any;
+    reordered.outcomes[0].index = 1;
+    const mismatchedKey = structuredClone(valid) as any;
+    mismatchedKey.outcomes[0].idem_key = "f".repeat(64);
+    const rejected = {
+      outcomes: [{ index: 0, idem_key: ev.idem_key, outcome: "rejected", reason: "bad_tenant_id" }],
+      accepted: 0, deduped: 0, rejected: 1, total: 0,
+    };
+    const conflict = {
+      outcomes: [{ index: 0, idem_key: ev.idem_key, outcome: "conflict", reason: "payload_mismatch" }],
+      accepted: 0, deduped: 0, rejected: 0, total: 0,
+    };
+    const vectors: [string, number, string][] = [
+      ["status-only success", 202, "{}"],
+      ["missing outcomes", 202, JSON.stringify(missingOutcomes)],
+      ["inconsistent counters", 202, JSON.stringify(inconsistentCounts)],
+      ["reordered outcome", 202, JSON.stringify(reordered)],
+      ["mismatched idem key", 202, JSON.stringify(mismatchedKey)],
+      ["explicit rejection", 422, JSON.stringify(rejected)],
+      ["explicit conflict", 409, JSON.stringify(conflict)],
+      ["invalid JSON", 202, "{"],
+      ["oversized body", 202, "x".repeat(1_048_577)],
+    ];
+    for (const [name, status, body] of vectors) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
+      await expect(pushUsageEvent({
+        BILLING_INGEST_URL: "https://x/usage",
+        BILLING_INGEST_AUTH_KEY: "k",
+      }, ev), name).rejects.toThrow();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

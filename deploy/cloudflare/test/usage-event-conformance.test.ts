@@ -142,7 +142,16 @@ describe("conformance: UsageEvent ↔ conformance/UsageEvent.json", () => {
       fileURLToPath(new URL("../../../conformance/spawn-worker-billing-wire.json", import.meta.url)),
       "utf8",
     );
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ accepted: 1 }), { status: 202 }));
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const events = JSON.parse(String(init?.body)) as UsageEvent[];
+      return new Response(JSON.stringify({
+        outcomes: events.map((event, index) => ({ index, idem_key: event.idem_key, outcome: "accepted" })),
+        accepted: events.length,
+        deduped: 0,
+        rejected: 0,
+        total: events.length,
+      }), { status: 202 });
+    });
     vi.stubGlobal("fetch", fetchMock);
     try {
       const event = await buildUsageEvent({
