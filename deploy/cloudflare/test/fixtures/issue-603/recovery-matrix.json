@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cases": [
+    { "name": "accepted", "job_id": "job-accepted", "outcome": "accepted", "http_status": 202 },
+    { "name": "deduped", "job_id": "job-deduped", "outcome": "deduped", "http_status": 202 },
+    { "name": "rejected", "job_id": "job-rejected", "outcome": "rejected", "http_status": 422 },
+    { "name": "conflict", "job_id": "job-conflict", "outcome": "conflict", "http_status": 409 },
+    { "name": "missing_ack", "job_id": "job-missing", "outcome": null, "http_status": null },
+    { "name": "duplicate_accepted", "duplicate_of": "accepted" },
+    { "name": "interrupted_missing_source", "job_id": "job-interrupted", "outcome": null, "http_status": null, "source_present": false }
+  ]
+}

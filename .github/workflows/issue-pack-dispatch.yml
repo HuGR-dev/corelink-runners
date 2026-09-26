@@ -7,7 +7,7 @@ on:
         description: Allowlisted acceptance pack
         required: true
         type: choice
-        options: [issue-566, issue-570, issue-575, issue-578, issue-580, issue-586, issue-602]
+        options: [issue-566, issue-570, issue-575, issue-578, issue-580, issue-586, issue-602, issue-603]
       candidate_sha:
         description: Exact 40-character PR head SHA
         required: true
@@ -121,7 +121,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node for Worker packs
-        if: steps.candidate_checkout.outcome == 'success' && (inputs.pack_id == 'issue-566' || inputs.pack_id == 'issue-570' || inputs.pack_id == 'issue-586' || inputs.pack_id == 'issue-602')
+        if: steps.candidate_checkout.outcome == 'success' && (inputs.pack_id == 'issue-566' || inputs.pack_id == 'issue-570' || inputs.pack_id == 'issue-586' || inputs.pack_id == 'issue-602' || inputs.pack_id == 'issue-603')
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22.19.0'
