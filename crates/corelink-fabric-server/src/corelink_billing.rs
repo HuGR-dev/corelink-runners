@@ -785,7 +785,7 @@ mod tests {
             time_ms: 1_781_524_800_000,
             idem_key: idem_key("lease-fixed", "2026-06"),
         };
-        let body = serde_json::to_string(&[event.clone()]).unwrap();
+        let body = serde_json::to_string(std::slice::from_ref(&event)).unwrap();
         let valid = successful_response(&body);
         let mut vectors = vec![
             ("status-only success", 202, String::new()),
@@ -809,11 +809,12 @@ mod tests {
         for (name, status, body) in vectors {
             let response = BillingPostResponse { status, body };
             assert!(
-                validate_billing_ack(&response, &[event.clone()]).is_err(),
+                validate_billing_ack(&response, std::slice::from_ref(&event)).is_err(),
                 "accepted {name}"
             );
         }
-        validate_billing_ack(&valid, &[event.clone()]).expect("typed accepted vector passes");
+        validate_billing_ack(&valid, std::slice::from_ref(&event))
+            .expect("typed accepted vector passes");
 
         let mut deduped = serde_json::from_str::<Value>(&valid.body).unwrap();
         deduped["outcomes"][0]["outcome"] = json!("deduped");

@@ -39,6 +39,7 @@ printf '[extend]\nuseDefault = true\n' >"$config"
 # produces a different fingerprint and remains visible to the scanner.
 # #604's shared billing ACK fixture uses a synthetic repeated-character
 # idempotency key; these exact findings are fixture data, not credentials.
+# Its devenv test fixture has this separately reviewed synthetic finding.
 cat >"$ignore_file" <<'EOF'
 1400ebbc5c3f0e95d0d813e412bdf15757fccc92:deploy/cloudflare/test/compute-terminal-test-helpers.ts:generic-api-key:3
 014c07ce43b51c9a17b88bf9f915faeb4a499cc3:docs/handoff/2026-09-06-compaction-checkpoint.md:generic-api-key:43
@@ -62,6 +63,7 @@ d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.t
 91af0ac8a08ae8199bf9ed7f57a6bbdb8d7bd3e0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:234
 982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:11
 982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:20
+982f5300a5005689f0ded5026f2e80a282981b3b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
 EOF
 install_scanner() {
   local archive checksum_tool
