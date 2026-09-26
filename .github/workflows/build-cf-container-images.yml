@@ -53,20 +53,21 @@
 name: build-cf-container-images
 
 on:
-  # Manual-only: production publishing and the isolated DevEnv build proof are
-  # explicit operations. The production path is accepted only from main.
+  # Manual-only: production publishing, isolated DevEnv proof, and DevEnv-only
+  # digest publication are explicit operations.
   workflow_dispatch:
     inputs:
       operation:
-        description: Select a credentialed production publish or a secretless hosted DevEnv build proof.
+        description: Select production publish, secretless hosted DevEnv proof, or hosted DevEnv digest publication.
         type: choice
         required: true
         default: production-publish
         options:
           - production-publish
           - devenv-build-only
+          - devenv-publish
       expected_source_sha:
-        description: Required full commit SHA for devenv-build-only; must equal this dispatch ref's SHA.
+        description: Required full commit SHA for DevEnv operations; must equal this dispatch ref's SHA.
         type: string
         required: false
 
@@ -97,6 +98,17 @@ jobs:
               if [[ ! "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
                  [[ "${EXPECTED_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
                 echo "::error::DevEnv proof requires expected_source_sha to match this dispatch commit exactly."
+                exit 1
+              fi
+              ;;
+            devenv-publish)
+              if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+                echo "::error::DevEnv publication may only be dispatched from refs/heads/main."
+                exit 1
+              fi
+              if [[ ! "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+                 [[ "${EXPECTED_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
+                echo "::error::DevEnv publication requires expected_source_sha to match the main dispatch commit exactly."
                 exit 1
               fi
               ;;
@@ -187,168 +199,8 @@ jobs:
             --metadata-file "${METADATA}" \
             "${WORK}/context"
 
-          python3 - "${ARCHIVE}" "${METADATA}" "${IMAGE_REF}" "${GITHUB_SHA}" <<'PY'
-          import gzip
-          import hashlib
-          import json
-          import os
-          import re
-          import sys
-          import tarfile
-
-          archive_path, metadata_path, image_ref, source_sha = sys.argv[1:]
-          digest_re = re.compile(r"^sha256:[0-9a-f]{64}$")
-
-          def fail(message):
-              raise SystemExit(message)
-
-          def read_member(archive, name):
-              stream = archive.extractfile(name)
-              if stream is None:
-                  fail(f"OCI archive member is not a file: {name}")
-              return stream.read()
-
-          def verify_blob(archive, digest):
-              name = blob_path(digest)
-              stream = archive.extractfile(name)
-              if stream is None:
-                  fail(f"OCI blob is missing: {digest}")
-              hasher = hashlib.sha256()
-              while chunk := stream.read(1024 * 1024):
-                  hasher.update(chunk)
-              actual = "sha256:" + hasher.hexdigest()
-              if actual != digest:
-                  fail(f"OCI blob digest mismatch: {digest}")
-
-          def verified_json(archive, digest):
-              raw = read_member(archive, blob_path(digest))
-              if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
-                  fail(f"OCI JSON blob digest mismatch: {digest}")
-              return json.loads(raw)
-
-          def blob_path(digest):
-              algorithm, separator, value = digest.partition(":")
-              if algorithm != "sha256" or not separator or len(value) != 64:
-                  fail(f"malformed OCI digest: {digest}")
-              return f"blobs/{algorithm}/{value}"
-
-          metadata = json.load(open(metadata_path, encoding="utf-8"))
-          manifest_digest = metadata.get("containerimage.digest", "")
-          config_digest = metadata.get("containerimage.config.digest", "")
-          if not digest_re.fullmatch(manifest_digest) or not digest_re.fullmatch(config_digest):
-              fail("BuildKit did not return valid immutable manifest/config digests")
-          if metadata.get("containerimage.descriptor", {}).get("digest") != manifest_digest:
-              fail("BuildKit digest and descriptor metadata disagree")
-
-          provenance_found = False
-          with tarfile.open(archive_path, "r:*") as archive:
-              layout = json.loads(read_member(archive, "oci-layout"))
-              if layout.get("imageLayoutVersion") != "1.0.0":
-                  fail("unsupported OCI image layout version")
-              index = json.loads(read_member(archive, "index.json"))
-              root_descriptors = index.get("manifests", [])
-              ref_names = {
-                  item.get("annotations", {}).get("org.opencontainers.image.ref.name")
-                  for item in root_descriptors
-              }
-              if image_ref not in ref_names:
-                  fail("OCI index does not preserve the exact requested image ref")
-
-              pending = list(root_descriptors)
-              seen = set()
-              image_manifest_digest = ""
-              config = None
-              attestation_manifests = []
-              output_descriptor_found = False
-              while pending:
-                  descriptor = pending.pop()
-                  digest = descriptor.get("digest", "")
-                  if digest in seen:
-                      continue
-                  seen.add(digest)
-                  verify_blob(archive, digest)
-                  document = verified_json(archive, digest)
-                  if digest == manifest_digest:
-                      output_descriptor_found = True
-                  children = document.get("manifests")
-                  if isinstance(children, list):
-                      pending.extend(children)
-                      continue
-
-                  if document.get("config", {}).get("digest") == config_digest:
-                      image_manifest_digest = digest
-                      for layer in document.get("layers", []):
-                          verify_blob(archive, layer.get("digest", ""))
-                      config = verified_json(archive, config_digest)
-
-                  annotations = descriptor.get("annotations", {})
-                  if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
-                      attestation_manifests.append((descriptor, document))
-
-              if not output_descriptor_found:
-                  fail("BuildKit output digest is absent from the OCI archive descriptor graph")
-              if not image_manifest_digest or config is None:
-                  fail("OCI archive lacks the configured runnable image manifest")
-              labels = config.get("config", {}).get("Labels", {}) or {}
-              if labels.get("org.opencontainers.image.revision") != source_sha:
-                  fail("OCI config revision label does not match the dispatch source SHA")
-              if labels.get("org.opencontainers.image.source") != "https://github.com/HuGR-dev/corelink-runners":
-                  fail("OCI config source label does not match this repository")
-
-              bound_digests = {
-                  manifest_digest.removeprefix("sha256:"),
-                  image_manifest_digest.removeprefix("sha256:"),
-                  config_digest.removeprefix("sha256:"),
-              }
-              for descriptor, attestation in attestation_manifests:
-                  annotations = descriptor.get("annotations", {})
-                  if annotations.get("vnd.docker.reference.digest", "").removeprefix("sha256:") not in bound_digests:
-                      continue
-                  subject = attestation.get("subject", {})
-                  if subject and subject.get("digest", {}).get("sha256") not in bound_digests:
-                      continue
-                  for layer in attestation.get("layers", []):
-                      payload = read_member(archive, blob_path(layer["digest"]))
-                      if "sha256:" + hashlib.sha256(payload).hexdigest() != layer["digest"]:
-                          fail(f"provenance blob digest mismatch: {layer['digest']}")
-                      if layer.get("mediaType", "").endswith("+gzip"):
-                          payload = gzip.decompress(payload)
-                      try:
-                          statement = json.loads(payload)
-                      except json.JSONDecodeError:
-                          continue
-                      predicate = statement.get("predicateType", "")
-                      subjects = statement.get("subject", [])
-                      digest_bound = any(
-                          item.get("digest", {}).get("sha256") in bound_digests
-                          for item in subjects
-                      )
-                      if predicate.startswith("https://slsa.dev/provenance/") and digest_bound:
-                          provenance_found = True
-                          print(f"Verified provenance predicate: {predicate}")
-                          break
-                  if provenance_found:
-                      break
-
-          if not provenance_found:
-              fail("OCI archive has no SLSA provenance attestation bound to the image digest")
-          result = {
-              "source_sha": source_sha,
-              "image_ref": image_ref,
-              "manifest_digest": manifest_digest,
-              "config_digest": config_digest,
-              "provenance": "verified",
-          }
-          print(json.dumps(result, sort_keys=True))
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("### GitHub-hosted DevEnv build-only proof\n\n")
-              summary.write(f"- Source commit: `{source_sha}`\n")
-              summary.write(f"- Local OCI image ref: `{image_ref}`\n")
-              summary.write(f"- Immutable manifest digest: `{manifest_digest}`\n")
-              summary.write(f"- Config digest: `{config_digest}`\n")
-              summary.write("- SLSA provenance: verified and bound to the image digest\n")
-              summary.write("- Publication/config pin changes: none\n")
-          PY
+          python3 scripts/ci/verify_runner_devenv_oci.py \
+            "${ARCHIVE}" "${METADATA}" "${IMAGE_REF}" "${GITHUB_SHA}"
 
   build-and-push:
     needs: validate-dispatch
@@ -582,3 +434,105 @@ jobs:
             echo "${{ steps.devenv.outputs.ref }}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  # One-image GitHub-hosted publication route for B-114. It runs only after an
+  # explicit exact-SHA dispatch from main and never deploys or edits a pin.
+  devenv-publish:
+    needs: validate-dispatch
+    if: ${{ needs.validate-dispatch.result == 'success' && inputs.operation == 'devenv-publish' && github.ref == 'refs/heads/main' && inputs.expected_source_sha == github.sha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Guard — require Cloudflare publication credentials
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" || -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN repository secrets are required."
+            exit 1
+          fi
+          if [[ ! "${CLOUDFLARE_ACCOUNT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID must be a 32-character hex account identifier."
+            exit 1
+          fi
+
+      - name: Checkout exact protected main commit
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Bind publication to the exact main source SHA
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "${EXPECTED_SOURCE_SHA}" = "${GITHUB_SHA}"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Install Wrangler dependencies
+        working-directory: deploy/cloudflare
+        run: npm ci
+
+      - name: Build, publish, and capture immutable receipt
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          IMAGE="corelink-runner-devenv"
+          TAG="${GITHUB_SHA}"
+          WORK="${RUNNER_TEMP}/runner-devenv-publish-${GITHUB_RUN_ID}"
+          CONTEXT="${WORK}/context"
+          OUTPUT="${WORK}/wrangler-push.txt"
+          RECEIPT="${RUNNER_TEMP}/runner-devenv-publication-receipt.json"
+          mkdir -p "${CONTEXT}"
+          cp Cargo.toml Cargo.lock "${CONTEXT}/"
+          cp -R crates "${CONTEXT}/"
+          cp deploy/cloudflare/entrypoint.sh deploy/cloudflare/supervisord.conf "${CONTEXT}/"
+          cp deploy/cloudflare/Dockerfile.runner-devenv "${CONTEXT}/Dockerfile"
+
+          docker build \
+            --file "${CONTEXT}/Dockerfile" \
+            --tag "${IMAGE}:${TAG}" \
+            --label "org.opencontainers.image.source=https://github.com/HuGR-dev/corelink-runners" \
+            --label "org.opencontainers.image.revision=${EXPECTED_SOURCE_SHA}" \
+            "${CONTEXT}"
+
+          if ! ( cd deploy/cloudflare && npx wrangler containers push "${IMAGE}:${TAG}" > "${OUTPUT}" 2>&1 ); then
+            echo "::error::Cloudflare container publication failed; review provider-side run diagnostics."
+            exit 1
+          fi
+          if ! REF="$(scripts/ci/resolve-pushed-ref.sh "${IMAGE}" "${TAG}" "${OUTPUT}" 2>"${WORK}/resolve-error.txt")"; then
+            echo "::error::Cloudflare push completed without a verifiable immutable digest."
+            exit 1
+          fi
+          if [[ ! "${REF}" =~ ^registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/${IMAGE}@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Cloudflare push did not resolve to the expected immutable RunnerDevEnv digest."
+            exit 1
+          fi
+          DIGEST="${REF##*@}"
+          printf '{"operation":"devenv-publish","image":"%s","source_sha":"%s","digest":"%s","run_id":"%s"}\n' \
+            "${IMAGE}" \
+            "${EXPECTED_SOURCE_SHA}" "${DIGEST}" "${GITHUB_RUN_ID}" > "${RECEIPT}"
+          {
+            echo "### GitHub-hosted RunnerDevEnv publication receipt"
+            echo ""
+            echo "- Source commit: \`${EXPECTED_SOURCE_SHA}\`"
+            echo "- Immutable image reference: \`registry.cloudflare.com/<redacted>/${IMAGE}@${DIGEST}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Publication run: \`${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\`"
+            echo "- Deployment and Wrangler pin changes: none"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain redacted immutable publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-devenv-publication-receipt
+          path: ${{ runner.temp }}/runner-devenv-publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90

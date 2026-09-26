@@ -162,11 +162,12 @@ def validate(documents: dict[str, str]) -> list[str]:
             expected_runners = {
                 "validate-dispatch": "ubuntu-latest",
                 "devenv-build-only": "ubuntu-latest",
+                "devenv-publish": "ubuntu-24.04",
                 "build-and-push": "corelink",
             }
             if set(jobs) != set(expected_runners):
                 errors.append(
-                    f"{name}: jobs must remain limited to the guarded hosted DevEnv proof "
+                    f"{name}: jobs must remain limited to guarded DevEnv proof/publication "
                     "and the corelink production publisher"
                 )
             for job, runner in expected_runners.items():
@@ -179,6 +180,40 @@ def validate(documents: dict[str, str]) -> list[str]:
                     errors.append(
                         f"{name}: hosted job {hosted_job} must not read secrets or environments"
                     )
+            publisher = jobs.get("devenv-publish", "")
+            required_publisher_contract = (
+                "inputs.operation == 'devenv-publish'",
+                "github.ref == 'refs/heads/main'",
+                "inputs.expected_source_sha == github.sha",
+                "CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}",
+                "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
+                "wrangler containers push",
+                "> \"${OUTPUT}\" 2>&1",
+                "scripts/ci/resolve-pushed-ref.sh",
+                "runner-devenv-publication-receipt.json",
+                "<redacted>",
+                "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+                "retention-days: 90",
+            )
+            for required in required_publisher_contract:
+                if required not in publisher:
+                    errors.append(f"{name}: hosted DevEnv publisher is missing {required}")
+            publisher_secrets = {
+                line.strip()
+                for line in publisher.splitlines()
+                if "${{ secrets." in line
+            }
+            if publisher_secrets != {
+                "CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}",
+                "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
+            }:
+                errors.append(f"{name}: hosted DevEnv publisher secret access is broader than required")
+            for forbidden in ("wrangler deploy", "wrangler.jsonc", "pull_request:", "packages: write"):
+                if forbidden in publisher:
+                    errors.append(f"{name}: hosted DevEnv publisher must not contain {forbidden}")
+            for forbidden in ('echo "${CLOUDFLARE_API_TOKEN}', 'echo "${CLOUDFLARE_ACCOUNT_ID}'):
+                if forbidden in publisher:
+                    errors.append(f"{name}: hosted DevEnv publisher must not log secret/account values")
         elif not jobs or any(
             [value.strip("'\"") for value in runner_labels(block)] != ["corelink"]
             for block in jobs.values()
@@ -196,7 +231,7 @@ def validate(documents: dict[str, str]) -> list[str]:
     return errors
 
 
-def negative_controls(documents: dict[str, str]) -> None:
+def negative_controls(documents: dict[str, str]) -> int:
     mutations = (
         ("provider pull_request", "deploy-spawn-worker.yml",
          lambda s: s.replace("\non:\n", "\non:\n  pull_request:\n", 1)),
@@ -228,6 +263,14 @@ def negative_controls(documents: dict[str, str]) -> None:
              count=1,
              flags=re.MULTILINE,
          )),
+        ("DevEnv publisher moved to self-hosted runner", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-publish:\n.*?^    runs-on:) ubuntu-24\.04$",
+             r"\1 corelink",
+             s,
+             count=1,
+             flags=re.MULTILINE,
+         )),
         ("dispatch guard moved to self-hosted runner", "build-cf-container-images.yml",
          lambda s: re.sub(
              r"(?s)(  validate-dispatch:\n.*?^    runs-on:) ubuntu-latest$",
@@ -246,6 +289,33 @@ def negative_controls(documents: dict[str, str]) -> None:
          lambda s: re.sub(
              r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1
          )),
+        ("DevEnv publication main guard removed", "build-cf-container-images.yml",
+         lambda s: s.replace(
+             "&& github.ref == 'refs/heads/main' && inputs.expected_source_sha == github.sha",
+             "&& github.ref == 'refs/heads/other' && inputs.expected_source_sha == github.sha",
+             1,
+         )),
+        ("DevEnv publisher deploys", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-publish:\n.*?)(wrangler containers push)",
+             r"\1wrangler deploy",
+             s,
+             count=1,
+         )),
+        ("DevEnv publisher accesses extra secret", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-publish:\n.*?CLOUDFLARE_API_TOKEN: )\$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}",
+             r"\1${{ secrets.OTHER_TOKEN }}",
+             s,
+             count=1,
+         )),
+        ("DevEnv publisher logs its token", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-publish:\n.*?)(      - name: Checkout exact protected main commit)",
+             r'\1      - name: Unsafe diagnostic\n        run: echo "${CLOUDFLARE_API_TOKEN}"\n\2',
+             s,
+             count=1,
+         )),
         ("actionlint checksum changed", "plan-integrity.yml",
          lambda s: s.replace(ACTIONLINT_SHA256, "0" + ACTIONLINT_SHA256[1:], 1)),
     )
@@ -255,6 +325,7 @@ def negative_controls(documents: dict[str, str]) -> None:
         case[path] = mutate(before)
         if case[path] == before or not validate(case):
             raise SystemExit(f"negative control failed to reject {label}")
+    return len(mutations)
 
 
 def main() -> int:
@@ -268,8 +339,8 @@ def main() -> int:
         print("\n".join(f"ERROR: {error}" for error in errors), file=sys.stderr)
         return 1
     if args.self_test:
-        negative_controls(documents)
-        print("workflow migration contract and 16 negative controls passed")
+        control_count = negative_controls(documents)
+        print(f"workflow migration contract and {control_count} negative controls passed")
     else:
         print("workflow migration contract passed")
     return 0
