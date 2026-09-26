@@ -823,7 +823,7 @@ mod tests {
             status: 202,
             body: deduped.to_string(),
         };
-        validate_billing_ack(&response, &[event])
+        validate_billing_ack(&response, std::slice::from_ref(&event))
             .expect("typed deduped vector is idempotent success");
 
         let mut second = serde_json::from_str::<UsageEventData>(&body).unwrap();
