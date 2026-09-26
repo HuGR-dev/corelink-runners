@@ -245,7 +245,6 @@ describe.skipIf(!process.env.CORELINK_SERVER_BIN)("#605 real Rust ingest and Typ
       const first = await flushBillingUsageBacklog(env(kv));
       expect(first.quarantineWriteFailed).toBe(1);
       expect(kv.store.has("usage:605-quarantine")).toBe(true);
-      vi.unstubAllGlobals();
 
       const restartedKv = new PersistentKv();
       for (const [key, value] of kv.store) restartedKv.store.set(key, value);
