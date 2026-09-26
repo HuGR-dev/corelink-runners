@@ -158,7 +158,25 @@ def validate(documents: dict[str, str]) -> list[str]:
         if events != {"workflow_dispatch"}:
             errors.append(f"{name}: only workflow_dispatch is allowed (found {sorted(events)})")
         jobs = job_blocks(documents[name])
-        if not jobs or any(
+        if name == "build-cf-container-images.yml":
+            expected_runners = {
+                "validate-dispatch": "ubuntu-latest",
+                "devenv-build-only": "ubuntu-latest",
+                "build-and-push": "corelink",
+            }
+            if set(jobs) != set(expected_runners):
+                errors.append(
+                    f"{name}: jobs must remain limited to the guarded hosted DevEnv proof "
+                    "and the corelink production publisher"
+                )
+            for job, runner in expected_runners.items():
+                if job in jobs and [
+                    value.strip("'\"") for value in runner_labels(jobs[job])
+                ] != [runner]:
+                    errors.append(f"{name}: {job} must run on {runner}")
+            if "devenv-build-only" in jobs and not has_no_secret_path(jobs["devenv-build-only"]):
+                errors.append(f"{name}: hosted DevEnv proof must not read secrets or environments")
+        elif not jobs or any(
             [value.strip("'\"") for value in runner_labels(block)] != ["corelink"]
             for block in jobs.values()
         ):
@@ -199,6 +217,18 @@ def negative_controls(documents: dict[str, str]) -> None:
          lambda s: s.replace("  gates:\n", "  gates:\n    environment: production\n", 1)),
         ("partial provider runner migration", "deploy-spawn-worker.yml",
          lambda s: re.sub(r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1)),
+        ("DevEnv proof moved to self-hosted runner", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  devenv-build-only:\n.*?^    runs-on:) ubuntu-latest$",
+             r"\1 corelink",
+             s,
+             count=1,
+             flags=re.MULTILINE,
+         )),
+        ("production publisher moved to hosted runner", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1
+         )),
         ("actionlint checksum changed", "plan-integrity.yml",
          lambda s: s.replace(ACTIONLINT_SHA256, "0" + ACTIONLINT_SHA256[1:], 1)),
     )
@@ -222,7 +252,7 @@ def main() -> int:
         return 1
     if args.self_test:
         negative_controls(documents)
-        print("workflow migration contract and 12 negative controls passed")
+        print("workflow migration contract and 14 negative controls passed")
     else:
         print("workflow migration contract passed")
     return 0
