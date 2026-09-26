@@ -1,0 +1,227 @@
+name: trusted exact-head issue pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack_id:
+        description: Allowlisted acceptance pack
+        required: true
+        type: choice
+        options: [issue-566, issue-570, issue-575, issue-578, issue-580, issue-586, issue-602]
+      candidate_sha:
+        description: Exact 40-character PR head SHA
+        required: true
+        type: string
+      target_base_sha:
+        description: Exact 40-character PR base SHA
+        required: true
+        type: string
+      pr_number:
+        description: Pull request number bound to those SHAs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main' && github.repository == 'HuGR-dev/corelink-runners'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      pr_binding_ok: ${{ steps.pr_binding.outputs.pr_binding_ok }}
+      pr_base_ref: ${{ steps.pr_binding.outputs.pr_base_ref }}
+      pr_head_sha: ${{ steps.pr_binding.outputs.pr_head_sha }}
+      pr_base_sha: ${{ steps.pr_binding.outputs.pr_base_sha }}
+      latest_ci_run_id: ${{ steps.pr_binding.outputs.latest_ci_run_id }}
+      latest_ci_run_number: ${{ steps.pr_binding.outputs.latest_ci_run_number }}
+      latest_ci_date: ${{ steps.pr_binding.outputs.latest_ci_date }}
+      preflight_ok: ${{ steps.preflight.outputs.preflight_ok }}
+      candidate_paths: ${{ steps.preflight.outputs.candidate_paths }}
+    steps:
+      - name: Check out trusted controls from the dispatching main commit
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify trusted control selftests
+        run: python3 .github/ci/issue_pack_dispatch.py --self-test
+
+      - name: Bind PR number and SHAs to an open PR targeting main
+        id: pr_binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACK_ID: ${{ inputs.pack_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+        run: python3 .github/ci/issue_pack_dispatch.py --bind-pr
+
+      - name: Check out candidate as data at exact SHA
+        id: candidate_checkout
+        if: steps.pr_binding.outputs.pr_binding_ok == 'true'
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.candidate_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact head, base, and changed path boundary
+        id: preflight
+        if: steps.pr_binding.outputs.pr_binding_ok == 'true' && steps.candidate_checkout.outcome == 'success'
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TRUSTED_SHA: ${{ github.sha }}
+          TRUSTED_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          PR_BINDING_OK: ${{ steps.pr_binding.outputs.pr_binding_ok }}
+          PR_BASE_REF: ${{ steps.pr_binding.outputs.pr_base_ref }}
+          PR_HEAD_SHA: ${{ steps.pr_binding.outputs.pr_head_sha }}
+          PR_BASE_SHA: ${{ steps.pr_binding.outputs.pr_base_sha }}
+          CANDIDATE_CHECKOUT_OUTCOME: ${{ steps.candidate_checkout.outcome }}
+        run: python3 .github/ci/issue_pack_dispatch.py --preflight --candidate-dir candidate
+
+  candidate-pack:
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.preflight_ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controls from the dispatching main commit
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out candidate at exact SHA
+        id: candidate_checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.candidate_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node for Worker packs
+        if: steps.candidate_checkout.outcome == 'success' && (inputs.pack_id == 'issue-566' || inputs.pack_id == 'issue-570' || inputs.pack_id == 'issue-586' || inputs.pack_id == 'issue-602')
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.19.0'
+
+      - name: Set up Rust for dependency pack
+        if: steps.candidate_checkout.outcome == 'success' && inputs.pack_id == 'issue-580'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: '1.96.0'
+
+      - name: Install pinned actionlint for image workflow pack
+        if: steps.candidate_checkout.outcome == 'success' && inputs.pack_id == 'issue-575'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='1.7.12'
+          sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+          archive="$RUNNER_TEMP/actionlint_${version}_linux_amd64.tar.gz"
+          install_dir="$RUNNER_TEMP/actionlint"
+          [[ "$(uname -s)" == 'Linux' && "$(uname -m)" == 'x86_64' ]] || {
+            echo 'actionlint bootstrap supports only GitHub-hosted Linux x86_64' >&2
+            exit 1
+          }
+          mkdir -p "$install_dir"
+          curl --fail --location --retry 3 --silent --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$install_dir" actionlint
+          "$install_dir/actionlint" -version | grep -Fx "$version" >/dev/null
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Install pinned cargo deny and audit for dependency pack
+        if: steps.candidate_checkout.outcome == 'success' && inputs.pack_id == 'issue-580'
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-deny@0.19.8,cargo-audit@0.22.2
+
+      - name: Run catalog commands on the isolated candidate runner
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TRUSTED_SHA: ${{ github.sha }}
+          TRUSTED_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          PR_BINDING_OK: ${{ needs.prepare.outputs.pr_binding_ok }}
+          PR_BASE_REF: ${{ needs.prepare.outputs.pr_base_ref }}
+          PR_HEAD_SHA: ${{ needs.prepare.outputs.pr_head_sha }}
+          PR_BASE_SHA: ${{ needs.prepare.outputs.pr_base_sha }}
+          LATEST_CI_RUN_ID: ${{ needs.prepare.outputs.latest_ci_run_id }}
+          LATEST_CI_RUN_NUMBER: ${{ needs.prepare.outputs.latest_ci_run_number }}
+          LATEST_CI_DATE: ${{ needs.prepare.outputs.latest_ci_date }}
+          PREFLIGHT_OK: ${{ needs.prepare.outputs.preflight_ok }}
+          CANDIDATE_CHECKOUT_OUTCOME: ${{ steps.candidate_checkout.outcome }}
+        run: python3 .github/ci/issue_pack_dispatch.py --candidate --candidate-dir candidate
+
+  publish-receipt:
+    needs: [prepare, candidate-pack]
+    if: always() && github.ref == 'refs/heads/main' && github.repository == 'HuGR-dev/corelink-runners'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted controls from the dispatching main commit
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Write receipt on a fresh trusted runner
+        env:
+          PACK_ID: ${{ inputs.pack_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TRUSTED_SHA: ${{ github.sha }}
+          TRUSTED_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          PR_BINDING_OK: ${{ needs.prepare.outputs.pr_binding_ok }}
+          PR_BASE_REF: ${{ needs.prepare.outputs.pr_base_ref }}
+          LATEST_CI_RUN_ID: ${{ needs.prepare.outputs.latest_ci_run_id }}
+          LATEST_CI_RUN_NUMBER: ${{ needs.prepare.outputs.latest_ci_run_number }}
+          LATEST_CI_DATE: ${{ needs.prepare.outputs.latest_ci_date }}
+          CANDIDATE_PATHS: ${{ needs.prepare.outputs.candidate_paths }}
+          PREFLIGHT_OK: ${{ needs.prepare.outputs.preflight_ok }}
+          PREPARE_JOB_RESULT: ${{ needs.prepare.result }}
+          CANDIDATE_JOB_RESULT: ${{ needs.candidate-pack.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RECEIPT_PATH: ${{ runner.temp }}/issue-pack-receipt-${{ github.run_id }}.json
+        run: python3 .github/ci/issue_pack_dispatch.py --finalize
+
+      - name: Publish bounded JSON receipt
+        if: always()
+        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18d3 # v4.4.3
+        with:
+          name: issue-pack-receipt-${{ inputs.pack_id }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-pack-receipt-${{ github.run_id }}.json
+          if-no-files-found: ignore
+          retention-days: 30
