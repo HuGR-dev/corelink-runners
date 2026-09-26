@@ -486,7 +486,8 @@ class DispatcherTests(unittest.TestCase):
     def test_every_declared_pack_has_an_accepted_explicit_surface(self) -> None:
         for pack_id, pack in catalog().items():
             with self.subTest(pack=pack_id):
-                accepted = validate_inputs(pack_id, "a" * 40, "b" * 40, "123",
+                pr_number = str(pack.get("pull_request", 123))
+                accepted = validate_inputs(pack_id, "a" * 40, "b" * 40, pr_number,
                                            "refs/heads/main", REPO, "main", "a" * 40, "b" * 40)
                 self.assertEqual(accepted["paths"], pack["paths"])
                 validate_commands(accepted["commands"])
