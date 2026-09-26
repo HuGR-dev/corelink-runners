@@ -118,9 +118,13 @@ describe("atomic redrive reservation state machine", () => {
     expect(d.storage.map.has(reserveKey())).toBe(false); expect(await d.instance.beginReservedEffect("acme/repo", "123", held.reservation!.owner, held.reservation!.token, held.reservation!.epoch)).toMatchObject({ status: "stale" });
   });
 
-  it("returns redrive_owned (route 202) for eligible and completed tombstones", async () => {
+  it("acknowledges a same-job webhook only while its eligible redrive tuple remains resumable", async () => {
     const d = makeDO(); await bootstrap(d, "123"); const held = await d.instance.reserveRedriveCandidate("acme/repo", "123", T0); const r = held.reservation!;
     expect((await d.instance.beginReservedEffect(r.repo, r.job_id, r.owner, r.token, r.epoch, r.path, r.effect_id)).status).toBe("eligible");
+    await expect(d.instance.reserveRedriveCandidate(r.repo, r.job_id, T0 + REDRIVE_RESERVATION_TTL_MS)).resolves.toMatchObject({
+      status: "resumable",
+      reservation: { owner: r.owner, token: r.token, epoch: r.epoch, state: "EFFECT_ELIGIBLE" },
+    });
     expect((await worker.fetch(await webhook(123, "eligible"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never)).status).toBe(202);
     expect((await d.instance.completeRedrive(r.repo, r.job_id, r.owner, r.token, r.epoch, r.effect_id)).status).toBe("completed");
     expect((await worker.fetch(await webhook(123, "completed-tombstone"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never)).status).toBe(202);
@@ -130,7 +134,7 @@ describe("atomic redrive reservation state machine", () => {
     const d = makeDO(); await bootstrap(d, "123"); await d.instance.append(event(123)); expect((await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).status).toBe("contained");
     const e = makeDO(); await bootstrap(e, "123"); const r = await e.instance.reserveRedriveCandidate("acme/repo", "123", T0); const first = r.reservation!;
     vi.setSystemTime(T0 + REDRIVE_RESERVATION_TTL_MS); const reclaimed = await e.instance.reserveRedriveCandidate("acme/repo", "123"); expect(reclaimed.status).toBe("reserved"); expect(reclaimed.reservation?.epoch).toBe(2); expect(reclaimed.reservation?.owner).not.toBe(first.owner);
-    const p = reclaimed.reservation!; await e.instance.beginReservedEffect(p.repo, p.job_id, p.owner, p.token, p.epoch, p.path, p.effect_id); vi.setSystemTime(T0 + 2 * REDRIVE_RESERVATION_TTL_MS); expect((await e.instance.reserveRedriveCandidate(p.repo, p.job_id)).status).toBe("effect_eligible");
+    const p = reclaimed.reservation!; await e.instance.beginReservedEffect(p.repo, p.job_id, p.owner, p.token, p.epoch, p.path, p.effect_id); vi.setSystemTime(T0 + 2 * REDRIVE_RESERVATION_TTL_MS); expect((await e.instance.reserveRedriveCandidate(p.repo, p.job_id)).status).toBe("resumable");
     expect((await e.instance.completeRedrive(p.repo, p.job_id, p.owner, p.token, p.epoch, p.effect_id)).status).toBe("completed"); expect((await e.instance.reserveRedriveCandidate(p.repo, p.job_id)).status).toBe("completed");
   });
 
@@ -258,7 +262,7 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
     expect(await d.instance.beginReservedEffect(old.repo, old.job_id, old.owner, old.token, old.epoch, old.path, old.effect_id)).toMatchObject({ status: "stale" });
     expect((d.storage.map.get(reserveKey()) as ContainmentRedriveReservation)).toMatchObject({ owner: next.owner, token: next.token, epoch: 2, state: "HELD" });
     expect((await d.instance.beginReservedEffect(next.repo, next.job_id, next.owner, next.token, next.epoch, next.path, next.effect_id)).status).toBe("eligible");
-    expect((await d.instance.reserveRedriveCandidate(next.repo, next.job_id, T0 + 10 * REDRIVE_RESERVATION_TTL_MS)).status).toBe("effect_eligible");
+    expect((await d.instance.reserveRedriveCandidate(next.repo, next.job_id, T0 + 10 * REDRIVE_RESERVATION_TTL_MS)).status).toBe("resumable");
   });
 
   it("routes a verified completed webhook through the reservation latch while intake is paused", async () => {
@@ -268,6 +272,8 @@ describe("T3-W17 anti-vacuity queue and reservation fences", () => {
     const response = await worker.fetch(await webhook(123, "completed-during-pause", "completed"), env(d, kv(), { AUTOSCALER_INTAKE_PAUSED: "1" }), ctx() as never);
     expect(response.status).toBe(200);
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE", completion_observed: true });
+    expect((await d.instance.reserveRedriveCandidate(held.repo, held.job_id, T0 + REDRIVE_RESERVATION_TTL_MS)).status).toBe("busy");
+    expect((await d.instance.beginReservedEffect(held.repo, held.job_id, held.owner, held.token, held.epoch, held.path, held.effect_id)).status).toBe("ineligible");
     expect((await d.instance.completeRedrive(held.repo, held.job_id, held.owner, held.token, held.epoch, held.effect_id)).status).toBe("cleared_after_completion");
     expect(d.storage.map.has(reserveKey())).toBe(false);
   });
@@ -367,7 +373,7 @@ describe("T3-W17 retry ordering and independent switches", () => {
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED" });
   });
 
-  it("leaves a claim-refused reservation terminal at EFFECT_ELIGIBLE", async () => {
+  it("retries a claim-refused eligible tuple after the external claim becomes available", async () => {
     const store = kv({
       "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1 }),
       "spawn:123": "existing-claim",
@@ -378,11 +384,23 @@ describe("T3-W17 retry ordering and independent switches", () => {
     expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
     expect(JSON.parse(store.map.get("orphan:123")!)).toMatchObject({ attempts: 2 });
     expect(drive).not.toHaveBeenCalled();
-    store.put.mockClear();
+    store.map.delete("spawn:123");
     await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0 + 10 * REDRIVE_RESERVATION_TTL_MS, drive, vi.fn(async () => null));
-    expect(store.put).not.toHaveBeenCalled();
-    expect(drive).not.toHaveBeenCalled();
-    expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "EFFECT_ELIGIBLE" });
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED", epoch: 1 });
+  });
+
+  it("restarts an interrupted eligible reservation with its exact owner tuple and one provider drive", async () => {
+    const d = makeDO(); await bootstrap(d, "123");
+    const held = (await d.instance.reserveRedriveCandidate("acme/repo", "123", T0)).reservation!;
+    expect((await d.instance.beginReservedEffect(held.repo, held.job_id, held.owner, held.token, held.epoch, held.path, held.effect_id)).status).toBe("eligible");
+    const store = kv({ "orphan:123": JSON.stringify({ repo: "acme/repo", installationId: "42", labels: ["corelink"], attempts: 1, firstRecordedMs: T0 - 1 }) });
+    const drive = vi.fn(async (_env: unknown, opts: { jobId: string; repo: string }) => providerReceipt(opts));
+
+    await retryOrphanedSpawns(env(d, store, { AUTOSCALER_REDRIVE_PAUSED: "0" }), ctx() as never, T0 + REDRIVE_RESERVATION_TTL_MS, drive, vi.fn(async () => null));
+
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(d.storage.map.get(reserveKey())).toMatchObject({ state: "COMPLETED", owner: held.owner, token: held.token, epoch: held.epoch, effect_id: held.effect_id });
   });
 
   it("does not let a paused redrive switch suppress fresh intake, while both switches suppress both surfaces", async () => {
