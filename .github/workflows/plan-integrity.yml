@@ -15,6 +15,8 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - '.github/ci/issue_pack_catalog.json'
+      - '.github/ci/issue_pack_dispatch.py'
       - '.github/ci/verify_actions_migration_contract.py'
   push:
     branches: [main]
@@ -31,6 +33,8 @@ on:
       - '.github/workflows/*.yaml'
       - '.github/actionlint.yaml'
       - '.github/actionlint.yml'
+      - '.github/ci/issue_pack_catalog.json'
+      - '.github/ci/issue_pack_dispatch.py'
       - '.github/ci/verify_actions_migration_contract.py'
 
 permissions:
@@ -51,6 +55,7 @@ jobs:
         with:
           # The PR SHA is a synthetic merge commit; retain both parents for binding below.
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Bind checkout to triggering SHA
         shell: bash
@@ -91,6 +96,9 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Self-test trusted issue pack dispatcher
+        run: python3 .github/ci/issue_pack_dispatch.py --self-test
 
       - name: Install pinned actionlint 1.7.12
         shell: bash
