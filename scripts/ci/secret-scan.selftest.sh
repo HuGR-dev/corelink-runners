@@ -61,4 +61,25 @@ mkdir -p "$scoped_repo/deploy/cloudflare/test"
 printf 'const token = "%s%s";\n' 'ghp_' '1234567890abcdef1234567890abcdef1234' >"$scoped_repo/deploy/cloudflare/test/compute-terminal-test-helpers.ts"
 git -C "$scoped_repo" add .; git -C "$scoped_repo" commit -qm fresh-allowlisted-path-value; scoped_head="$(git -C "$scoped_repo" rev-parse HEAD)"
 expect_status 1 run_scan_at "$scoped_repo" "$scoped_base" "$scoped_head"
+
+python3 - <<'PY'
+import re
+import subprocess
+from pathlib import Path
+
+assert subprocess.run(
+    ["git", "ls-files", "--error-unmatch", "scripts/ci/secret-scan.selftest.sh"],
+    check=False,
+    capture_output=True,
+).returncode == 0
+secret_scan = Path("scripts/ci/secret-scan.sh").read_text()
+workflow = Path(".github/workflows/selftests.yml").read_text()
+version = re.search(r"readonly GITLEAKS_VERSION='([^']+)'", secret_scan).group(1)
+checksum = re.search(r"readonly GITLEAKS_SHA256='([^']+)'", secret_scan).group(1)
+assert f"GITLEAKS_VERSION: '{version}'" in workflow
+assert f"GITLEAKS_SHA256: '{checksum}'" in workflow
+install_at = workflow.index("- name: Install pinned gitleaks for tracked selftests")
+discovery_at = workflow.index("- name: Discover and run every tracked selftest")
+assert install_at < discovery_at
+PY
 printf 'secret-scan selftest: PASS (detection, zero-base, waivers, merge, clean, missing refs, scanner error)\n'

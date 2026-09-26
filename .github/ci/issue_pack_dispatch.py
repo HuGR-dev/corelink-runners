@@ -31,6 +31,7 @@ FIXED_COMMANDS = {
     ("npm", "test", "--", "--run", "test/devenv-credentials.test.ts"),
     ("npm", "run", "test:coverage"),
     ("npx", "vitest", "run", "test/billing-recovery.test.ts"),
+    ("node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs"),
     ("actionlint", "-config-file", ".github/ci/actionlint-runner.yaml",
      ".github/workflows/build-cf-container-images.yml"),
     ("bash", "scripts/ci/runner-image-static-check.selftest.sh"),
@@ -50,6 +51,7 @@ def catalog() -> dict[str, dict[str, Any]]:
     for pack_id, pack in value.items():
         if not re.fullmatch(r"issue-[0-9]+", pack_id):
             raise ValueError(f"invalid catalog key: {pack_id}")
+        validate_pack_definition(pack_id, pack)
         paths, commands = pack.get("paths"), pack.get("commands")
         if not isinstance(paths, list) or not paths or any(
             not isinstance(path, str) or not path or path.startswith("/")
@@ -61,6 +63,20 @@ def catalog() -> dict[str, dict[str, Any]]:
             raise ValueError(f"{pack_id}: duplicate path")
         validate_commands(commands)
     return value
+
+
+def validate_pack_definition(pack_id: str, pack: dict[str, Any]) -> None:
+    issue_text = pack_id.removeprefix("issue-")
+    if (not isinstance(pack, dict) or not isinstance(pack.get("issue"), int)
+            or isinstance(pack.get("issue"), bool) or pack.get("issue") != int(issue_text)):
+        raise ValueError(f"{pack_id}: issue metadata must match the catalog key")
+    pull_request = pack.get("pull_request")
+    if pull_request is not None and (
+        not isinstance(pull_request, int) or isinstance(pull_request, bool) or pull_request < 1
+    ):
+        raise ValueError(f"{pack_id}: pull_request must be a positive integer")
+    if not isinstance(pack.get("exact_paths", False), bool):
+        raise ValueError(f"{pack_id}: exact_paths must be boolean")
 
 
 def validate_commands(commands: Any) -> None:
@@ -92,7 +108,10 @@ def validate_inputs(pack_id: str, candidate_sha: str, base_sha: str,
         raise ValueError("repository does not match this catalog")
     if pr_base_ref != "main" or pr_head_sha != candidate_sha or pr_base_sha != base_sha:
         raise ValueError("GitHub PR metadata does not bind the requested main base and exact head")
-    return packs[pack_id]
+    pack = packs[pack_id]
+    if pack.get("pull_request") is not None and pr_number != str(pack["pull_request"]):
+        raise ValueError("PR number does not match the issue pack binding")
+    return pack
 
 
 def bind_pr_metadata() -> int:
@@ -126,11 +145,18 @@ def bind_pr_metadata() -> int:
         )
         with urllib.request.urlopen(request, timeout=20) as response:
             pull = json.loads(response.read(1_000_001))
+        pack = catalog().get(os.environ.get("PACK_ID", ""))
+        if pack is None:
+            raise ValueError("pack ID is not allowlisted")
         head_sha = pull["head"]["sha"]
         actual_base_sha = pull["base"]["sha"]
         base_ref = pull["base"]["ref"]
-        if (pull.get("state") != "open" or pull.get("merged_at") is not None
+        if (pull.get("number") != int(pr_number)
+                or (pack.get("pull_request") is not None
+                    and pull.get("number") != pack["pull_request"])
+                or pull.get("state") != "open" or pull.get("merged_at") is not None
                 or pull["base"]["repo"]["full_name"] != REPO
+                or pull["head"]["repo"]["full_name"] != REPO
                 or pull["head"]["sha"] != candidate_sha
                 or actual_base_sha != base_sha or base_ref != "main"):
             raise ValueError("PR is closed, stale, or not bound to the requested main head")
@@ -189,6 +215,9 @@ def validate_changed_paths(pack: dict[str, Any], paths: list[str]) -> None:
     unexpected = sorted(set(paths) - set(pack["paths"]))
     if unexpected:
         raise ValueError(f"candidate changed paths outside the pack: {unexpected}")
+    if pack.get("exact_paths") and set(paths) != set(pack["paths"]):
+        missing = sorted(set(pack["paths"]) - set(paths))
+        raise ValueError(f"candidate diff does not match the exact pack surface: {missing}")
 
 
 def git(repo: Path, *args: str) -> str:
@@ -457,17 +486,69 @@ class DispatcherTests(unittest.TestCase):
     def test_every_declared_pack_has_an_accepted_explicit_surface(self) -> None:
         for pack_id, pack in catalog().items():
             with self.subTest(pack=pack_id):
-                accepted = validate_inputs(pack_id, "a" * 40, "b" * 40, "123",
+                pr_number = str(pack.get("pull_request", 123))
+                accepted = validate_inputs(pack_id, "a" * 40, "b" * 40, pr_number,
                                            "refs/heads/main", REPO, "main", "a" * 40, "b" * 40)
                 self.assertEqual(accepted["paths"], pack["paths"])
                 validate_commands(accepted["commands"])
-                validate_changed_paths(pack, [pack["paths"][0]])
+                changed = pack["paths"] if pack.get("exact_paths") else [pack["paths"][0]]
+                validate_changed_paths(pack, changed)
 
     def test_issue_566_allows_containment_redrive_reservation_test(self) -> None:
         path = "deploy/cloudflare/test/containment-redrive-reservation.test.ts"
         pack = catalog()["issue-566"]
         self.assertIn(path, pack["paths"])
         validate_changed_paths(pack, [path])
+
+    def test_issue_603_binds_exact_issue_pr_surface_and_command(self) -> None:
+        pack = catalog()["issue-603"]
+        expected_paths = [
+            "deploy/cloudflare/test/fixtures/issue-603/recovery-matrix.json",
+            "deploy/cloudflare/test/historical-settlement-reconcile.mjs",
+            "docs/historical-settlement-recovery.md",
+        ]
+        command = ["node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs"]
+        self.assertEqual(pack["issue"], 603)
+        self.assertEqual(pack["pull_request"], 626)
+        self.assertEqual(pack["paths"], expected_paths)
+        self.assertEqual(pack["commands"], [command])
+        accepted = validate_inputs(
+            "issue-603", "a" * 40, "b" * 40, "626", "refs/heads/main", REPO,
+            "main", "a" * 40, "b" * 40,
+        )
+        self.assertEqual(accepted, pack)
+        validate_changed_paths(pack, expected_paths)
+        for wrong_issue in ({**pack, "issue": 604},):
+            with self.assertRaises(ValueError):
+                validate_pack_definition("issue-603", wrong_issue)
+        for wrong_pr in ("627", "603"):
+            with self.subTest(pr=wrong_pr), self.assertRaises(ValueError):
+                validate_inputs(
+                    "issue-603", "a" * 40, "b" * 40, wrong_pr, "refs/heads/main", REPO,
+                    "main", "a" * 40, "b" * 40,
+                )
+        for wrong_head, wrong_base, wrong_pr_head, wrong_pr_base in (
+            ("c" * 40, "b" * 40, "a" * 40, "b" * 40),
+            ("a" * 40, "c" * 40, "a" * 40, "b" * 40),
+            ("a" * 40, "b" * 40, "c" * 40, "b" * 40),
+            ("a" * 40, "b" * 40, "a" * 40, "c" * 40),
+        ):
+            with self.subTest(head=wrong_head, base=wrong_base,
+                              pr_head=wrong_pr_head, pr_base=wrong_pr_base), self.assertRaises(ValueError):
+                validate_inputs(
+                    "issue-603", wrong_head, wrong_base, "626", "refs/heads/main", REPO,
+                    "main", wrong_pr_head, wrong_pr_base,
+                )
+        for wrong_paths in (
+            [*expected_paths, "deploy/cloudflare/src/index.ts"],
+            expected_paths[:-1],
+        ):
+            with self.subTest(paths=wrong_paths), self.assertRaises(ValueError):
+                validate_changed_paths(pack, wrong_paths)
+        with self.assertRaises(ValueError):
+            validate_commands([["node", "--test", "candidate-authored-test.mjs"]])
+        with self.assertRaises(ValueError):
+            validate_commands([["node", "--test", "deploy/cloudflare/test/historical-settlement-reconcile.mjs", "&&", "curl"]])
 
     def test_issue_575_actionlint_uses_trusted_minimal_config(self) -> None:
         command = catalog()["issue-575"]["commands"][0]
