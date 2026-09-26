@@ -31,8 +31,27 @@ vi.mock("@cloudflare/containers", () => {
       async stop() {}
       async destroy() {}
       async schedule(_when: Date, _callback: string, _payload: unknown) {}
-      async containerFetch(_req: any, _port: any): Promise<Response> {
-        return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify({ root: "bafybeicorp", bytes_total: 1048576 }), stderr: "" }), { status: 200 });
+      async containerFetch(req: Request, _port: any): Promise<Response> {
+        const body = await req.clone().json() as { argv?: string[] };
+        const argv = body.argv ?? [];
+        if (!argv.includes("snapshot")) {
+          return new Response(JSON.stringify({ exit_code: 0, stdout: "", stderr: "" }), { status: 200 });
+        }
+        const name = argv[argv.indexOf("--name") + 1];
+        return new Response(JSON.stringify({
+          exit_code: 0,
+          stdout: JSON.stringify({
+            name,
+            root: "a".repeat(64),
+            files: 1,
+            bytes_total: 1048576,
+            chunks_total: 1,
+            chunks_uploaded: 1,
+            unchanged: false,
+            skipped_external_symlinks: [],
+          }),
+          stderr: "",
+        }), { status: 200 });
       }
       renewActivityTimeout() {}
     },
@@ -332,8 +351,41 @@ describe("CoreLink DevEnv — Unit & State Machine Verification", () => {
 
       const snapResp = await doInstance.snapshot({ force: false });
       expect(snapResp.ok).toBe(true);
-      expect(snapResp.workspaceSnapshot.root).toBe("bafybeicorp");
+      expect(snapResp.workspaceSnapshot.root).toBe("a".repeat(64));
       expect(snapResp.workspaceSnapshot.bytesTotal).toBe(1048576);
+    });
+
+    it("rejects malformed snapshot roots without returning an ok response", async () => {
+      const doInstance = new RunnerDevEnvDO(mockCtx, mockEnv);
+      await startTest(doInstance, {
+        config: {
+          workspaceName: "my-workspace",
+          profileName: "my-profile",
+          tier: "standard-4",
+          clwEndpoint: "https://corelink-api.humangr.com",
+          clwTenant: "ee30f7ba-fc25-4d71-939e-ebe130b4c6a3",
+          clwToken: "cl_pat_1234567890abcdef1234567890",
+        },
+      });
+      await doInstance.onStart();
+      const execSpy = vi.spyOn(doInstance as any, "containerFetch").mockImplementation(async (req: Request) => {
+        const { argv } = await req.json() as { argv: string[] };
+        const name = argv[argv.indexOf("--name") + 1];
+        const report = {
+          name,
+          root: argv[1] === "/data/workspace" ? "/tmp/invalid-root" : "a".repeat(64),
+          files: 0,
+          bytes_total: 0,
+          chunks_total: 0,
+          chunks_uploaded: 0,
+          unchanged: false,
+          skipped_external_symlinks: [],
+        };
+        return new Response(JSON.stringify({ exit_code: 0, stdout: JSON.stringify(report), stderr: "" }), { status: 200 });
+      });
+
+      await expect(doInstance.snapshot({ force: false })).rejects.toThrow("CLW_SNAPSHOT_REPORT_INVALID_FIELDS");
+      expect(execSpy).toHaveBeenCalledTimes(2);
     });
 
     it("stops gracefully and sends canonical HTTP billing without a duplicate D1 tally", async () => {

@@ -55,6 +55,136 @@ export const DEFAULT_CLW_IGNORE_PATTERNS = [
 
 export const CLW_AUTH_TMPFS_PATH = "/dev/shm/.clw-auth";
 
+/** The exec envelope and the snapshot CLI each have a small, explicit JSON contract. */
+export const CLW_EXEC_ENVELOPE_MAX_BYTES = 256 * 1024;
+export const CLW_SNAPSHOT_REPORT_MAX_BYTES = 64 * 1024;
+const CLW_EXEC_STDERR_MAX_BYTES = 16 * 1024;
+const SNAPSHOT_REPORT_FIELDS = [
+  "bytes_total",
+  "chunks_total",
+  "chunks_uploaded",
+  "files",
+  "name",
+  "root",
+  "skipped_external_symlinks",
+  "unchanged",
+] as const;
+
+export type ClwExecResult = { exitCode: number | null; stdout: string; stderr: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isSafeCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Read and validate the exec-server envelope without buffering an unbounded body.
+ * stdout and stderr remain distinct, and malformed RPC data never becomes defaults.
+ */
+export async function parseClwExecResponse(resp: Response): Promise<ClwExecResult> {
+  const contentLength = resp.headers.get("content-length");
+  if (contentLength !== null && (!/^\d+$/.test(contentLength) || Number(contentLength) > CLW_EXEC_ENVELOPE_MAX_BYTES)) {
+    throw new Error("CLW_EXEC_ENVELOPE_INVALID_SIZE");
+  }
+  if (!resp.body) throw new Error("CLW_EXEC_ENVELOPE_MISSING_BODY");
+
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > CLW_EXEC_ENVELOPE_MAX_BYTES) {
+        await reader.cancel();
+        throw new Error("CLW_EXEC_ENVELOPE_INVALID_SIZE");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  let raw: string;
+  try {
+    const joined = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(joined);
+  } catch {
+    throw new Error("CLW_EXEC_ENVELOPE_INVALID_UTF8");
+  }
+
+  let body: unknown;
+  try { body = JSON.parse(raw); } catch { throw new Error("CLW_EXEC_ENVELOPE_INVALID_JSON"); }
+  if (!isRecord(body) || !exactKeys(body, ["exit_code", "stdout", "stderr"])) {
+    throw new Error("CLW_EXEC_ENVELOPE_INVALID_SHAPE");
+  }
+  if (!(body.exit_code === null || (typeof body.exit_code === "number" && Number.isSafeInteger(body.exit_code) && body.exit_code >= 0 && body.exit_code <= 255)) ||
+      typeof body.stdout !== "string" || typeof body.stderr !== "string" ||
+      new TextEncoder().encode(body.stdout).byteLength > CLW_SNAPSHOT_REPORT_MAX_BYTES ||
+      new TextEncoder().encode(body.stderr).byteLength > CLW_EXEC_STDERR_MAX_BYTES) {
+    throw new Error("CLW_EXEC_ENVELOPE_INVALID_FIELDS");
+  }
+  return { exitCode: body.exit_code as number | null, stdout: body.stdout, stderr: body.stderr };
+}
+
+/**
+ * Validate the exact field set emitted by the current `clw snapshot --json`
+ * producer. That producer has no schema-version field yet, so treat any shape
+ * drift as incompatible until the producer and this consumer change together.
+ * The echoed `name` binds this result to the requested snapshot ref.
+ */
+export function parseClwSnapshotReport(stdout: string, expectedName: string): {
+  root: string;
+  bytesTotal: number;
+  files: number;
+  chunksTotal: number;
+  chunksUploaded: number;
+  unchanged: boolean;
+} {
+  if (new TextEncoder().encode(stdout).byteLength > CLW_SNAPSHOT_REPORT_MAX_BYTES) {
+    throw new Error("CLW_SNAPSHOT_REPORT_INVALID_SIZE");
+  }
+  let report: unknown;
+  try { report = JSON.parse(stdout); } catch { throw new Error("CLW_SNAPSHOT_REPORT_INVALID_JSON"); }
+  if (!isRecord(report) || !exactKeys(report, SNAPSHOT_REPORT_FIELDS)) {
+    throw new Error("CLW_SNAPSHOT_REPORT_INVALID_SHAPE");
+  }
+  if (typeof expectedName !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(expectedName) ||
+      report.name !== expectedName || typeof report.root !== "string" || !/^[0-9a-f]{64}$/.test(report.root) ||
+      !isSafeCounter(report.bytes_total) || !isSafeCounter(report.files) ||
+      !isSafeCounter(report.chunks_total) || !isSafeCounter(report.chunks_uploaded) ||
+      report.chunks_uploaded > report.chunks_total || typeof report.unchanged !== "boolean" ||
+      (report.files === 0 && (report.bytes_total !== 0 || report.chunks_total !== 0)) ||
+      (report.bytes_total === 0 && report.chunks_total !== 0) ||
+      report.chunks_total > report.bytes_total ||
+      (report.unchanged && report.chunks_uploaded !== 0) ||
+      !Array.isArray(report.skipped_external_symlinks) ||
+      report.skipped_external_symlinks.length > 4096 ||
+      report.skipped_external_symlinks.some((path) => typeof path !== "string" || path.length === 0 || path.length > 4096)) {
+    throw new Error("CLW_SNAPSHOT_REPORT_INVALID_FIELDS");
+  }
+  return {
+    root: report.root,
+    bytesTotal: report.bytes_total,
+    files: report.files,
+    chunksTotal: report.chunks_total,
+    chunksUploaded: report.chunks_uploaded,
+    unchanged: report.unchanged,
+  };
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // EXEC HELPER — in-container exec via port 9090
 // ────────────────────────────────────────────────────────────────────────
@@ -85,8 +215,7 @@ export async function containerExec(
   if (!resp.ok) {
     throw new Error(`EXEC_RPC_FAILED: ${resp.status} ${await resp.text()}`);
   }
-  const body = (await resp.json()) as { exit_code: number; stdout: string; stderr: string };
-  return { exitCode: body.exit_code, stdout: body.stdout, stderr: body.stderr };
+  return parseClwExecResponse(resp);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -193,37 +322,20 @@ export async function snapshotViaClw(
     throw new Error(`clw snapshot failed (exit ${result.exitCode}): ${result.stderr}`);
   }
   try {
-    const report = JSON.parse(result.stdout.trim()) as {
-      root?: unknown;
-      files?: unknown;
-      bytes_total?: unknown;
-      chunks_total?: unknown;
-      chunks_uploaded?: unknown;
-      unchanged?: unknown;
-      skipped_external_symlinks?: unknown;
-    };
+    const report = parseClwSnapshotReport(result.stdout, name);
     return {
       name,
-      root: typeof report.root === "string" ? report.root : "",
-      bytesTotal: Number(report.bytes_total) || 0,
-      files: Number(report.files) || 0,
-      chunksTotal: Number(report.chunks_total) || 0,
-      chunksUploaded: Number(report.chunks_uploaded) || 0,
-      unchanged: Boolean(report.unchanged),
+      root: report.root,
+      bytesTotal: report.bytesTotal,
+      files: report.files,
+      chunksTotal: report.chunksTotal,
+      chunksUploaded: report.chunksUploaded,
+      unchanged: report.unchanged,
       timestamp: Date.now(),
     };
   } catch (e) {
     log("clw_json_parse_failed", { subcmd: "snapshot", traceId, err: String(e) });
-    return {
-      name,
-      root: "",
-      bytesTotal: 0,
-      files: 0,
-      chunksTotal: 0,
-      chunksUploaded: 0,
-      unchanged: false,
-      timestamp: Date.now(),
-    };
+    throw new Error("clw snapshot returned an invalid report");
   }
 }
 
