@@ -72,14 +72,17 @@ vi.mock("@cloudflare/containers", () => {
           }
 
           if (url.pathname === "/clw" || url.pathname === "/exec") {
+            const body = typeof req === "string" ? {} : await (req as Request).clone().json() as { argv?: string[] };
+            const argv = body.argv ?? [];
             const mockSnapshotPayload = {
-              root: "bafybeicorp_merkle_blake3_root_987654321",
+              name: argv[argv.indexOf("--name") + 1] ?? "snapshot-fixture",
+              root: "d".repeat(64),
+              files: 1,
               bytes_total: 10485760, // 10 MB
-              chunks_count: 640,
-              tar_packs_count: 1,
-              dedup_ratio: 0.94,
-              inodes_used: 1240,
-              inodes_total: 100000,
+              chunks_total: 640,
+              chunks_uploaded: 640,
+              unchanged: false,
+              skipped_external_symlinks: [],
             };
 
             recordTrace(8, "ClwStorageEngine", "cas_snapshot_generate", mockSnapshotPayload, "INV-04: CAS BLAKE3 snapshot root generation & deduplication");
@@ -217,7 +220,7 @@ describe("Microscopic Step-by-Step Behavioral Verification (Deep Logs & Evidence
     // ═══════════════════════════════════════════════════════════════════════
     const snap = await devenv.snapshot({ force: false });
     expect(snap.ok).toBe(true);
-    expect(snap.workspaceSnapshot.root).toBe("bafybeicorp_merkle_blake3_root_987654321");
+    expect(snap.workspaceSnapshot.root).toBe("d".repeat(64));
     expect(snap.workspaceSnapshot.bytesTotal).toBe(10485760);
 
     // ═══════════════════════════════════════════════════════════════════════

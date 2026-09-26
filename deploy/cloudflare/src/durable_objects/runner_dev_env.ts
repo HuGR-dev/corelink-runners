@@ -15,6 +15,7 @@ import {
   validateStateTransition,
 } from "../types/devenv.js";
 import { DevenvCredentials, launchAuthorizedDevenv } from "../lib/devenv_credentials.js";
+import { parseClwExecResponse, parseClwSnapshotReport, type ClwExecResult } from "../lib/clw.js";
 import { pushUsageEvent } from "../lib.js";
 import { buildDevenvUsageEvent, type DevenvUsageInput } from "../lib/devenv_usage.js";
 import {
@@ -516,8 +517,8 @@ export class RunnerDevEnvDO extends Container<any> {
 
     return {
       ok: true,
-      profileSnapshot: { root: profileSnap.root ?? "", bytesTotal: profileSnap.bytesTotal },
-      workspaceSnapshot: { root: workspaceSnap.root ?? "", bytesTotal: workspaceSnap.bytesTotal },
+      profileSnapshot: { root: profileSnap.root, bytesTotal: profileSnap.bytesTotal },
+      workspaceSnapshot: { root: workspaceSnap.root, bytesTotal: workspaceSnap.bytesTotal },
     };
   }
 
@@ -622,7 +623,7 @@ export class RunnerDevEnvDO extends Container<any> {
 
   // ── In-Container Exec Client ─────────────────────────────────────
 
-  private async containerExec(argv: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  private async containerExec(argv: readonly string[]): Promise<ClwExecResult> {
     const req = new Request(`http://localhost:${EXEC_SERVER_PORT}/clw`, {
       method: "POST",
       headers: {
@@ -636,11 +637,15 @@ export class RunnerDevEnvDO extends Container<any> {
     if (!resp.ok) {
       throw new Error(`EXEC_RPC_FAILED: ${resp.status} ${await resp.text()}`);
     }
-    const body = (await resp.json()) as { exit_code: number; stdout: string; stderr: string };
-    return { exitCode: body.exit_code, stdout: body.stdout, stderr: body.stderr };
+    return parseClwExecResponse(resp);
   }
 
   private async execClwSnapshot(dir: string, name: string, force: boolean, generationId: number, traceId: string) {
+    // DevEnv snapshots are confined to these normalized absolute container roots.
+    // The report.root returned by clw is a content digest, not a filesystem path.
+    if ((dir !== "/data/chrome" && dir !== "/data/workspace") || !/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
+      throw new Error("CLW_SNAPSHOT_TARGET_INVALID");
+    }
     const args = [
       "snapshot", dir,
       "--name", name,
@@ -653,11 +658,7 @@ export class RunnerDevEnvDO extends Container<any> {
     if (res.exitCode !== 0) {
       throw new Error(`clw snapshot failed: ${res.stderr}`);
     }
-    const report = JSON.parse(res.stdout.trim());
-    return {
-      root: report.root as string | null,
-      bytesTotal: Number(report.bytes_total) || 0,
-    };
+    return parseClwSnapshotReport(res.stdout, name);
   }
 
   // ── Billing / Metering ───────────────────────────────────────────

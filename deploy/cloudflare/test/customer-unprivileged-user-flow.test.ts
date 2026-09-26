@@ -27,7 +27,20 @@ vi.mock("@cloudflare/containers", () => {
       async containerFetch(req: Request | string, port?: number): Promise<Response> {
         if (!this.alive) return new Response("Container stopped", { status: 503 });
         if (port === 9090) {
-          return new Response(JSON.stringify({ exit_code: 0, stdout: '{"root":"bafy_user_repo_snapshot","bytes_total":524288}', stderr: "" }), { status: 200 });
+          const body = typeof req === "string" ? {} : await req.clone().json() as { argv?: string[] };
+          const argv = body.argv ?? [];
+          const name = argv[argv.indexOf("--name") + 1] ?? "snapshot-fixture";
+          const stdout = argv.includes("snapshot") ? JSON.stringify({
+            name,
+            root: "e".repeat(64),
+            files: 1,
+            bytes_total: 524288,
+            chunks_total: 1,
+            chunks_uploaded: 1,
+            unchanged: false,
+            skipped_external_symlinks: [],
+          }) : "";
+          return new Response(JSON.stringify({ exit_code: 0, stdout, stderr: "" }), { status: 200 });
         }
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
@@ -245,7 +258,7 @@ describe("Real Customer User Simulation (Provisioned Test User Flow)", () => {
     // Step C: Jane triggers snapshot of her changes
     const snapshotResp = await sandbox.snapshot({ force: false });
     expect(snapshotResp.ok).toBe(true);
-    expect(snapshotResp.workspaceSnapshot.root).toBe("bafy_user_repo_snapshot");
+    expect(snapshotResp.workspaceSnapshot.root).toBe("e".repeat(64));
 
     // Step D: Jane stops the DevEnv session
     const stopResp = await sandbox.requestStop();
