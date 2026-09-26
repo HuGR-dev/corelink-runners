@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { NormalIntakeInbox } from "../src/lib/normal_intake_inbox";
 
 class Store {
-  data = new Map<string, unknown>(); fail = false; private tail = Promise.resolve();
+  data = new Map<string, unknown>(); fail = false; eventListCursors: (string | undefined)[] = []; private tail = Promise.resolve();
   async get<T>(key: string) { return this.data.get(key) as T | undefined; }
   async put(key: string, value: unknown) { if (this.fail) throw new Error("put failed"); this.data.set(key, value); }
   async delete(key: string) { this.data.delete(key); }
-  async list<T>(options: { prefix?: string; limit?: number }) {
-    return new Map([...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "")).sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit ?? Infinity) as [string, T][]);
+  async list<T>(options: { prefix?: string; limit?: number; startAfter?: string }) {
+    if (options.prefix === "normal-inbox:v1:event:") this.eventListCursors.push(options.startAfter);
+    return new Map([...this.data.entries()].filter(([k]) => k.startsWith(options.prefix ?? "") && (!options.startAfter || k > options.startAfter))
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).slice(0, options.limit ?? Infinity) as [string, T][]);
   }
   async transaction<T>(fn: (tx: Store) => Promise<T>) {
     const run = this.tail.then(async () => { const copy = new Map(this.data); const tx = Object.create(this) as Store; tx.data = copy; const result = await fn(tx); this.data = copy; return result; });
@@ -46,6 +48,51 @@ describe("NormalIntakeInbox", () => {
     await inbox.enqueue(input("retry"), 100, 500); expect((await inbox.pending(100)).length).toBe(0); expect((await inbox.pending(601))[0].event_id).toBe("retry");
     await inbox.settle("retry", "a".repeat(64), "complete", 601); expect((await inbox.pending(601)).length).toBe(0); expect((await inbox.enqueue(input("new"))).status).toBe("accepted");
   });
+  it("keeps 500 uncertain rows fenced until idempotent reconciliation and reports only count and age", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    for (let i = 0; i < 500; i++) {
+      await inbox.enqueue(input(`uncertain-${i}`, i + 1), i + 1);
+      await inbox.settle(`uncertain-${i}`, "a".repeat(64), "uncertain", i + 2);
+    }
+    expect((await inbox.enqueue(input("still-fenced"), 1000)).status).toBe("full");
+    expect(await inbox.uncertainSummary(1000)).toEqual({ count: 500, oldest_age_ms: 999 });
+
+    await inbox.settle("uncertain-0", "a".repeat(64), "complete", 1001);
+    await inbox.settle("uncertain-0", "a".repeat(64), "complete", 1002);
+    expect(await inbox.uncertainSummary(1002)).toEqual({ count: 499, oldest_age_ms: 1000 });
+    expect((await inbox.enqueue(input("released"), 1003)).status).toBe("accepted");
+    expect(storage.data.get("normal-inbox:v1:event:uncertain-0")).toMatchObject({ state: "complete" });
+  });
+  it("reads 500 legacy uncertain rows without an index", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    for (let i = 0; i < 500; i++) {
+      await inbox.enqueue(input(`legacy-${i}`, i + 1), i + 1);
+      await inbox.settle(`legacy-${i}`, "a".repeat(64), "uncertain", i + 2);
+    }
+    for (const key of [...storage.data.keys()]) if (key.startsWith("normal-inbox:v1:uncertain:")) storage.data.delete(key);
+    expect(await inbox.uncertainSummary(1000)).toEqual({ count: 500, oldest_age_ms: 999 });
+    await inbox.settle("legacy-0", "a".repeat(64), "complete", 1001);
+    await inbox.settle("legacy-0", "a".repeat(64), "complete", 1002);
+    expect(await inbox.uncertainSummary(1002)).toEqual({ count: 499, oldest_age_ms: 1000 });
+    expect((await inbox.enqueue(input("legacy-overflow"), 1003)).status).toBe("accepted");
+  });
+  it("pages past retained completed history to find a legacy uncertain row", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    for (let i = 0; i < 501; i++) {
+      const eventId = `history-${String(i).padStart(3, "0")}`;
+      await inbox.enqueue(input(eventId, i + 1), i + 1);
+      await inbox.settle(eventId, "a".repeat(64), "complete", i + 2);
+    }
+    await inbox.enqueue(input("legacy-z", 1000), 1000);
+    await inbox.settle("legacy-z", "a".repeat(64), "uncertain", 1001);
+    for (const key of [...storage.data.keys()]) if (key.startsWith("normal-inbox:v1:uncertain:")) storage.data.delete(key);
+
+    storage.eventListCursors = [];
+    expect(await inbox.uncertainSummary(2000)).toEqual({ count: 1, oldest_age_ms: 1000 });
+    expect(storage.eventListCursors.length).toBeGreaterThan(1);
+    expect(storage.eventListCursors[0]).toBeUndefined();
+    expect(storage.eventListCursors[1]).toBeDefined();
+  });
   it("inspects one delivery without changing its durable inbox snapshot", async () => {
     const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
     await inbox.enqueue(input("inspect-me"), 1000, 250);
@@ -82,5 +129,14 @@ describe("NormalIntakeInbox", () => {
     storage.data.set("normal-inbox:v1:pending:0000000000000000:wrong", "safe");
     await expect(inbox.pending(1001)).rejects.toThrow("pending index/state mismatch");
     await expect(inbox.enqueue({ ...input("bad"), schema_version: 2 } as never, 0)).rejects.toThrow();
+  });
+  it("fails closed on malformed uncertain storage and does not mutate it", async () => {
+    const storage = new Store(); const inbox = new NormalIntakeInbox(storage as never);
+    await inbox.enqueue(input("corrupt"), 1);
+    await inbox.settle("corrupt", "a".repeat(64), "uncertain", 2);
+    storage.data.set("normal-inbox:v1:uncertain:0000000000000001:corrupt", "other-event");
+    const before = structuredClone([...storage.data.entries()]);
+    await expect(inbox.uncertainSummary(100)).rejects.toThrow(/corruption/);
+    expect([...storage.data.entries()]).toEqual(before);
   });
 });

@@ -99,6 +99,12 @@ function readRequest(query = "", auth?: string): Request {
   });
 }
 
+function reconcileRequest(body: string, auth = ADMIN): Request {
+  return new Request("https://worker/internal/v1/normal-intake/reconcile", {
+    method: "POST", headers: { "x-corelink-internal-auth": auth, "content-type": "application/json" }, body,
+  });
+}
+
 async function read(f: ReturnType<typeof fixture>, query: string, auth = ADMIN) {
   return worker.fetch(readRequest(query, auth), f.runtime, ctx() as never);
 }
@@ -767,5 +773,81 @@ describe("GET /internal/v1/normal-intake", () => {
     expect(doWrites()).toBe(0);
     expect(f.store.put).toHaveBeenCalledTimes(kvPutCalls);
     expect(f.store.delete).toHaveBeenCalledTimes(kvDeleteCalls);
+  });
+});
+
+describe("uncertain normal-intake capacity", () => {
+  it("returns only the authenticated uncertain count and age", async () => {
+    const f = fixture();
+    await f.d.instance.normalIntakeEnqueue(intake("summary-delivery"));
+    await f.d.instance.normalIntakeSettle("summary-delivery", BODY_SHA, "uncertain");
+    const response = await worker.fetch(new Request("https://worker/internal/v1/normal-intake/uncertain", {
+      headers: { "x-corelink-internal-auth": ADMIN },
+    }), f.runtime, ctx() as never);
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(JSON.parse(body)).toMatchObject({ schema_version: 1, uncertain_count: 1 });
+    expect(body).not.toContain("summary-delivery");
+    expect(body).not.toContain(BODY_SHA);
+    expect(body).not.toContain("private-label");
+    expect(body).not.toContain("secret-");
+  });
+
+  it("requires admin authentication for summary and reconciliation", async () => {
+    const f = fixture();
+    await f.d.instance.normalIntakeEnqueue(intake("auth-delivery"));
+    await f.d.instance.normalIntakeSettle("auth-delivery", BODY_SHA, "uncertain");
+    const summary = await worker.fetch(new Request("https://worker/internal/v1/normal-intake/uncertain"), f.runtime, ctx() as never);
+    const reconcile = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "auth-delivery" }), "wrong"), f.runtime, ctx() as never);
+    expect(summary.status).toBe(401);
+    expect(reconcile.status).toBe(401);
+    expect(await f.d.instance.normalIntakeUncertainSummary()).toMatchObject({ count: 1 });
+  });
+
+  it("reclaims only committed effects and remains idempotent", async () => {
+    const f = fixture();
+    await f.d.instance.normalIntakeEnqueue(intake("reconcile-delivery"));
+    await f.d.instance.normalIntakeSettle("reconcile-delivery", BODY_SHA, "uncertain");
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({ kind: "committed", state: "COMMITTED" });
+
+    const first = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "reconcile-delivery" })), f.runtime, ctx() as never);
+    const second = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "reconcile-delivery" })), f.runtime, ctx() as never);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await first.json()).toEqual({ schema_version: 1, reconciled: true });
+    expect(await f.d.instance.normalIntakeUncertainSummary()).toEqual({ count: 0, oldest_age_ms: null });
+    expect(await f.d.instance.normalIntakeInspect("reconcile-delivery")).toMatchObject({ state: "complete" });
+    expect((await f.d.instance.normalIntakeEnqueue(intake("reconcile-delivery"))).status).toBe("duplicate");
+  });
+
+  it("reconciles a legacy uncertain row whose index predates the new census", async () => {
+    const f = fixture();
+    await f.d.instance.normalIntakeEnqueue(intake("legacy-reconcile"));
+    await f.d.instance.normalIntakeSettle("legacy-reconcile", BODY_SHA, "uncertain");
+    for (const key of [...f.d.storage.map.keys()]) if (key.startsWith("normal-inbox:v1:uncertain:")) f.d.storage.map.delete(key);
+    expect(await f.d.instance.normalIntakeUncertainSummary()).toMatchObject({ count: 1 });
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({ kind: "committed", state: "COMMITTED" });
+
+    const first = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "legacy-reconcile" })), f.runtime, ctx() as never);
+    const second = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "legacy-reconcile" })), f.runtime, ctx() as never);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await f.d.instance.normalIntakeUncertainSummary()).toEqual({ count: 0, oldest_age_ms: null });
+    expect(await f.d.instance.normalIntakeInspect("legacy-reconcile")).toMatchObject({ state: "complete" });
+  });
+
+  it("keeps missing or in-flight effects fenced and rejects malformed requests", async () => {
+    const f = fixture();
+    await f.d.instance.normalIntakeEnqueue(intake("unproven-delivery"));
+    await f.d.instance.normalIntakeSettle("unproven-delivery", BODY_SHA, "uncertain");
+    vi.spyOn(f.d.instance, "normalIntakeEffectInspect").mockResolvedValue({ kind: "missing", state: null });
+    const unproven = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "unproven-delivery" })), f.runtime, ctx() as never);
+    const malformed = await worker.fetch(reconcileRequest(JSON.stringify({ event_id: "unproven-delivery", force: true })), f.runtime, ctx() as never);
+    expect(unproven.status).toBe(409);
+    expect(malformed.status).toBe(400);
+    expect(await f.d.instance.normalIntakeUncertainSummary()).toMatchObject({ count: 1 });
+    expect(await f.d.instance.normalIntakeInspect("unproven-delivery")).toMatchObject({ state: "uncertain" });
   });
 });
