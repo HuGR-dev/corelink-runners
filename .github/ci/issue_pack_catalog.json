@@ -1,0 +1,93 @@
+{
+  "issue-566": {
+    "issue": 566,
+    "paths": [
+      "deploy/cloudflare/src/lib.ts",
+      "deploy/cloudflare/test/index.test.ts"
+    ],
+    "commands": [
+      ["npm", "ci"],
+      ["npm", "run", "typecheck"],
+      ["npm", "test", "--", "--run", "test/index.test.ts"]
+    ]
+  },
+  "issue-578": {
+    "issue": 578,
+    "paths": ["README.md"],
+    "commands": [["trusted-readme-truth-check"]]
+  },
+  "issue-580": {
+    "issue": 580,
+    "paths": ["Cargo.toml", "Cargo.lock"],
+    "commands": [
+      ["cargo", "deny", "check"],
+      ["cargo", "audit", "--deny", "warnings"],
+      ["cargo", "check", "--workspace", "--all-targets", "--locked"],
+      ["cargo", "test", "-p", "corelink-fabric-server", "--test", "server_bin", "config_pg_tls", "--locked"]
+    ]
+  },
+  "issue-586": {
+    "issue": 586,
+    "paths": [
+      "deploy/cloudflare/src/containment_effect_ledger.ts",
+      "deploy/cloudflare/src/containment_effect_ledger_records.ts",
+      "deploy/cloudflare/src/containment_effect_route.ts",
+      "deploy/cloudflare/src/index.ts",
+      "deploy/cloudflare/src/lib/normal_intake_inbox.ts",
+      "deploy/cloudflare/test/containment-effect-ledger.test.ts",
+      "deploy/cloudflare/test/containment-effect-route.test.ts",
+      "deploy/cloudflare/test/containment-redrive-drain.test.ts",
+      "deploy/cloudflare/test/normal-intake-effect-recovery.test.ts",
+      "deploy/cloudflare/test/normal-intake-inbox.test.ts",
+      "deploy/cloudflare/test/normal-intake-readback.test.ts"
+    ],
+    "commands": [
+      ["npm", "ci"],
+      ["npm", "run", "typecheck"],
+      ["npm", "run", "test:coverage"]
+    ]
+  },
+  "issue-570": {
+    "issue": 570,
+    "paths": [
+      "deploy/cloudflare/src/durable_objects/runner_dev_env.ts",
+      "deploy/cloudflare/src/lib/devenv_credentials.ts",
+      "deploy/cloudflare/test/devenv-credentials.test.ts"
+    ],
+    "commands": [
+      ["npm", "ci"],
+      ["npm", "run", "typecheck"],
+      ["npm", "test", "--", "--run", "test/devenv-credentials.test.ts"]
+    ]
+  },
+  "issue-575": {
+    "issue": 575,
+    "paths": [
+      ".github/workflows/build-cf-container-images.yml",
+      "scripts/ci/container-build-export-load.selftest.sh",
+      "scripts/ci/container-build-export-load.sh",
+      "scripts/ci/runner-image-build-validation.selftest.sh",
+      "scripts/ci/runner-image-static-check.sh",
+      "scripts/ci/verify_runner_image_disk_contract.py",
+      "scripts/ci/verify_runner_image_oci_archive.py"
+    ],
+    "commands": [
+      ["actionlint", ".github/workflows/build-cf-container-images.yml"],
+      ["bash", "scripts/ci/runner-image-static-check.selftest.sh"],
+      ["bash", "scripts/ci/runner-image-build-validation.selftest.sh"]
+    ]
+  },
+  "issue-602": {
+    "issue": 602,
+    "paths": [
+      ".github/workflows/spawn-worker-ci.yml",
+      "deploy/cloudflare/src/billing_recovery.ts",
+      "deploy/cloudflare/test/billing-recovery.test.ts"
+    ],
+    "commands": [
+      ["npm", "ci"],
+      ["npm", "run", "typecheck"],
+      ["npx", "vitest", "run", "test/billing-recovery.test.ts"]
+    ]
+  }
+}
