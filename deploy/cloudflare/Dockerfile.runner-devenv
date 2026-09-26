@@ -4,8 +4,9 @@
 # CoreLink Runner DevEnv Container (Multi-Stage Build)
 #
 # Stage 1 (clw-builder): builds clw + corelink-check-exec-server
-# Stage 2 (bin-downloader): downloads ttyd + code-server
-# Stage 3 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
+# Stage 2 (code-server-source): pinned official Coder v4.95.3 image
+# Stage 3 (bin-downloader): downloads ttyd
+# Stage 4 (runtime): Debian 12 slim + Chromium + Xvfb + noVNC + non-root user coder
 
 # ══════════════════════════════════════════════════════════════════════
 # STAGE 1: Download verified clw binary (from corelink-workspaces releases)
@@ -45,7 +46,12 @@ RUN mkdir -p /out \
  && chmod +x /out/exec-server
 
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 2: Download pre-built ttyd + code-server binaries
+# STAGE 2: Pinned official code-server v4.95.3 image (linux/amd64)
+# ══════════════════════════════════════════════════════════════════════
+FROM ghcr.io/coder/code-server:4.95.3-bookworm@sha256:f7cb22373c6967616c11605ca683c906eb1991b284b0940d9db05185e8e76647 AS code-server-source
+
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 3: Download pre-built ttyd binary
 # ══════════════════════════════════════════════════════════════════════
 FROM debian:12-slim AS bin-downloader
 
@@ -65,17 +71,8 @@ RUN curl -fsSL -o /out/ttyd \
  && echo "${TTYD_SHA256}  /out/ttyd" | sha256sum -c - \
  && chmod +x /out/ttyd
 
-# code-server v4.95.3
-ARG CODE_SERVER_VERSION=4.95.3
-ARG CODE_SERVER_SHA256=d6fe02db2e6dbefcce178d227b686d116238b1f8fb8be9be173428d00922d109
-RUN curl -fsSL -o /tmp/code-server.tar.gz \
-    "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz" \
- && echo "${CODE_SERVER_SHA256}  /tmp/code-server.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/code-server.tar.gz -C /out --strip-components=1 \
- && rm -f /tmp/code-server.tar.gz
-
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 3: Final Runtime Image
+# STAGE 4: Final Runtime Image
 # ══════════════════════════════════════════════════════════════════════
 FROM debian:12-slim
 
@@ -120,7 +117,8 @@ RUN groupadd --system --gid 1000 coder \
 COPY --from=clw-download /clw /usr/local/bin/clw
 COPY --from=exec-builder /out/exec-server /usr/local/bin/exec-server
 COPY --from=bin-downloader /out/ttyd /usr/local/bin/ttyd
-COPY --from=bin-downloader /out/bin/code-server /usr/local/bin/code-server
+COPY --from=code-server-source /usr/lib/code-server /usr/lib/code-server
+COPY --from=code-server-source /usr/bin/code-server /usr/local/bin/code-server
 
 # Entrypoint & Supervisord configs
 COPY entrypoint.sh /entrypoint.sh
