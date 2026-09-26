@@ -15,7 +15,7 @@ The scanner input must certify `scan_complete: true`; this is an operator assert
 Run locally against the saved export (the command has no network or credential options):
 
 ```sh
-node scripts/ci/reconcile-historical-settlements.mjs /secure/path/candidates.json
+node deploy/cloudflare/test/historical-settlement-reconcile.mjs /secure/path/candidates.json
 ```
 
 The single JSON receipt includes the SHA-256 of the exact input bytes and exact row/candidate counts. It contains no marker key, job ID, tenant ID, payload, token, or acknowledgement detail. Save the input and receipt together in the approved restricted evidence store; do not attach the raw snapshot to an issue or PR. Re-running the same snapshot in dry-run produces the same candidate SHA and classifications. A changed snapshot gets a different SHA.
@@ -29,7 +29,7 @@ The module also exposes a JSON-safe in-memory journal used by the synthetic host
 GitHub-hosted exact-head CI runs:
 
 ```sh
-node --test scripts/ci/reconcile-historical-settlements.mjs
+node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs
 ```
 
 The fixture matrix covers accepted and deduped evidence, explicit rejection, conflict, missing acknowledgement, duplicate rows, interrupted/restarted classification and intent staging, repeated execution, rollback, incomplete scans, and malformed/conflicting evidence. It proves the rejected fixture produces one review intent, accepted/deduped produce none, and ambiguous fixtures remain unchanged. The run is secretless and does not use live KV or provider access. DCO/signature checks remain required. No Worker TypeScript was changed, so Worker typecheck is not in this scoped pack.

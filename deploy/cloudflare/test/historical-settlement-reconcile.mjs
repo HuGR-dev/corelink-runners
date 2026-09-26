@@ -218,7 +218,7 @@ if (!process.env.NODE_TEST_CONTEXT && invokedPath === fileURLToPath(import.meta.
 }
 
 // Keep the focused fixture matrix runnable on a hosted runner with the single
-// command `node --test scripts/ci/reconcile-historical-settlements.mjs`.
+// command `node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs`.
 if (process.env.NODE_TEST_CONTEXT) {
   const fixturePath = new URL("./fixtures/issue-603/recovery-matrix.json", import.meta.url);
   const tenant = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
@@ -251,7 +251,7 @@ if (process.env.NODE_TEST_CONTEXT) {
   const matrix = { schema_version: 1, scan_complete: true, candidates: [] };
   for (const item of fixtureTemplate.cases) {
     if (item.duplicate_of) {
-      matrix.candidates.push(byName.get(item.duplicate_of));
+      matrix.candidates.push(structuredClone(byName.get(item.duplicate_of)));
       continue;
     }
     const idem = ids[item.name === "interrupted_missing_source" ? "interrupted" : item.name];
@@ -347,7 +347,7 @@ if (process.env.NODE_TEST_CONTEXT) {
   test("fails closed for incomplete scans, malformed ACKs, and conflicting duplicates", () => {
     assert.throws(() => classifySnapshot(Buffer.from(JSON.stringify({ ...matrix, scan_complete: false }))));
     const malformed = structuredClone(matrix);
-    malformed.candidates[0].acknowledgement.body.outcomes[0].index = 1;
+    for (const index of [0, 5]) malformed.candidates[index].acknowledgement.body.outcomes[0].index = 1;
     assert.equal(classifySnapshot(Buffer.from(JSON.stringify(malformed))).counts.unresolved, 3);
     const conflicting = structuredClone(matrix);
     conflicting.candidates[5].marker_value = "different";
