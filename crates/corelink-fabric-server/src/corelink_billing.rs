@@ -827,7 +827,7 @@ mod tests {
         validate_billing_ack(&response, std::slice::from_ref(&event))
             .expect("typed deduped vector is idempotent success");
 
-        let mut second = serde_json::from_str::<UsageEventData>(&body).unwrap();
+        let mut second = event.clone();
         second.idem_key = "b".repeat(64);
         let events = [event.clone(), second];
         let batch = serde_json::to_string(&events).unwrap();
