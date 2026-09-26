@@ -174,8 +174,11 @@ def validate(documents: dict[str, str]) -> list[str]:
                     value.strip("'\"") for value in runner_labels(jobs[job])
                 ] != [runner]:
                     errors.append(f"{name}: {job} must run on {runner}")
-            if "devenv-build-only" in jobs and not has_no_secret_path(jobs["devenv-build-only"]):
-                errors.append(f"{name}: hosted DevEnv proof must not read secrets or environments")
+            for hosted_job in ("validate-dispatch", "devenv-build-only"):
+                if hosted_job in jobs and not has_no_secret_path(jobs[hosted_job]):
+                    errors.append(
+                        f"{name}: hosted job {hosted_job} must not read secrets or environments"
+                    )
         elif not jobs or any(
             [value.strip("'\"") for value in runner_labels(block)] != ["corelink"]
             for block in jobs.values()
@@ -225,6 +228,20 @@ def negative_controls(documents: dict[str, str]) -> None:
              count=1,
              flags=re.MULTILINE,
          )),
+        ("dispatch guard moved to self-hosted runner", "build-cf-container-images.yml",
+         lambda s: re.sub(
+             r"(?s)(  validate-dispatch:\n.*?^    runs-on:) ubuntu-latest$",
+             r"\1 corelink",
+             s,
+             count=1,
+             flags=re.MULTILINE,
+         )),
+        ("hosted dispatch guard reads secrets", "build-cf-container-images.yml",
+         lambda s: s.replace(
+             "  validate-dispatch:\n",
+             "  validate-dispatch:\n    env:\n      PROBE: ${{ secrets.UNSAFE }}\n",
+             1,
+         )),
         ("production publisher moved to hosted runner", "build-cf-container-images.yml",
          lambda s: re.sub(
              r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1
@@ -252,7 +269,7 @@ def main() -> int:
         return 1
     if args.self_test:
         negative_controls(documents)
-        print("workflow migration contract and 14 negative controls passed")
+        print("workflow migration contract and 16 negative controls passed")
     else:
         print("workflow migration contract passed")
     return 0
