@@ -1,7 +1,7 @@
 # Trusted exact-head issue packs
 
 `.github/workflows/issue-pack-dispatch.yml` is a manual acceptance route for
-issues #566, #570, #575, #578, #580, #586, and #602. Start the workflow from the protected
+issues #566, #570, #575, #578, #580, #586, #602, #603, and #604. Start the workflow from the protected
 `main` ref. Supply the exact current PR head SHA, the current `main` SHA that
 forms the PR base, and the PR number. The job rejects any other workflow ref,
 repository, malformed SHA, stale PR head, or PR merge ref whose two parents do
@@ -35,6 +35,7 @@ are removed before candidate commands run.
 | `issue-586` | The eleven explicit containment and normal-intake source/test paths listed in `issue_pack_catalog.json` | `npm ci`; `npm run typecheck`; `npm run test:coverage` |
 | `issue-602` | `.github/workflows/spawn-worker-ci.yml`; `deploy/cloudflare/src/billing_recovery.ts`; `deploy/cloudflare/test/billing-recovery.test.ts` | `npm ci`; `npm run typecheck`; `npx vitest run test/billing-recovery.test.ts` |
 | `issue-603` | `deploy/cloudflare/test/fixtures/issue-603/recovery-matrix.json`; `deploy/cloudflare/test/historical-settlement-reconcile.mjs`; `docs/historical-settlement-recovery.md` (all three required; bound to PR #626) | `node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs` using Node 22.19.0 from the candidate repository root |
+| `issue-604` | All thirteen exact paths in the trusted catalog (bound to PR #634), including the ACK vector/manifest, Worker and Rust consumers/tests, contract docs, and `scripts/ci/secret-scan.sh` | `npm ci`; `npm run typecheck`; six focused Worker tests listed in the catalog; `corelink-fabric-server` billing ACK unit tests; `corelink-runners-contracts` conformance tests |
 
 For #575, the selftest uses stubs/fixtures and never invokes the manual image
 builder. Its receipt is authored-head code evidence only; it does not satisfy
@@ -69,6 +70,7 @@ failing step.
 | #580 (`Cargo.toml`, `Cargo.lock`) | `ci.yml`, `pg-suite.yml`, `pending-cleanup-ci.yml`, `dco.yml`, `secret-scan.yml` | Dependency resolution, deny/audit, workspace compilation, and TLS-owner test failures are candidate-owned. A failure isolated to unrelated Worker or documentation coverage remains with its owner issue. Security findings are never suppressed. |
 | #602 (`billing_recovery.ts`, its focused test, and `spawn-worker-ci.yml`) | `spawn-worker-ci.yml`, `ci.yml`, `dco.yml`, `secret-scan.yml` | Billing recovery typecheck and focused test failures are candidate-owned. An automatic run that tests the synthetic PR merge SHA does not prove the authored head; use this exact-head pack for #602. DCO and security findings remain blocking. |
 | #603 (historical settlement fixture, focused reconciliation test, and operator documentation) | `ci.yml`, `dco.yml`, `secret-scan.yml` | The exact-head Node fixture command is candidate-owned. The trusted catalog binds this pack to issue #603 and PR #626, checks live PR metadata for the dispatch-time head and base, and requires all three declared paths. DCO and security findings remain blocking. |
+| #604 (typed Worker and native billing acknowledgement consumers) | Existing Worker/Rust pull-request gates, `dco.yml`, `secret-scan.yml` | Focused ACK test failures are candidate-owned. The trusted catalog binds this pack to issue #604 and PR #634, checks live PR metadata for the dispatch-time head/base, and requires the exact thirteen candidate paths. The protected-main prepare job runs dispatcher selftests before candidate checkout; candidate processes receive no token. DCO and security findings remain blocking. |
 
 The listed PR workflows are triggered by the current `on.pull_request` path
 rules at the protected-main baseline. The pack does not disable or weaken those
@@ -93,3 +95,9 @@ result. A `workflow_dispatch` result is evidence for central merge review;
 it is not a PR status check. Keep the receipt and ordinary DCO/signature and
 required-check evidence with the issue record. No pack result authorizes a
 merge or issue closure by itself.
+
+The #604 pack is bound to PR #634 and its thirteen-path diff recorded in the
+trusted catalog. Refresh the current PR head and live `main` base SHA before
+its single dispatch; do not reuse either SHA from an earlier run. The receipt
+records that pair, the protected-main control SHA, exact changed paths, and
+the bounded Worker/native ACK command list.
