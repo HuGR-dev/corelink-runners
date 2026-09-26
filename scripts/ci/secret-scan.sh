@@ -64,6 +64,7 @@ d741e623c22c5bd6220d862bfcad6964ff2dfaa8:deploy/cloudflare/test/devenv-do.test.t
 982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:11
 982f5300a5005689f0ded5026f2e80a282981b3b:conformance/billing-ingest-ack-v1.json:generic-api-key:20
 982f5300a5005689f0ded5026f2e80a282981b3b:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
+a6173dd9b2a6d415d31cffda3ac11fa0e67409d0:deploy/cloudflare/test/devenv-do.test.ts:generic-api-key:386
 EOF
 install_scanner() {
   local archive checksum_tool
