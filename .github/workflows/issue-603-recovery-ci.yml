@@ -1,0 +1,45 @@
+name: Issue 603 historical recovery
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-603-recovery-ci.yml'
+      - 'deploy/cloudflare/test/historical-settlement-reconcile.mjs'
+      - 'deploy/cloudflare/test/fixtures/issue-603/recovery-matrix.json'
+      - 'docs/historical-settlement-recovery.md'
+
+permissions:
+  contents: read
+
+jobs:
+  focused-recovery-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Assert exact candidate checkout
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22.19.0
+      - name: Run issue 603 offline recovery fixtures
+        id: focused
+        run: node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs
+      - name: Record exact-head result
+        if: always()
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TEST_OUTCOME: ${{ steps.focused.outcome }}
+        run: |
+          {
+            echo '## Issue 603 focused recovery CI'
+            echo "- Candidate head: \`$HEAD_SHA\`"
+            echo "- PR base: \`$BASE_SHA\`"
+            echo '- Command: `node --test deploy/cloudflare/test/historical-settlement-reconcile.mjs`'
+            echo "- Result: $TEST_OUTCOME"
+          } >> "$GITHUB_STEP_SUMMARY"

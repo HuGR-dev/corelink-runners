@@ -1,9 +1,11 @@
 {
   "schema_version": 1,
+  "expected_tenant": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "cases": [
     { "name": "accepted", "job_id": "job-accepted", "outcome": "accepted", "http_status": 202 },
     { "name": "deduped", "job_id": "job-deduped", "outcome": "deduped", "http_status": 202 },
     { "name": "rejected", "job_id": "job-rejected", "outcome": "rejected", "http_status": 422 },
+    { "name": "rejected_second", "job_id": "job-rejected-second", "outcome": "rejected", "http_status": 422 },
     { "name": "conflict", "job_id": "job-conflict", "outcome": "conflict", "http_status": 409 },
     { "name": "missing_ack", "job_id": "job-missing", "outcome": null, "http_status": null },
     { "name": "duplicate_accepted", "duplicate_of": "accepted" },
