@@ -133,7 +133,16 @@ export class RunnerDevEnvDO extends Container<any> {
       const schedules = typeof this.listSchedules === "function"
         ? await this.listSchedules<{ sessionUuid: string }>("expireAuthorizedSession")
         : [];
-      if (!schedules.some((schedule) => schedule.payload?.sessionUuid === sessionUuid)) {
+      const now = Date.now();
+      const hasFutureConsumer = schedules.some((schedule) => {
+        // Container schedule `time` is Unix seconds. A due row remains visible while its callback runs,
+        // but the SDK deletes it after return, so only a future retry no later than this backoff counts.
+        const scheduledAtMs = schedule.time * 1000;
+        return schedule.callback === "expireAuthorizedSession" &&
+          schedule.payload?.sessionUuid === sessionUuid &&
+          Number.isFinite(schedule.time) && scheduledAtMs > now && scheduledAtMs <= retryAtMs;
+      });
+      if (!hasFutureConsumer) {
         await this.schedule(new Date(retryAtMs), "expireAuthorizedSession", { sessionUuid });
       }
       this.cleanupRetryScheduleFailed = false;
