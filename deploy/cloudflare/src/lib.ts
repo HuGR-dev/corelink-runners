@@ -882,61 +882,33 @@ export async function listOrphanRunnerJobs(
   configured: string | undefined,
   minAgeMs: number,
   nowMs: number,
-): Promise<{ jobId: string; labels: string[] }[]> {
-  const gh = async (path: string): Promise<unknown> => {
-    const r = await fetch(`https://api.github.com${path}`, {
-      headers: {
-        authorization: `Bearer ${env.GITHUB_RECONCILER_TOKEN ?? env.GITHUB_MINT_TOKEN ?? ""}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "corelink-spawn-worker",
-      },
-    });
-    if (!r.ok) throw new Error(`GH ${path} ${r.status}`);
-    return r.json();
-  };
+): Promise<GitHubScanArray<{ jobId: string; labels: string[] }>> {
   try {
-    const runs: GhRun[] = [];
-    let runCursor: string | undefined;
-    for (let page = 0; page < 20; page++) {
-      const query = runCursor
-        ? `?status=queued&per_page=30&after=${encodeURIComponent(runCursor)}`
-        : "?status=queued&per_page=30";
-      const pageBody = (await gh(`/repos/${repo}/actions/runs${query}`)) as {
-        workflow_runs?: GhRun[];
-        next_cursor?: string | null;
-        next_page?: string | null;
-      };
-      runs.push(...(pageBody.workflow_runs ?? []));
-      const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
-      if (next == null || next === "") break;
-      if (typeof next !== "string" || next === runCursor || page === 19) return [];
-      runCursor = next;
+    const budget: GitHubScanBudget = {
+      requestsLeft: GITHUB_SCAN_MAX_REQUESTS,
+      deadlineMs: Date.now() + GITHUB_SCAN_MAX_DURATION_MS,
+    };
+    const runs = await githubRestPages<GhRun>(
+      `/repos/${repo}/actions/runs?status=queued&per_page=30`, "workflow_runs",
+      env.GITHUB_RECONCILER_TOKEN ?? env.GITHUB_MINT_TOKEN ?? "", budget,
+    );
+    if (!runs.complete) {
+      console.log(`reconciler list incomplete for ${repo} (backstop, skipping): ${runs.reason}`);
+      return scanArray([], false, runs.reason);
     }
     const orphans: { jobId: string; labels: string[] }[] = [];
-    for (const run of runs) {
+    for (const run of runs.items) {
       const age = nowMs - Date.parse(run.created_at);
       if (!Number.isFinite(age) || age < minAgeMs) continue; // too fresh: leave it to the webhook
-      const jobs: GhJob[] = [];
-      let jobCursor: string | undefined;
-      for (let page = 0; page < 20; page++) {
-        // Keep the original first-page URL byte-stable; subsequent pages use
-        // the provider cursor. This also avoids changing the live seam for
-        // installations whose GitHub proxy only recognizes the canonical path.
-        const query = jobCursor
-          ? `?per_page=100&after=${encodeURIComponent(jobCursor)}`
-          : "";
-        const pageBody = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs${query}`)) as {
-          jobs?: GhJob[];
-          next_cursor?: string | null;
-          next_page?: string | null;
-        };
-        jobs.push(...(pageBody.jobs ?? []));
-        const next = pageBody.next_cursor ?? pageBody.next_page ?? null;
-        if (next == null || next === "") break;
-        if (typeof next !== "string" || next === jobCursor || page === 19) return [];
-        jobCursor = next;
+      const jobs = await githubRestPages<GhJob>(
+        `/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`, "jobs",
+        env.GITHUB_RECONCILER_TOKEN ?? env.GITHUB_MINT_TOKEN ?? "", budget,
+      );
+      if (!jobs.complete) {
+        console.log(`reconciler list incomplete for ${repo} (backstop, skipping): ${jobs.reason}`);
+        return scanArray([], false, jobs.reason);
       }
-      for (const j of jobs) {
+      for (const j of jobs.items) {
         const matched = matchManagedLabels(j.labels ?? [], configured);
         // "runnerless" = no runner assigned. GitHub's Actions jobs API reports an
         // unassigned queued job as `runner_id: 0` (observed live 2026-07-20 — NOT
@@ -952,13 +924,86 @@ export async function listOrphanRunnerJobs(
         }
       }
     }
-    return [...new Map(orphans.map((job) => [job.jobId, job])).values()].sort((a, b) =>
+    return scanArray([...new Map(orphans.map((job) => [job.jobId, job])).values()].sort((a, b) =>
       a.jobId.localeCompare(b.jobId, undefined, { numeric: true }),
-    );
+    ), true);
   } catch (e) {
     console.log(`reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`);
-    return [];
+    return scanArray([], false, (e as Error).message);
   }
+}
+
+const GITHUB_REST_ORIGIN = "https://api.github.com";
+const GITHUB_SCAN_MAX_PAGES = 20;
+const GITHUB_SCAN_MAX_REQUESTS = 200;
+const GITHUB_SCAN_MAX_DURATION_MS = 45_000;
+type GitHubScanResult<T> = { items: T[]; complete: true } | { items: []; complete: false; reason: string };
+type GitHubScanArray<T> = T[] & { complete: boolean; reason?: string };
+type GitHubScanBudget = { requestsLeft: number; deadlineMs: number };
+function scanArray<T>(items: T[], complete: boolean, reason?: string): GitHubScanArray<T> {
+  Object.defineProperty(items, "complete", { value: complete, enumerable: false });
+  if (reason) Object.defineProperty(items, "reason", { value: reason, enumerable: false });
+  return items as GitHubScanArray<T>;
+}
+
+/** Follow only provider-issued next links for this exact REST resource. */
+async function githubRestPages<T>(
+  path: string,
+  field: string,
+  token: string,
+  budget: GitHubScanBudget,
+): Promise<GitHubScanResult<T>> {
+  const initial = new URL(path, GITHUB_REST_ORIGIN);
+  const resourcePath = initial.pathname;
+  let nextUrl: URL | null = initial;
+  const seen = new Set<string>();
+  const items: T[] = [];
+  for (let page = 0; nextUrl && page < GITHUB_SCAN_MAX_PAGES; page++) {
+    const remainingMs = budget.deadlineMs - Date.now();
+    if (budget.requestsLeft <= 0) return { items: [], complete: false, reason: "total request budget exhausted" };
+    if (remainingMs <= 0) return { items: [], complete: false, reason: "scan time budget exhausted" };
+    if (nextUrl.origin !== GITHUB_REST_ORIGIN || nextUrl.pathname !== resourcePath || seen.has(nextUrl.href)) {
+      return { items: [], complete: false, reason: "invalid, cross-origin, or cyclic Link" };
+    }
+    seen.add(nextUrl.href);
+    budget.requestsLeft--;
+    const response = await fetch(nextUrl.href, {
+      signal: AbortSignal.timeout(Math.min(10_000, remainingMs)),
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "user-agent": "corelink-spawn-worker",
+      },
+    });
+    if (!response.ok) return { items: [], complete: false, reason: `GH ${response.status}` };
+    const body = await response.json() as Record<string, unknown>;
+    const values = body[field];
+    if (!Array.isArray(values)) return { items: [], complete: false, reason: `missing ${field} page data` };
+    items.push(...values as T[]);
+    const link = response.headers.get("Link");
+    if (!link) { nextUrl = null; break; }
+    const nextLinks = [...link.matchAll(/<([^>]*)>\s*;\s*rel=(?:"([^"]*)"|([^;,\s]*))/g)]
+      .filter((match) => (match[2] ?? match[3])?.split(/\s+/).includes("next"));
+    if (nextLinks.length > 1) return { items: [], complete: false, reason: "ambiguous Link next relation" };
+    if (nextLinks.length === 0) {
+      if (/rel\s*=\s*"?next\b/i.test(link)) return { items: [], complete: false, reason: "malformed Link next relation" };
+      nextUrl = null;
+      break;
+    }
+    try { nextUrl = new URL(nextLinks[0][1], nextUrl); }
+    catch { return { items: [], complete: false, reason: "malformed Link URL" }; }
+    if (nextUrl.origin !== GITHUB_REST_ORIGIN || nextUrl.pathname !== resourcePath || !nextUrl.searchParams.has("page")) {
+      return { items: [], complete: false, reason: "Link next escaped expected GitHub REST resource" };
+    }
+    const comparableParams = (url: URL) => [...url.searchParams.entries()]
+      .filter(([key]) => key !== "page")
+      .sort(([aKey, aValue], [bKey, bValue]) => aKey.localeCompare(bKey) || aValue.localeCompare(bValue));
+    if (JSON.stringify(comparableParams(nextUrl)) !== JSON.stringify(comparableParams(initial))) {
+      return { items: [], complete: false, reason: "Link next changed REST query scope" };
+    }
+    if (page === GITHUB_SCAN_MAX_PAGES - 1) return { items: [], complete: false, reason: "pagination page budget exhausted" };
+  }
+  return { items, complete: true };
 }
 
 // ── Dead-letter orphan retry (W7/F8) — WARM re-drive of a failed spawn, ANY repo ─
@@ -1652,8 +1697,9 @@ interface GhCompletedJob {
  * `settleMs` (so an in-flight `completed` webhook for the same job isn't
  * double-raced) but no older than `lookbackMs` (bounds the scan). Mirrors
  * `listOrphanRunnerJobs`'s shape (completed RUNS → their jobs), just over
- * completed runs instead of queued ones. Best-effort: any GitHub error returns
- * `[]` for this repo (the reconciler is a backstop, never itself a gate).
+ * completed runs instead of queued ones. Best-effort: a GitHub error returns
+ * an empty array with `complete=false` for this repo (the reconciler is a
+ * backstop, never itself a gate); a complete empty scan has `complete=true`.
  */
 export async function listCompletedRunnerJobs(
   env: ReconcilerEnv,
@@ -1662,28 +1708,29 @@ export async function listCompletedRunnerJobs(
   lookbackMs: number,
   settleMs: number,
   nowMs: number,
-): Promise<{ jobId: string; startedMs: number; completedMs: number }[]> {
-  const gh = async (path: string): Promise<unknown> => {
-    const r = await fetch(`https://api.github.com${path}`, {
-      headers: {
-        authorization: `Bearer ${env.GITHUB_MINT_TOKEN ?? ""}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "corelink-spawn-worker",
-      },
-    });
-    if (!r.ok) throw new Error(`GH ${path} ${r.status}`);
-    return r.json();
-  };
+): Promise<GitHubScanArray<{ jobId: string; startedMs: number; completedMs: number }>> {
   try {
-    const runs = (await gh(`/repos/${repo}/actions/runs?status=completed&per_page=30`)) as {
-      workflow_runs?: GhRun[];
+    const budget: GitHubScanBudget = {
+      requestsLeft: GITHUB_SCAN_MAX_REQUESTS,
+      deadlineMs: Date.now() + GITHUB_SCAN_MAX_DURATION_MS,
     };
+    const runs = await githubRestPages<GhRun>(
+      `/repos/${repo}/actions/runs?status=completed&per_page=30`, "workflow_runs", env.GITHUB_MINT_TOKEN ?? "", budget,
+    );
+    if (!runs.complete) {
+      console.log(`billing reconciler list incomplete for ${repo} (backstop, skipping): ${runs.reason}`);
+      return scanArray([], false, runs.reason);
+    }
     const out: { jobId: string; startedMs: number; completedMs: number }[] = [];
-    for (const run of runs.workflow_runs ?? []) {
-      const jobs = (await gh(`/repos/${repo}/actions/runs/${run.id}/jobs`)) as {
-        jobs?: GhCompletedJob[];
-      };
-      for (const j of jobs.jobs ?? []) {
+    for (const run of runs.items) {
+      const jobs = await githubRestPages<GhCompletedJob>(
+        `/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`, "jobs", env.GITHUB_MINT_TOKEN ?? "", budget,
+      );
+      if (!jobs.complete) {
+        console.log(`billing reconciler list incomplete for ${repo} (backstop, skipping): ${jobs.reason}`);
+        return scanArray([], false, jobs.reason);
+      }
+      for (const j of jobs.items) {
         if (j.status !== "completed" || !matchManagedLabels(j.labels ?? [], configured)) continue;
         const completedMs = j.completed_at ? Date.parse(j.completed_at) : NaN;
         const startedMs = j.started_at ? Date.parse(j.started_at) : NaN;
@@ -1693,12 +1740,12 @@ export async function listCompletedRunnerJobs(
         out.push({ jobId: String(j.id), startedMs, completedMs });
       }
     }
-    return out;
+    return scanArray(out, true);
   } catch (e) {
     console.log(
       `billing reconciler list failed for ${repo} (backstop, skipping): ${(e as Error).message}`,
     );
-    return [];
+    return scanArray([], false, (e as Error).message);
   }
 }
 

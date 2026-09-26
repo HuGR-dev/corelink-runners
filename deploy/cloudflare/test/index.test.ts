@@ -514,6 +514,7 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
       { jobId: "111", labels: [LABEL] },
       { jobId: "115", labels: [LABEL] },
     ]);
+    expect(r.complete).toBe(true);
   });
 
   it("REGRESSION (2026-07-20 prod stall): a queued job GitHub reports as runner_id:0 is an orphan, not skipped", async () => {
@@ -565,6 +566,69 @@ describe("re-drive reconciler (parseReconcilerRepos + listOrphanRunnerJobs)", ()
     vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
     const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
     expect(r).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
+  it("follows REST Link pages for runs and 101+ jobs without duplicating discoveries", async () => {
+    const calls: string[] = [];
+    const firstJobs = Array.from({ length: 100 }, (_, i) => ({
+      id: 1000 + i, status: "queued", runner_id: 1, labels: [LABEL],
+    }));
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push(url.href);
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer t");
+      if (url.pathname.endsWith("/actions/runs") && url.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 2, created_at: OLD }] }));
+      }
+      if (url.pathname.endsWith("/actions/runs")) {
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 1, created_at: OLD }] }), {
+          headers: { Link: '<https://api.github.com/repos/o/r/actions/runs?status=queued&per_page=30&page=2>; rel="next"' },
+        });
+      }
+      const runId = Number(url.pathname.match(/\/runs\/(\d+)\/jobs/)?.[1]);
+      if (runId === 1 && url.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify({ jobs: [{ id: 1101, status: "queued", runner_id: 0, labels: [LABEL] }] }));
+      }
+      if (runId === 1) {
+        return new Response(JSON.stringify({ jobs: firstJobs }), {
+          headers: { Link: '<https://api.github.com/repos/o/r/actions/runs/1/jobs?per_page=100&page=2>; rel="next"' },
+        });
+      }
+      return new Response(JSON.stringify({ jobs: [{ id: 2201, status: "queued", runner_id: 0, labels: [LABEL] }] }));
+    }));
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r.complete).toBe(true);
+    expect(r.map(({ jobId }) => jobId)).toEqual(["1101", "2201"]);
+    expect(calls).toHaveLength(5);
+    expect(calls.some((url) => new URL(url).searchParams.get("after"))).toBe(false);
+  });
+
+  it.each([
+    ["cross-origin", '<https://attacker.invalid/repos/o/r/actions/runs?page=2>; rel="next"'],
+    ["cyclic", '<https://api.github.com/repos/o/r/actions/runs?status=queued&per_page=30>; rel="next"'],
+    ["malformed", '<https://api.github.com/repos/o/r/actions/runs?page=2; rel="next"'],
+  ])("reports an incomplete %s Link scan as empty", async (_kind, link) => {
+    const calls: Array<{ url: string; authorization: string | null }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      calls.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") });
+      return new Response(JSON.stringify({ workflow_runs: [{ id: 1, created_at: OLD }] }), {
+        headers: { Link: link },
+      });
+    }));
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual([]);
+    expect(r.complete).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].authorization).toBe("Bearer t");
+    expect(calls[0].url).toContain("api.github.com");
+  });
+
+  it.each([429, 503])( "does not report a rate-limited or failed page as a complete empty scan (%i)", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("unavailable", { status })));
+    const r = await listOrphanRunnerJobs({ GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL, 90_000, NOW);
+    expect(r).toEqual([]);
+    expect(r.complete).toBe(false);
   });
 });
 
@@ -630,6 +694,43 @@ describe("billing reconciler (listCompletedRunnerJobs + reconcileCompletedJobBil
       NOW,
     );
     expect(r).toEqual([]);
+    expect(r.complete).toBe(false);
+  });
+
+  it("paginates the sibling completed-job caller and distinguishes a complete empty scan", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(String(input));
+      calls.push(url.href);
+      if (url.pathname.endsWith("/actions/runs") && url.searchParams.get("page") === "2") {
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 2 }] }));
+      }
+      if (url.pathname.endsWith("/actions/runs")) {
+        return new Response(JSON.stringify({ workflow_runs: [{ id: 1 }] }), {
+          headers: { Link: '<https://api.github.com/repos/o/r/actions/runs?status=completed&per_page=30&page=2>; rel="next"' },
+        });
+      }
+      const runId = Number(url.pathname.match(/\/runs\/(\d+)\/jobs/)?.[1]);
+      if (runId === 1) return new Response(JSON.stringify({ jobs: [] }));
+      return new Response(JSON.stringify({ jobs: [{
+        id: 222, status: "completed", started_at: STARTED, completed_at: SETTLED, labels: [LABEL],
+      }] }));
+    }));
+    const r = await listCompletedRunnerJobs(
+      { GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL,
+      BILLING_RECONCILE_LOOKBACK_MS, RECONCILE_MIN_AGE_MS, NOW,
+    );
+    expect(r.complete).toBe(true);
+    expect(r.map(({ jobId }) => jobId)).toEqual(["222"]);
+    expect(calls).toHaveLength(4);
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ workflow_runs: [] }))));
+    const empty = await listCompletedRunnerJobs(
+      { GITHUB_MINT_TOKEN: "t" }, "o/r", LABEL,
+      BILLING_RECONCILE_LOOKBACK_MS, RECONCILE_MIN_AGE_MS, NOW,
+    );
+    expect(empty).toEqual([]);
+    expect(empty.complete).toBe(true);
   });
 
   const fullEnv = {

@@ -100,7 +100,7 @@ describe("atomic redrive reservation state machine", () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("generate-jitconfig")) { generated(); return new Response(JSON.stringify({ encoded_jit_config: "jit", runner: { id: 7 } }), { status: 200 }); }
-      if (url.endsWith("/jobs")) return new Response(JSON.stringify({ jobs: [{ id: 123, status: "queued", runner_id: 0, labels: ["corelink"] }] }), { status: 200 });
+      if (new URL(url).pathname.endsWith("/jobs")) return new Response(JSON.stringify({ jobs: [{ id: 123, status: "queued", runner_id: 0, labels: ["corelink"] }] }), { status: 200 });
       return new Response(JSON.stringify({ workflow_runs: [{ id: 1, created_at: old }] }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchSpy);
