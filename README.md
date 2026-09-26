@@ -160,10 +160,9 @@ cargo deny check
 cargo audit --deny warnings
 ```
 
-All five pass on CI (`runs-on: corelink` — the self-hosted ephemeral Firecracker
-fleet, per `.github/workflows/ci.yml`) before merge. Never
-`gh pr merge --auto` — the CI-green-before-merge rule is manual discipline (GitHub
-free plan + private repo, no branch protection).
+These five gates run on pull requests and `main` pushes. The latest recorded run
+passed on 2026-09-26 ([#1305](https://github.com/HuGR-dev/corelink-runners/actions/runs/36207381015));
+CI success is not currently enforced before merge.
 
 ## Key documents
 
